@@ -57,7 +57,7 @@ caller's transaction rather than opening an independent one -- see
 ``app/tasks/_postgres_lock.py``'s ``postgres_session_advisory_lock`` (commits
 only the advisory-lock acquisition, never business data), and
 ``engine.begin()`` against the external RADIUS accounting database (a
-different engine entirely, e.g. ``app/services/radius.py``/``usage.py``).
+different engine entirely, e.g. ``radius_population.py``/``radius_reconciliation.py``/``usage.py``).
 """
 
 from __future__ import annotations
