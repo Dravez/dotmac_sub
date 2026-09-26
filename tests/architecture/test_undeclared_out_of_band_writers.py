@@ -57,16 +57,12 @@ BASELINE: dict[str, str] = {
         "legacy out-of-band writer (listed in "
         "test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS)"
     ),
-    # -- Same technique as the legacy writer above (queues a staff alert on a
-    # -- genuinely independent connection so its fate never depends on the
-    # -- caller's transaction), but NOT yet named in either list. This is a
-    # -- real gap this scanner surfaces rather than papers over: it behaves
-    # -- exactly like an out-of-band evidence writer and should be added to
-    # -- KNOWN_LEGACY_OUT_OF_BAND_WRITERS (or migrated to the declared mode)
-    # -- in a follow-up; it is listed here, not silently exempted.
+    # -- Same technique as the legacy writer above (a staff alert on a genuinely
+    # -- independent connection). Surfaced by this scanner and now listed in
+    # -- KNOWN_LEGACY_OUT_OF_BAND_WRITERS rather than silently baselined.
     "app/services/prepaid_service_renewals.py::_finalize_scheduled_renewal_summary": (
-        "undeclared out-of-band writer sharing the legacy technique above -- "
-        "genuine follow-up, not yet added to KNOWN_LEGACY_OUT_OF_BAND_WRITERS"
+        "legacy out-of-band writer (listed in "
+        "test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS)"
     ),
     # -- Scheduled-job / background-worker pattern: a Celery task or scheduled
     # -- runner opens its own session for the lifetime of ONE scheduled
@@ -404,3 +400,22 @@ class TestScannerSensitivity:
         hits = find_out_of_band_writers(tmp_path)
 
         assert "app/services/caller_owned.py::write_with_caller_session" not in hits
+
+
+def test_every_known_legacy_out_of_band_writer_is_in_the_baseline() -> None:
+    """The ratchet's legacy list and this detector's baseline must agree, so a
+    legacy writer can neither be listed without being detected nor detected
+    without being listed as legacy."""
+    from tests.architecture.test_out_of_band_evidence_ratchet import (
+        KNOWN_LEGACY_OUT_OF_BAND_WRITERS,
+    )
+
+    missing = sorted(set(KNOWN_LEGACY_OUT_OF_BAND_WRITERS) - set(BASELINE))
+    assert not missing, f"legacy writers absent from BASELINE: {missing}"
+    legacy_in_baseline = sorted(
+        key for key, why in BASELINE.items() if why.startswith("legacy out-of-band")
+    )
+    assert legacy_in_baseline == sorted(KNOWN_LEGACY_OUT_OF_BAND_WRITERS), (
+        "BASELINE entries classified as legacy out-of-band writers must match "
+        "KNOWN_LEGACY_OUT_OF_BAND_WRITERS exactly"
+    )

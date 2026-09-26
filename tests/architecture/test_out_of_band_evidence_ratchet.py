@@ -35,6 +35,10 @@ APPROVED_OUT_OF_BAND_EVIDENCE: Mapping[str, str] = {
 KNOWN_LEGACY_OUT_OF_BAND_WRITERS: tuple[str, ...] = (
     "app/services/prepaid_service_renewals.py::_record_review_item_out_of_band",
     "app/services/nas/_mikrotik.py::_record_mikrotik_auth_attempt",
+    # Found by tests/architecture/test_undeclared_out_of_band_writers.py: a
+    # retried, independent-connection staff-alert summary write that copies the
+    # review-item technique. Not an observation collector; listed, not migrated.
+    "app/services/prepaid_service_renewals.py::_finalize_scheduled_renewal_summary",
 )
 
 _MODE = TransactionMode.OUT_OF_BAND_EVIDENCE.value
