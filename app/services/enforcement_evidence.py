@@ -261,6 +261,14 @@ class FailureClassTotal:
     count: int
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Aggregates (``max``/``min``) can drop the column's timezone on some
+    dialects; the columns hold UTC, so a naive result is UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 @dataclass(frozen=True)
 class NasEnforcementSummary:
     """Per-NAS evidence rollup within the report window.
@@ -433,8 +441,8 @@ def enforcement_evidence_shadow_report(
             nas_name=row.nas_name,
             failed_count=int(row.failed_count or 0),
             applied_count=int(row.applied_count or 0),
-            last_success_at=row.last_success_at,
-            oldest_first_failed_at=row.oldest_first_failed_at,
+            last_success_at=_as_utc(row.last_success_at),
+            oldest_first_failed_at=_as_utc(row.oldest_first_failed_at),
         )
         for row in db.execute(per_nas_stmt)
     )
