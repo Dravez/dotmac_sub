@@ -22,16 +22,25 @@ registry declaration (ADR 0017), or it needs classifying into BASELINE with
 a reason. A BASELINE entry that stops matching must be removed, so this
 ratchet only shrinks.
 
+Now covered, alongside the original ``<x>.create_session()`` (+ module-level
+alias) + literal ``.commit()`` shape: ``from app.db import SessionLocal``
+(optionally ``as X``) called as ``SessionLocal()`` and committed in the same
+function; any module-level ``NAME = sessionmaker(...)`` factory called and
+committed the same way; and the auto-committing ``with
+db_session_adapter.session()`` / ``advisory_lock()`` blocks, which commit on
+normal exit with no visible ``.commit()`` at the use site and so are flagged
+by entering the context manager alone. ``owner_command_session()`` and
+``read_session()`` are deliberately NOT flagged -- read
+``app/services/db_session_adapter.py``: the former only rolls back
+defensively (never commits) so the caller-registered command stays the sole
+transaction owner, and the latter always rolls back; neither is an
+out-of-band writer.
+
 Stated limitations (an unmonitored region, not an exemption; follow-up owed):
-the scan recognises only ``<x>.create_session()`` and module-level aliases of
-it, followed by a literal ``.commit()`` in the same function. It does NOT yet
-recognise ``from app.db import SessionLocal; SessionLocal()``, other
-``sessionmaker``-produced factories or function-local aliases, the
-auto-committing ``with db_session_adapter.session()`` /
-``owner_command_session()`` / ``advisory_lock()`` blocks (no visible
-``.commit()``), or a session opened in one function and committed in another.
-Together those forms appear in roughly 60 files and need classification before
-they can be ratcheted.
+the scan still does not recognise a FUNCTION-LOCAL alias of a session
+factory (only a module-level one), nor a session opened in one function and
+committed in another (cross-function commit) -- ADR 0017's own ratchet test
+docstring names this gap too.
 """
 
 from __future__ import annotations
@@ -197,6 +206,176 @@ BASELINE: dict[str, str] = {
         "adapter-owned session lifecycle (task/runner)"
     ),
     "app/tasks/usage.py::evaluate_fup_rules": "adapter-owned session lifecycle (task/runner)",
+
+    # -- New hits from the SessionLocal()/sessionmaker and auto-committing
+    # -- context-manager shapes (session_local_commit, auto_commit_session,
+    # -- auto_commit_advisory_lock): ordinary Celery task / scheduled-job
+    # -- entry points, each opening its own session for the lifetime of ONE
+    # -- invocation. Same category as the pre-existing task/runner baseline
+    # -- entries above, just reached via db_session_adapter.session()/
+    # -- .advisory_lock() instead of a bare create_session()+commit().
+    "app/tasks/admin_alerts.py::evaluate_infrastructure_alerts": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ai_operations.py::expire_stale_insights": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/alert_evaluation.py::evaluate_alert_rules": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/arrangements.py::check_overdue_arrangements": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/autopay.py::charge_due_invoices": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/bandwidth.py::cleanup_hot_data": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/bandwidth.py::process_bandwidth_stream": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/campaigns.py::process_due_campaign_steps": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/campaigns.py::process_due_campaigns": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/campaigns.py::send_campaign_batch": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/catalog.py::apply_due_subscription_changes": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/catalog.py::apply_due_subscription_status_commands": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/catalog.py::expire_subscriptions": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/catalog.py::send_expiry_reminders": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/channel_health.py::observe_channel_health": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/customer_impact_metrics.py::export_customer_impact_metrics": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/dotmac_erp_outbox.py::reconcile_erp_staff_access": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/events.py::cleanup_old_events": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/events.py::dispatch_pending_events": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/events.py::mark_stale_processing_events": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/events.py::retry_failed_events": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/exports.py::run_export_job": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/exports.py::run_scheduled_export": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/infrastructure_availability.py::prune_infrastructure_availability": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/infrastructure_availability.py::snapshot_infrastructure_availability": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/integration_delivery.py::deliver_integration_event": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/integration_delivery.py::deliver_meta_lead_conversion": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/integration_inbox.py::reclaim_stale_claims": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/integrations.py::run_integration_job": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ip_utilization.py::prune_ip_pool_utilization_snapshots": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ip_utilization.py::snapshot_ip_pool_utilization": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/monitoring_cleanup.py::cleanup_old_device_metrics": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/monitoring_cleanup.py::sync_inventory_to_monitoring": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/monitoring_cleanup.py::sync_nas_to_monitoring": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/mrr.py::snapshot_mrr": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/network_operation_dispatch.py::publish_network_operation_dispatches": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/notifications.py::deliver_notification": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/notifications.py::deliver_notification_queue": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/olt_health_retry.py::retry_failed_olt_connections": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/olt_health_retry.py::retry_single_olt": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/olt_mac_harvest.py::run_single_olt_mac_harvest": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_bulk.py::_queue_bulk_provisioning": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_bulk.py::execute_bulk_action": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_commissioning.py::cleanup_commissioned_ont": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_commissioning.py::verify_commissioned_ont": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_firmware.py::apply_huawei_ont_firmware": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_firmware.py::verify_huawei_ont_firmware": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_provisioning.py::authorize_ont": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_provisioning.py::provision_ont": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_provisioning.py::queue_bulk_provisioning": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_reconcile.py::_close_expired_remote_access": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_reconcile.py::_reconcile_dialer_credentials": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_reconcile.py::alert_overdue_reconcile_holds": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_reconcile.py::reconcile_huawei_ont": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_reconcile.py::run_ont_reconcile_sweep": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_runtime_status.py::dispatch_huawei_ont_status": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_runtime_status.py::refresh_huawei_olt_status": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/ont_runtime_status.py::refresh_single_ont_status": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/operational_escalations.py::dispatch_operational_escalation_deliveries": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/outage_auto_notify.py::auto_dispatch_outage_notifications": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/provisioning.py::reap_stale_provisioning_runs": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/provisioning.py::retry_pending_compensation_failures": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/provisioning.py::run_bulk_activation_job": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/provisioning.py::run_service_migration_job": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/radius_health.py::run_radius_health_check": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::auto_resolve_stale_conversations": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::backfill_conversation_participants": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::process_ai_intake_sessions": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::promote_message_media_assets": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::promote_queued_conversations": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::recover_stale_ai_intake": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::release_scheduled_replies": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::repair_whatsapp_locations": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::retry_failed_outbound_messages": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::send_queue_position_notifications": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::send_reply_reminders": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/team_inbox.py::wake_due_snoozed_conversations": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/topology_outage.py::reconcile_detected_outages": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/topology_sync.py::warm_topology_status": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/topology_ufiber_link.py::run_ufiber_onu_link": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/topology_uisp.py::run_uisp_topology_sync": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/uisp_control.py::execute_uisp_apply": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/uisp_control.py::reconcile_uisp_config_readback": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/usage.py::_import_radius_accounting_locked": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/usage.py::meter_usage_into_quota": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/usage.py::notify_expiring_data_bundles": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/usage.py::reap_stale_radius_sessions": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/usage.py::run_usage_rating": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/vpn.py::run_vpn_control_job": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/vpn.py::run_vpn_health_scan": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/wireguard.py::cleanup_connection_logs": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/wireguard.py::cleanup_expired_tokens": "adapter-owned session lifecycle (task/runner)",
+    "app/services/billing/scheduled.py::refresh_billing_health_snapshot": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/credential_rotation_schedule.py::run_scheduled_credential_rotation": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/field/material_catalog_sync.py::run_erp_material_catalog_sync": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/syslog/handlers.py::_handle_autofind_event": (
+        "adapter-owned session lifecycle (task/runner): syslog listener handling one ONTAUTOFIND event synchronously; own session per event, no caller transaction to join"
+    ),
+
+    # -- Infrastructure: the session-provider machinery itself (the
+    # -- generator/method that IS create_session()+commit(), not a caller
+    # -- of it) and a durable-execution-claim decorator with its own ledger
+    # -- session, independent of the function it wraps -- same shape as
+    # -- idempotent_task's own TaskExecution ledger writes above.
+    "app/db.py::task_session": (
+        "infrastructure: legacy task-owned transaction generator (app/db.py) -- this IS the SessionLocal()+commit() definition, not a caller of it; existing callers are tracked migration debt"
+    ),
+    "app/services/db_session_adapter.py::SqlAlchemySessionAdapter.session": (
+        "infrastructure: the adapter's own auto-committing session() context-manager implementation, not a caller of it"
+    ),
+    "app/services/network_operation_dispatch.py::managed_network_operation_dispatch.decorator.wrapped": (
+        "infrastructure: durable dispatch-claim decorator wraps a device task with its own execution-claim ledger session, independent of the wrapped task"
+    ),
+
+    # -- Notification delivery adapters: each opens its own session for one
+    # -- send/availability probe. Invoked from arbitrary callers (API
+    # -- handlers, tasks), so the delivery attempt is deliberately isolated
+    # -- from whatever transaction the caller happens to hold, not a caller
+    # -- transaction it should join.
+    "app/services/notification_adapter.py::EmailProvider.is_available": (
+        "adapter-owned session lifecycle (notification delivery adapter): "
+        "own session per send/availability probe, independent of caller"
+    ),
+    "app/services/notification_adapter.py::EmailProvider.send": (
+        "adapter-owned session lifecycle (notification delivery adapter): "
+        "own session per send/availability probe, independent of caller"
+    ),
+    "app/services/notification_adapter.py::SmsProvider.is_available": (
+        "adapter-owned session lifecycle (notification delivery adapter): "
+        "own session per send/availability probe, independent of caller"
+    ),
+    "app/services/notification_adapter.py::SmsProvider.send": (
+        "adapter-owned session lifecycle (notification delivery adapter): "
+        "own session per send/availability probe, independent of caller"
+    ),
+}
+
+
+#: Shape labels a hit can be recorded under. A function can match more than
+#: one (e.g. a ``create_session()``+commit AND a nested ``with ...session()``
+#: block); ``find_out_of_band_writers_with_shapes`` reports every shape that
+#: matched so classification (and the sensitivity proofs below) can name
+#: exactly which recogniser fired.
+SHAPE_CREATE_SESSION_COMMIT = "create_session_commit"
+SHAPE_SESSION_LOCAL_COMMIT = "session_local_commit"
+SHAPE_AUTO_COMMIT_SESSION = "auto_commit_session"
+SHAPE_AUTO_COMMIT_ADVISORY_LOCK = "auto_commit_advisory_lock"
+
+#: ``with``-block context managers that commit on normal exit with no visible
+#: ``.commit()`` call at the use site (see app/services/db_session_adapter.py).
+#: ``owner_command_session()`` and ``read_session()`` are deliberately absent:
+#: neither ever calls ``.commit()`` (the former only rolls back defensively,
+#: the latter always rolls back), so they are not out-of-band writers.
+_AUTO_COMMIT_CONTEXT_MANAGERS: dict[str, str] = {
+    "session": SHAPE_AUTO_COMMIT_SESSION,
+    "advisory_lock": SHAPE_AUTO_COMMIT_ADVISORY_LOCK,
 }
 
 
@@ -225,6 +404,43 @@ def _module_create_session_aliases(module: ast.Module) -> frozenset[str]:
     return frozenset(aliases)
 
 
+def _module_session_local_aliases(module: ast.Module) -> frozenset[str]:
+    """Module-level names bound to a raw session FACTORY (not a
+    ``create_session()``-style method call): ``from app.db import
+    SessionLocal`` (optionally ``as X``), or a module-level ``NAME =
+    sessionmaker(...)`` result. Calling one of these names directly (e.g.
+    ``SessionLocal()``) opens a session the same way ``create_session()``
+    does, just through a different spelling (see app/db.py's
+    ``SessionLocal = sessionmaker(...)``).
+    """
+    aliases: set[str] = set()
+    for node in module.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "app.db":
+            for alias in node.names:
+                if alias.name == "SessionLocal":
+                    aliases.add(alias.asname or alias.name)
+        targets: list[ast.expr] | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        if targets is None or value is None:
+            continue
+        if isinstance(value, ast.Call):
+            func = value.func
+            is_sessionmaker = (isinstance(func, ast.Name) and func.id == "sessionmaker") or (
+                isinstance(func, ast.Attribute) and func.attr == "sessionmaker"
+            )
+            if is_sessionmaker:
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        aliases.add(target.id)
+    return frozenset(aliases)
+
+
 def _is_create_session_call(call: ast.Call, aliases: frozenset[str]) -> bool:
     func = call.func
     if isinstance(func, ast.Attribute) and func.attr == "create_session":
@@ -232,12 +448,33 @@ def _is_create_session_call(call: ast.Call, aliases: frozenset[str]) -> bool:
     return isinstance(func, ast.Name) and func.id in aliases
 
 
+def _is_session_local_call(call: ast.Call, aliases: frozenset[str]) -> bool:
+    """Whether ``call`` invokes a bare session-factory name, e.g. ``SessionLocal()``."""
+    func = call.func
+    return isinstance(func, ast.Name) and func.id in aliases
+
+
 def _is_commit_call(call: ast.Call) -> bool:
     return isinstance(call.func, ast.Attribute) and call.func.attr == "commit"
 
 
-def _own_body_calls_both(node: ast.AST, aliases: frozenset[str]) -> bool:
-    """Whether ``node``'s OWN body (excluding nested defs) has both calls.
+def _auto_commit_context_manager_shape(expr: ast.expr) -> str | None:
+    """Whether a ``with`` item's context expression is one of the
+    auto-committing ``db_session_adapter`` context managers, and if so which
+    shape it is. Matches on attribute name alone (like ``.create_session()``/
+    ``.commit()`` above) -- a repo-wide grep confirms ``.session()``/
+    ``.advisory_lock()`` calls in ``app/`` are exclusively
+    ``db_session_adapter.session()``/``db_session_adapter.advisory_lock()``.
+    """
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
+        return _AUTO_COMMIT_CONTEXT_MANAGERS.get(expr.func.attr)
+    return None
+
+
+def _own_body_shapes(
+    node: ast.AST, cs_aliases: frozenset[str], sl_aliases: frozenset[str]
+) -> frozenset[str]:
+    """Every shape matched by ``node``'s OWN body (excluding nested defs).
 
     A nested function's/lambda's/class's body is a separate scope reported
     as its own hit, so descent stops there -- otherwise an outer function
@@ -246,32 +483,49 @@ def _own_body_calls_both(node: ast.AST, aliases: frozenset[str]) -> bool:
     """
     has_create = False
     has_commit = False
+    has_session_local = False
+    shapes: set[str] = set()
 
     def walk(current: ast.AST) -> None:
-        nonlocal has_create, has_commit
+        nonlocal has_create, has_commit, has_session_local
         for child in ast.iter_child_nodes(current):
             if isinstance(
                 child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
             ):
                 continue
+            if isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    shape = _auto_commit_context_manager_shape(item.context_expr)
+                    if shape is not None:
+                        shapes.add(shape)
             if isinstance(child, ast.Call):
-                if _is_create_session_call(child, aliases):
+                if _is_create_session_call(child, cs_aliases):
                     has_create = True
+                if _is_session_local_call(child, sl_aliases):
+                    has_session_local = True
                 if _is_commit_call(child):
                     has_commit = True
             walk(child)
 
     walk(node)
-    return has_create and has_commit
+    if has_create and has_commit:
+        shapes.add(SHAPE_CREATE_SESSION_COMMIT)
+    if has_session_local and has_commit:
+        shapes.add(SHAPE_SESSION_LOCAL_COMMIT)
+    return frozenset(shapes)
 
 
-def find_out_of_band_writers(root: Path) -> list[str]:
-    """Pure scanner: every ``app/**/*.py`` function that opens its own
-    session (directly or via a module-level alias) AND commits it, within
-    its own body. Returns sorted ``"path::qualname"`` strings, ``qualname``
-    dotted through enclosing classes/functions.
+def find_out_of_band_writers_with_shapes(root: Path) -> dict[str, frozenset[str]]:
+    """Pure scanner: every ``app/**/*.py`` function that, in its OWN body
+    (not a nested function's), either (a) opens its own session -- via
+    ``create_session()``/a module-level alias of it, or via a bare
+    ``SessionLocal()``-style factory call -- AND commits it, or (b) enters
+    one of the auto-committing ``db_session_adapter`` context managers
+    (``session()``/``advisory_lock()``). Maps each hit's ``"path::qualname"``
+    (``qualname`` dotted through enclosing classes/functions) to the set of
+    shape labels (``SHAPE_*`` above) that matched it.
     """
-    hits: list[str] = []
+    hits: dict[str, frozenset[str]] = {}
     app_root = root / "app"
     for path in sorted(app_root.rglob("*.py")):
         try:
@@ -279,31 +533,46 @@ def find_out_of_band_writers(root: Path) -> list[str]:
             tree = ast.parse(source, filename=str(path))
         except (SyntaxError, UnicodeDecodeError):
             continue
-        aliases = _module_create_session_aliases(tree)
+        cs_aliases = _module_create_session_aliases(tree)
+        sl_aliases = _module_session_local_aliases(tree)
         rel = path.relative_to(root).as_posix()
-        hits.extend(_scan_module_functions(tree, aliases, rel))
-    return sorted(hits)
+        hits.update(_scan_module_functions(tree, cs_aliases, sl_aliases, rel))
+    return hits
+
+
+def find_out_of_band_writers(root: Path) -> list[str]:
+    """Sorted ``"path::qualname"`` hits from
+    :func:`find_out_of_band_writers_with_shapes`, dropping the per-hit shape
+    detail -- this is the list every BASELINE/APPROVED comparison below
+    checks against.
+    """
+    return sorted(find_out_of_band_writers_with_shapes(root))
 
 
 def _scan_module_functions(
-    node: ast.AST, aliases: frozenset[str], rel: str, stack: list[str] | None = None
-) -> list[str]:
+    node: ast.AST,
+    cs_aliases: frozenset[str],
+    sl_aliases: frozenset[str],
+    rel: str,
+    stack: list[str] | None = None,
+) -> dict[str, frozenset[str]]:
     stack = stack if stack is not None else []
-    found: list[str] = []
+    found: dict[str, frozenset[str]] = {}
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.ClassDef):
-            found.extend(
-                _scan_module_functions(child, aliases, rel, [*stack, child.name])
+            found.update(
+                _scan_module_functions(child, cs_aliases, sl_aliases, rel, [*stack, child.name])
             )
         elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             qualname = ".".join([*stack, child.name])
-            if _own_body_calls_both(child, aliases):
-                found.append(f"{rel}::{qualname}")
-            found.extend(
-                _scan_module_functions(child, aliases, rel, [*stack, child.name])
+            shapes = _own_body_shapes(child, cs_aliases, sl_aliases)
+            if shapes:
+                found[f"{rel}::{qualname}"] = shapes
+            found.update(
+                _scan_module_functions(child, cs_aliases, sl_aliases, rel, [*stack, child.name])
             )
         else:
-            found.extend(_scan_module_functions(child, aliases, rel, stack))
+            found.update(_scan_module_functions(child, cs_aliases, sl_aliases, rel, stack))
     return found
 
 
@@ -413,6 +682,151 @@ class TestScannerSensitivity:
         hits = find_out_of_band_writers(tmp_path)
 
         assert "app/services/caller_owned.py::write_with_caller_session" not in hits
+
+    def test_a_planted_sessionlocal_import_plus_commit_function_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_sessionlocal.py").write_text(
+            "from app.db import SessionLocal\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    s = SessionLocal()\n"
+            "    s.add(x)\n"
+            "    s.commit()\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_sessionlocal.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_SESSION_LOCAL_COMMIT})
+
+    def test_sessionlocal_import_without_commit_is_not_flagged(self, tmp_path: Path) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sessionlocal_reader.py").write_text(
+            "from app.db import SessionLocal\n"
+            "\n"
+            "\n"
+            "def read_something():\n"
+            "    s = SessionLocal()\n"
+            "    return s.query(object).first()\n",
+            encoding="utf-8",
+        )
+
+        hits = find_out_of_band_writers(tmp_path)
+
+        assert "app/services/sessionlocal_reader.py::read_something" not in hits
+
+    def test_a_planted_sessionmaker_bound_factory_plus_commit_function_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "own_factory.py").write_text(
+            "from sqlalchemy.orm import sessionmaker\n"
+            "\n"
+            "_engine = None\n"
+            "OwnSessionFactory = sessionmaker(bind=_engine)\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    s = OwnSessionFactory()\n"
+            "    s.add(x)\n"
+            "    s.commit()\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/own_factory.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_SESSION_LOCAL_COMMIT})
+
+    def test_a_planted_with_session_block_is_flagged_with_no_visible_commit(
+        self, tmp_path: Path
+    ) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_with_session.py").write_text(
+            "from app.services.db_session_adapter import db_session_adapter\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    with db_session_adapter.session() as s:\n"
+            "        s.add(x)\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_with_session.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_AUTO_COMMIT_SESSION})
+
+    def test_with_read_session_block_is_not_flagged(self, tmp_path: Path) -> None:
+        """``read_session()`` always rolls back -- the near-miss for ``.session()``."""
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "with_read_session.py").write_text(
+            "from app.services.db_session_adapter import db_session_adapter\n"
+            "\n"
+            "\n"
+            "def read_something():\n"
+            "    with db_session_adapter.read_session() as s:\n"
+            "        return s.query(object).first()\n",
+            encoding="utf-8",
+        )
+
+        hits = find_out_of_band_writers(tmp_path)
+
+        assert "app/services/with_read_session.py::read_something" not in hits
+
+    def test_with_owner_command_session_block_is_not_flagged(self, tmp_path: Path) -> None:
+        """``owner_command_session()`` never commits -- see
+        ``app/services/db_session_adapter.py``: it only rolls back
+        defensively, so the caller-registered command stays the sole
+        transaction owner. The near-miss for ``.advisory_lock()``/``.session()``
+        despite the superficially similar "session" name."""
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "with_owner_command_session.py").write_text(
+            "from app.services.db_session_adapter import db_session_adapter\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    with db_session_adapter.owner_command_session() as s:\n"
+            "        s.add(x)\n",
+            encoding="utf-8",
+        )
+
+        hits = find_out_of_band_writers(tmp_path)
+
+        assert "app/services/with_owner_command_session.py::write_something" not in hits
+
+    def test_a_planted_with_advisory_lock_block_is_flagged(self, tmp_path: Path) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_with_advisory_lock.py").write_text(
+            "from app.services.db_session_adapter import db_session_adapter\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    with db_session_adapter.advisory_lock(1) as (s, acquired):\n"
+            "        if acquired:\n"
+            "            s.add(x)\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_with_advisory_lock.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_AUTO_COMMIT_ADVISORY_LOCK})
 
 
 def test_every_known_legacy_out_of_band_writer_is_in_the_baseline() -> None:
