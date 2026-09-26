@@ -2210,6 +2210,7 @@ SERVICES: tuple[SOTService, ...] = (
             "historical paid prepaid invoice identity and coverage repair",
             "reviewed paid prepaid invoice coverage correction",
             "reviewed missing prepaid paid-invoice repair",
+            "reviewed existing prepaid draft settlement",
             "reviewed pre-opening invoice settlement correction",
             "stranded prepaid draft classification",
             "stranded prepaid draft invoice reconciliation",
@@ -2224,6 +2225,7 @@ SERVICES: tuple[SOTService, ...] = (
             "financial.invoices",
             "financial.ledger",
             "financial.payments",
+            "financial.payment_proofs",
             "financial.prepaid_funding_reconstruction",
             "financial.prepaid_service_renewals",
             "financial.customer_subledger",
@@ -2297,6 +2299,13 @@ SERVICES: tuple[SOTService, ...] = (
             "reversals, retires the allocation projection, records the full "
             "invoice against approved opening funding, and settles the "
             "document with zero customer-position delta."
+            " A separate Finance-approved existing-draft command accepts one "
+            "operator-named periodless draft, prepaid subscription, verified "
+            "native payment, explicit service period, expected post-settlement "
+            "credit, approver, ticket, and evidence digest. It adopts the "
+            "document identity, issues and fully allocates the selected "
+            "payment, creates canonical entitlement, projects the reviewed "
+            "billing anchor, and records approval evidence atomically."
         ),
         contract=ServiceContract(
             concerns=(
@@ -2353,6 +2362,20 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical payment-backed account credit",
                         "canonical paid invoice allocation evidence",
                         "invoice and payment participant protocols",
+                    ),
+                    canonical_writer="financial.prepaid_draft_reconciliation",
+                ),
+                ConcernContract(
+                    name="reviewed existing prepaid draft settlement",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "reviewed existing-draft settlement command",
+                        "canonical prepaid draft invoice",
+                        "canonical prepaid subscription contract",
+                        "canonical payment-backed account credit",
+                        "verified payment proof",
+                        "invoice and payment participant protocols",
+                        "financial access restoration protocol",
                     ),
                     canonical_writer="financial.prepaid_draft_reconciliation",
                 ),
@@ -2442,6 +2465,19 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
+                    name="reviewed existing-draft settlement command",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "billing:prepaid_reconciliation:repair permission checked "
+                        "against a named staff principal plus exact invoice, "
+                        "subscription, payment, service dates, total, expected "
+                        "remaining credit, payment reference, Finance approver, "
+                        "approval timestamp, ticket, evidence digest, preview "
+                        "fingerprint, actor, reason, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
                     name="canonical paid prepaid coverage document",
                     owner="financial.invoices",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
@@ -2513,6 +2549,16 @@ SERVICES: tuple[SOTService, ...] = (
                         "one active full-value invoice allocation, matching "
                         "active succeeded Payment and settlement, currency, "
                         "paid-at instant, and absence of refund or reversal"
+                    ),
+                ),
+                AuthorityInput(
+                    name="verified payment proof",
+                    owner="financial.payment_proofs",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "verified proof linked to the selected successful "
+                        "Payment, including its reviewed transfer reference "
+                        "when present"
                     ),
                 ),
                 AuthorityInput(
@@ -2626,6 +2672,12 @@ SERVICES: tuple[SOTService, ...] = (
                     "the preview, and commits document construction, issue, "
                     "exact allocation, entitlement, reviewed anchor projection, "
                     "audit, event, metadata, and idempotency evidence together. The "
+                    "reviewed existing-draft command locks the named account, "
+                    "draft, subscription, payment, settlement, returns, and "
+                    "approver; then atomically commits documentary adoption, "
+                    "issue, selected-payment allocation, entitlement, reviewed "
+                    "anchor projection, conditional access restoration, Finance "
+                    "approval metadata, audit, event, and idempotency evidence. The "
                     "pre-opening correction locks the account, invoice, allocation, "
                     "opening baseline and posting group, then atomically appends "
                     "ledger reversals, opening-consumption evidence and a linked "
@@ -2694,6 +2746,11 @@ SERVICES: tuple[SOTService, ...] = (
                     "caller-checked billing:prepaid_reconciliation:repair "
                     "permission evidence is missing or its declared scope does "
                     "not match it",
+                    "a reviewed existing-draft settlement whose permission, "
+                    "approver, ticket, evidence digest, payment reference, "
+                    "selected payment capacity, expected cutoff balance, "
+                    "contract charge, explicit cadence, or preview fingerprint "
+                    "is absent, stale, or ambiguous",
                     "any funding shortfall including NGN 0.50",
                     "unbacked account credit crossing the active reviewed "
                     "opening-position boundary, or any unbacked account "
@@ -2726,6 +2783,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "prepaid_proforma.adopted",
                     "prepaid_paid_invoice.repaired",
                     "prepaid_paid_invoice.coverage_corrected",
+                    "prepaid_reviewed_draft.settled",
                     "prepaid_draft.reconciled",
                 ),
                 schema_version=1,
@@ -2735,7 +2793,10 @@ SERVICES: tuple[SOTService, ...] = (
                     "invoice, subscription, sole payment, period, currency, "
                     "amount, and preview identity; settlement retains invoice, "
                     "action, source disposition, final status, amount, "
-                    "currency, and preview fingerprint meaning."
+                    "currency, and preview fingerprint meaning. Reviewed draft "
+                    "settlement retains invoice, subscription, selected payment, "
+                    "allocation, entitlement, payment reference, ticket, "
+                    "evidence digest, period, anchor, and preview identity."
                 ),
                 replay=(
                     "The event records the committed reconciliation outcome. "

@@ -309,6 +309,22 @@ class PrepaidProformaDocumentAdoption:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewedPrepaidDraftDocumentAdoption:
+    """Exact historical identity approved for an existing prepaid draft."""
+
+    invoice_id: UUID
+    line_id: UUID
+    subscription_id: UUID
+    billing_period_start: datetime
+    billing_period_end: datetime
+    expected_line_quantity: Decimal
+    expected_line_unit_price: Decimal
+    expected_line_amount: Decimal
+    line_description: str
+    adoption_evidence_ref: str
+
+
+@dataclass(frozen=True, slots=True)
 class PaidPrepaidInvoiceDocumentRepair:
     """Exact missing identity approved for one historical paid invoice."""
 
@@ -2167,6 +2183,81 @@ class Invoices(ListResponseMixin):
                 "billing_period_start": adoption.billing_period_start.isoformat(),
                 "billing_period_end": adoption.billing_period_end.isoformat(),
                 "prepaid_proforma_adoption_ref": adoption.adoption_evidence_ref,
+            }
+        )
+        line.metadata_ = line_metadata
+        db.flush()
+        return invoice
+
+    @staticmethod
+    def adopt_reviewed_prepaid_draft_document_for_owner(
+        db: Session,
+        adoption: ReviewedPrepaidDraftDocumentAdoption,
+    ) -> Invoice:
+        """Apply fingerprint-reviewed identity to one periodless draft.
+
+        This participant deliberately does not decide whether a payment,
+        subscription, service period, or approval is acceptable. The prepaid
+        reconciliation owner proves and locks that chain before calling it.
+        It only performs the documentary mutation and remains flush-only.
+        """
+
+        invoice = lock_for_update(db, Invoice, str(adoption.invoice_id))
+        if (
+            invoice is None
+            or not invoice.is_active
+            or invoice.status is not InvoiceStatus.draft
+            or invoice.billing_period_start is not None
+            or invoice.billing_period_end is not None
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Invoice is not a pristine active periodless draft.",
+                details={"invoice_id": str(adoption.invoice_id)},
+            )
+        if adoption.billing_period_end <= adoption.billing_period_start:
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Reviewed billing period must be positive.",
+                details={"invoice_id": str(adoption.invoice_id)},
+            )
+        line = db.scalar(
+            select(InvoiceLine)
+            .where(
+                InvoiceLine.id == adoption.line_id,
+                InvoiceLine.invoice_id == invoice.id,
+                InvoiceLine.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if (
+            line is None
+            or line.subscription_id is not None
+            or line.quantity != adoption.expected_line_quantity
+            or line.unit_price != adoption.expected_line_unit_price
+            or line.amount != adoption.expected_line_amount
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Reviewed draft line identity changed after preview.",
+                details={
+                    "invoice_id": str(adoption.invoice_id),
+                    "line_id": str(adoption.line_id),
+                },
+            )
+
+        invoice.is_proforma = False
+        invoice.billing_period_start = adoption.billing_period_start
+        invoice.billing_period_end = adoption.billing_period_end
+        line.subscription_id = adoption.subscription_id
+        line.description = adoption.line_description
+        line_metadata = dict(line.metadata_ or {})
+        line_metadata.update(
+            {
+                "kind": "base_subscription",
+                "billing_period_start": adoption.billing_period_start.isoformat(),
+                "billing_period_end": adoption.billing_period_end.isoformat(),
+                "reviewed_prepaid_draft_adoption_ref": (adoption.adoption_evidence_ref),
             }
         )
         line.metadata_ = line_metadata

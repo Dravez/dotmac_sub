@@ -172,6 +172,7 @@ class EventType(enum.Enum):
     prepaid_paid_invoice_repaired = "prepaid_paid_invoice.repaired"
     prepaid_paid_invoice_coverage_corrected = "prepaid_paid_invoice.coverage_corrected"
     prepaid_draft_reconciled = "prepaid_draft.reconciled"
+    prepaid_reviewed_draft_settled = "prepaid_reviewed_draft.settled"
     prepaid_billing_calendar_reconciled = "prepaid_billing_calendar.reconciled"
     ip_assignment_service_ownership_reconciled = (
         "ip_assignment.service_ownership_reconciled"

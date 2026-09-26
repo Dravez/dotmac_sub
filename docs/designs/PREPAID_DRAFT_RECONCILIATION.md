@@ -198,6 +198,36 @@ the selected native Payment alone fully backs the invoice, the missing
 historical baseline is unrelated to that exact cash application. Mixed or
 underfunded repairs continue to require the reviewed opening-funding workflow.
 
+### Finance-approved existing periodless draft settlement
+
+An existing draft that has the correct amount but no subscription or service
+period is repaired by `settle_reviewed_existing_prepaid_draft`. This is a
+separate, permission-gated owner command; changing the invoice status or billing
+anchor directly is not an approved repair.
+
+Preview requires one operator-named draft, unlinked positive line, prepaid
+subscription, successful unreturned Payment and settlement, explicit service
+start and next-billing dates, expected invoice total, expected remaining
+account credit, payment reference, active Finance approver, approval timestamp,
+ticket reference, and SHA-256 evidence digest. The period must match the
+contracted cadence in Africa/Lagos and the selected Payment must retain enough
+unallocated capacity to fund the whole document. Existing invoice activity,
+competing coverage, changed tax or contract terms, an overlapping anchor, or a
+changed cutoff balance leaves the invoice unchanged for manual review.
+
+Confirmation locks and re-previews the entire chain, adopts the missing
+document identity through the invoice participant, issues the draft, allocates
+only the selected Payment, creates one canonical entitlement, and asks the
+renewal owner to project `next_billing_at` to the reviewed period end. Access
+restoration is requested only when the approved period is current. Invoice
+metadata, an audit event, `prepaid_reviewed_draft.settled`, and the idempotency
+reservation retain the payment reference, approver, timestamp, ticket, evidence
+digest, dates, allocation, entitlement, and preview fingerprint in the same
+transaction.
+
+The operational procedure and post-settlement checks are in
+`docs/runbooks/REVIEWED_EXISTING_PREPAID_DRAFT_SETTLEMENT.md`.
+
 An existing prepaid draft has first claim on the service-period document
 boundary. A funding-change consequence checks it before creating a new funded
 renewal invoice:
