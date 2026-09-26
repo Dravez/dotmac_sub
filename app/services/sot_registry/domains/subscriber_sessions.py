@@ -137,12 +137,25 @@ DOMAIN = DomainSOT(
             name="sessions.enforcement",
             module="app.services.enforcement",
             owns=(
-                "CoA/disconnect execution",
-                "session refresh after access-state changes",
+                "NAS-evidenced accounting-session closure",
+                "single-flight access-control recovery execution",
             ),
             depends_on=(
                 "financial.access_resolution",
                 "sessions.radius_resolution",
+            ),
+            notes=(
+                "Migration debt (legacy manifest baseline). Both concerns are "
+                "implemented in the Celery task app/tasks/radius.py, not in "
+                "app.services.enforcement: NAS-evidenced closure writes "
+                "FreeRADIUS radacct on its own connection on an RFC 5176 "
+                "session-not-found reply, and the single-flight recovery loop "
+                "runs under an advisory lock. Owed: extract recovery into a "
+                "coordinator-managed owner command, and decide the single "
+                "writer of radacct.acctstoptime against the age-based reaper in "
+                "app/services/radius_reconciliation.py. CoA/disconnect execution "
+                "and session refresh are contracted under "
+                "access.session_enforcement."
             ),
         ),
     ),

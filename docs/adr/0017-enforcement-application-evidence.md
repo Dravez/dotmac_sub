@@ -73,12 +73,20 @@ does afterwards, so evidence of it must not share that transaction's fate.
    that shape it needs no domain error codes or events, because the writer never
    raises into its caller and emits nothing
    (`tests/architecture/test_sot_manifest_out_of_band_evidence.py`).
-   `access.session_enforcement` performs the attempts and depends on it. Its own
-   CoA, session-closure and recovery concerns remain on the shrink-only legacy
-   manifest baseline as pre-existing debt, independent of this record.
-   `app/services/enforcement.py` is also registered under `sessions.enforcement`;
-   which name owns `update_subscription_sessions` is settled when that service
-   is contracted.
+   `access.session_enforcement` performs the attempts and hands each final
+   outcome to it. `access.session_enforcement` is itself contracted as a
+   read-only `transport` of access-state consequences (it writes no database
+   row), which covers CoA/disconnect execution including
+   `update_subscription_sessions`. The two concerns it could not honestly
+   contract, NAS-evidenced accounting closure and single-flight recovery, are
+   implemented in the Celery task `app/tasks/radius.py` and are declared under
+   the baselined `sessions.enforcement` as named migration debt. Also owed: the
+   module's other writes (credential activation, RADIUS profile changes and the
+   `credentials_ambiguous`/`no_subscription_credentials` codes of
+   `apply_radius_profile_to_subscription`) sit outside the transport concern,
+   and `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
+   age-based reaper in `app/services/radius_reconciliation.py`), an ownership
+   decision reserved for Michael.
 
 2. **Canonical writer.** `access.enforcement_evidence` is the only writer,
    through `record_enforcement_application` in
@@ -235,8 +243,9 @@ does afterwards, so evidence of it must not share that transaction's fate.
   manifest rules have their own positive and negative tests.
 - SOT registry: `access.enforcement_evidence` carries a complete
   `ServiceContract` (mode `out_of_band_evidence`) and every registered contract
-  validates; `access.session_enforcement` is unchanged on the legacy baseline
-  (no new baseline entry).
+  validates. `access.session_enforcement` has a complete read-only transport
+  contract and has left the shrink-only legacy baseline; `sessions.enforcement`
+  stays on it for the two task-implemented concerns.
 
 ## Rollback or forward-fix
 
