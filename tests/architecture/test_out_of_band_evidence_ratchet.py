@@ -121,12 +121,18 @@ def test_known_legacy_out_of_band_writers_still_exist() -> None:
     One-directional by design: this does not detect a NEW out-of-band writer
     that skips the mode. Partial detection is
     ``tests/architecture/test_undeclared_out_of_band_writers.py``: an AST
-    scan for create_session() plus commit across all of app/, ratcheted
-    two-directionally against an approved and a classified baseline set. It
-    does NOT yet recognise SessionLocal()/sessionmaker-produced sessions or the
+    scan across all of app/, ratcheted two-directionally against an approved
+    and a classified baseline set, for a function that in its own body opens
+    and commits a session via ``create_session()``, a module-level alias of
+    it, ``from app.db import SessionLocal`` / any module-level
+    ``sessionmaker(...)``-bound factory, or that enters one of the
     auto-committing ``with db_session_adapter.session()`` /
-    ``owner_command_session()`` / ``advisory_lock()`` shapes; see that module's
-    stated limitations.
+    ``advisory_lock()`` context managers (no visible ``.commit()`` needed --
+    they commit on exit). ``owner_command_session()`` and ``read_session()``
+    never commit and are correctly never flagged. It does NOT yet recognise a
+    function-local (rather than module-level) session-factory alias, or a
+    session opened in one function and committed in another; see that
+    module's stated limitations.
     """
     for entry in KNOWN_LEGACY_OUT_OF_BAND_WRITERS:
         module, function = entry.split("::")

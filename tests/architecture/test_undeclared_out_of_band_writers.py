@@ -206,7 +206,6 @@ BASELINE: dict[str, str] = {
         "adapter-owned session lifecycle (task/runner)"
     ),
     "app/tasks/usage.py::evaluate_fup_rules": "adapter-owned session lifecycle (task/runner)",
-
     # -- New hits from the SessionLocal()/sessionmaker and auto-committing
     # -- context-manager shapes (session_local_commit, auto_commit_session,
     # -- auto_commit_advisory_lock): ordinary Celery task / scheduled-job
@@ -318,7 +317,6 @@ BASELINE: dict[str, str] = {
     "app/syslog/handlers.py::_handle_autofind_event": (
         "adapter-owned session lifecycle (task/runner): syslog listener handling one ONTAUTOFIND event synchronously; own session per event, no caller transaction to join"
     ),
-
     # -- Infrastructure: the session-provider machinery itself (the
     # -- generator/method that IS create_session()+commit(), not a caller
     # -- of it) and a durable-execution-claim decorator with its own ledger
@@ -333,7 +331,6 @@ BASELINE: dict[str, str] = {
     "app/services/network_operation_dispatch.py::managed_network_operation_dispatch.decorator.wrapped": (
         "infrastructure: durable dispatch-claim decorator wraps a device task with its own execution-claim ledger session, independent of the wrapped task"
     ),
-
     # -- Notification delivery adapters: each opens its own session for one
     # -- send/availability probe. Invoked from arbitrary callers (API
     # -- handlers, tasks), so the delivery attempt is deliberately isolated
@@ -431,9 +428,9 @@ def _module_session_local_aliases(module: ast.Module) -> frozenset[str]:
             continue
         if isinstance(value, ast.Call):
             func = value.func
-            is_sessionmaker = (isinstance(func, ast.Name) and func.id == "sessionmaker") or (
-                isinstance(func, ast.Attribute) and func.attr == "sessionmaker"
-            )
+            is_sessionmaker = (
+                isinstance(func, ast.Name) and func.id == "sessionmaker"
+            ) or (isinstance(func, ast.Attribute) and func.attr == "sessionmaker")
             if is_sessionmaker:
                 for target in targets:
                     if isinstance(target, ast.Name):
@@ -561,7 +558,9 @@ def _scan_module_functions(
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.ClassDef):
             found.update(
-                _scan_module_functions(child, cs_aliases, sl_aliases, rel, [*stack, child.name])
+                _scan_module_functions(
+                    child, cs_aliases, sl_aliases, rel, [*stack, child.name]
+                )
             )
         elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             qualname = ".".join([*stack, child.name])
@@ -569,10 +568,14 @@ def _scan_module_functions(
             if shapes:
                 found[f"{rel}::{qualname}"] = shapes
             found.update(
-                _scan_module_functions(child, cs_aliases, sl_aliases, rel, [*stack, child.name])
+                _scan_module_functions(
+                    child, cs_aliases, sl_aliases, rel, [*stack, child.name]
+                )
             )
         else:
-            found.update(_scan_module_functions(child, cs_aliases, sl_aliases, rel, stack))
+            found.update(
+                _scan_module_functions(child, cs_aliases, sl_aliases, rel, stack)
+            )
     return found
 
 
@@ -705,7 +708,9 @@ class TestScannerSensitivity:
         assert key in hits_with_shapes
         assert hits_with_shapes[key] == frozenset({SHAPE_SESSION_LOCAL_COMMIT})
 
-    def test_sessionlocal_import_without_commit_is_not_flagged(self, tmp_path: Path) -> None:
+    def test_sessionlocal_import_without_commit_is_not_flagged(
+        self, tmp_path: Path
+    ) -> None:
         app_dir = tmp_path / "app" / "services"
         app_dir.mkdir(parents=True)
         (app_dir / "sessionlocal_reader.py").write_text(
@@ -786,7 +791,9 @@ class TestScannerSensitivity:
 
         assert "app/services/with_read_session.py::read_something" not in hits
 
-    def test_with_owner_command_session_block_is_not_flagged(self, tmp_path: Path) -> None:
+    def test_with_owner_command_session_block_is_not_flagged(
+        self, tmp_path: Path
+    ) -> None:
         """``owner_command_session()`` never commits -- see
         ``app/services/db_session_adapter.py``: it only rolls back
         defensively, so the caller-registered command stays the sole
@@ -808,7 +815,9 @@ class TestScannerSensitivity:
 
         assert "app/services/with_owner_command_session.py::write_something" not in hits
 
-    def test_a_planted_with_advisory_lock_block_is_flagged(self, tmp_path: Path) -> None:
+    def test_a_planted_with_advisory_lock_block_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
         app_dir = tmp_path / "app" / "services"
         app_dir.mkdir(parents=True)
         (app_dir / "sneaky_with_advisory_lock.py").write_text(
