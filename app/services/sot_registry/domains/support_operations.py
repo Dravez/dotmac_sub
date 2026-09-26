@@ -1760,7 +1760,7 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 author_permission="support:ticket:read",
-                runtime_enabled=False,
+                runtime_enabled=True,
             ),
         ),
         actions=(
@@ -1781,7 +1781,7 @@ DOMAIN = DomainSOT(
                 author_permission="support:ticket:update",
                 runtime_scope="support:ticket:update",
                 idempotency="event, rule version, and step",
-                runtime_enabled=False,
+                runtime_enabled=True,
             ),
         ),
         legacy_surfaces=(
