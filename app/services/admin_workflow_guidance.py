@@ -189,7 +189,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Use the rule builder to choose an approved trigger, conditions, and ordered actions, then save a draft.",
         "Use the existing automation ownership section to identify workflows that remain managed outside the hub.",
         notes=(
-            "The builder saves a draft only. It does not affect tickets until an admin activates the rule.",
+            "Registry, legacy-ownership, and execution evidence are read-only. The builder saves a draft only and does not affect tickets until an admin activates the rule.",
             "Custom-field definitions are managed separately; the builder only offers fields declared for its trigger.",
             "Existing rules remain on their current management pages until they are migrated.",
         ),

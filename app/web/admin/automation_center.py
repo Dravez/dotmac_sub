@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import quote
@@ -133,8 +134,8 @@ def _generic_form_context(
     trigger_key: str = _DEFAULT_TRIGGER,
     customer_scope: str = "company",
     customer_ids: tuple[UUID, ...] = (),
-    conditions: tuple[dict[str, object], ...] = (),
-    actions: tuple[dict[str, object], ...] = (),
+    conditions: tuple[Mapping[str, object], ...] = (),
+    actions: tuple[Mapping[str, object], ...] = (),
     rule_id: UUID | None = None,
     permission_keys: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
@@ -227,7 +228,9 @@ def _generic_form_context(
     }
 
 
-def _form_scalar(field: AutomationConditionField, raw: object) -> object:
+def _form_scalar(
+    field: AutomationConditionField, raw: object
+) -> automation_rules.AutomationScalar:
     if raw is None or raw == "":
         raise ValueError(f"Enter a value for {field.label}.")
     value = str(raw)
@@ -281,6 +284,10 @@ def _form_definition(
             raise ValueError("Choose a condition field provided by the app.")
         operator = AutomationOperator(str(item.get("operator") or ""))
         raw_value = item.get("value")
+        value: (
+            automation_rules.AutomationScalar
+            | tuple[automation_rules.AutomationScalar, ...]
+        )
         if operator in {AutomationOperator.is_empty, AutomationOperator.is_not_empty}:
             value = None
         elif operator in {
@@ -349,14 +356,14 @@ def _form_definition(
     return tuple(conditions), tuple(actions)
 
 
-def _safe_json_list(raw: str) -> tuple[dict[str, object], ...]:
+def _safe_json_list(raw: str) -> tuple[Mapping[str, object], ...]:
     try:
         value = json.loads(raw)
     except (TypeError, ValueError):
         return ()
     if not isinstance(value, list):
         return ()
-    return tuple(item for item in value if isinstance(item, dict))
+    return tuple(item for item in value if isinstance(item, Mapping))
 
 
 @router.get("", response_class=HTMLResponse)

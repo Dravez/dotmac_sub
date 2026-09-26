@@ -18,7 +18,11 @@ def test_hub_route_is_permission_gated_and_uses_the_capability_rule_builder() ->
     assert "RULE_CREATE_PERMISSION" in source
     assert "RUN_READ_PERMISSION" in source
     assert '"/rules"' in source
-    assert '"support:ticket:update"' in source
+    assert "action.author_permission" in source
+    support_declaration = _source(
+        "app/services/sot_registry/domains/support_operations.py"
+    )
+    assert 'author_permission="support:ticket:update"' in support_declaration
 
 
 def test_hub_is_registered_and_visible_only_with_hub_permission() -> None:

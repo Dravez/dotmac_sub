@@ -141,7 +141,7 @@ DOMAIN = DomainSOT(
                         source="AutomationRule and AutomationRuleVersion rows",
                     ),
                     AuthorityInput(
-                        name="selected customer scope evidence",
+                        name="company-wide or selected-customer rule scope",
                         owner="customer.search",
                         kind=AuthorityKind.DERIVED_PROJECTION,
                         source=(

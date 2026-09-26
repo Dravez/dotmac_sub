@@ -378,17 +378,17 @@ def _editor_state(
         for action in version.actions:
             if action.get("action_key") != "support.ticket.assign_service_team":
                 continue
-            inputs = _stored_mapping_list(action.get("inputs")) or ()
-            value = next(
+            stored_inputs = _stored_mapping_list(action.get("inputs")) or ()
+            service_team_value = next(
                 (
                     item.get("value")
-                    for item in inputs
+                    for item in stored_inputs
                     if item.get("key") == "service_team_id"
                 ),
                 None,
             )
             try:
-                service_team_id = UUID(str(value))
+                service_team_id = UUID(str(service_team_value))
             except (TypeError, ValueError):
                 service_team_id = None
             break
@@ -403,16 +403,16 @@ def _editor_state(
                 field = fields[field_key]
                 raw_value = item.get("value")
                 if isinstance(raw_value, list):
-                    value: AutomationScalar | tuple[AutomationScalar, ...] = tuple(
-                        _restore_value(field, entry) for entry in raw_value
+                    condition_value: AutomationScalar | tuple[AutomationScalar, ...] = (
+                        tuple(_restore_value(field, entry) for entry in raw_value)
                     )
                 else:
-                    value = _restore_value(field, raw_value)
+                    condition_value = _restore_value(field, raw_value)
                 conditions.append(
                     AutomationCondition(
                         field_key=field_key,
                         operator=AutomationOperator(str(item.get("operator"))),
-                        value=value,
+                        value=condition_value,
                     )
                 )
             for step in version.actions:
@@ -420,7 +420,7 @@ def _editor_state(
                     str(step.get("action_key") or "")
                 )
                 input_definitions = {item.key: item for item in capability.inputs}
-                inputs: list[AutomationActionValue] = []
+                action_inputs: list[AutomationActionValue] = []
                 for item in _stored_mapping_list(step.get("inputs")) or ():
                     key = str(item.get("key") or "")
                     definition = input_definitions[key]
@@ -438,11 +438,11 @@ def _editor_state(
                         )
                     else:
                         restored = _restore_value(field, raw_value)
-                    inputs.append(AutomationActionValue(key=key, value=restored))
+                    action_inputs.append(AutomationActionValue(key=key, value=restored))
                 actions.append(
                     AutomationActionStep(
                         action_key=capability.key,
-                        inputs=tuple(inputs),
+                        inputs=tuple(action_inputs),
                     )
                 )
         except (
@@ -473,7 +473,7 @@ def _restore_value(field: AutomationConditionField, value: object) -> Automation
     if field.value_type in {AutomationValueType.string, AutomationValueType.enum}:
         return str(value)
     if field.value_type is AutomationValueType.integer:
-        return int(value)
+        return int(str(value))
     if field.value_type is AutomationValueType.decimal:
         return Decimal(str(value))
     if field.value_type is AutomationValueType.boolean:
@@ -1299,7 +1299,11 @@ def list_rules(
     }
     summaries: list[AutomationRuleSummary] = []
     for rule in rules:
-        active = versions_by_id.get(rule.active_version_id)
+        active = (
+            versions_by_id.get(rule.active_version_id)
+            if rule.active_version_id is not None
+            else None
+        )
         draft = drafts_by_rule_id.get(rule.id)
         displayed = draft or active
         summaries.append(
