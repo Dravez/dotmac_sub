@@ -144,6 +144,18 @@ evidence row at all. Each one is either explained (for example, blocked before
 the evidence slice deployed and not re-enforced since, or the address-list
 block feature disabled) or is a sign the writer is not being reached.
 
+Known limits of this section:
+
+- evidence rows are current state per effect, so a subscription that was
+  blocked, unblocked and blocked again reads as covered by its OLD block row
+  even if the re-block never reached the writer. Compare `last_attempt_at` of
+  the block row with the subscription's latest suspension time when reviewing;
+- it only considers subscriptions with a provisioning NAS. Subscriptions
+  enforced only through an open accounting session's NAS are not checked here;
+  cover them through the router spot-check;
+- an `ipv4_address` of `''` passes the filter but the enforcer never attempts a
+  block for it, so such a row is a false positive.
+
 ## Pass criterion
 
 The comparison passes, and slice 2 may start reading the record, only when all

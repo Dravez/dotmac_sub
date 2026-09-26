@@ -80,13 +80,18 @@ does afterwards, so evidence of it must not share that transaction's fate.
    `update_subscription_sessions`. The two concerns it could not honestly
    contract, NAS-evidenced accounting closure and single-flight recovery, are
    implemented in the Celery task `app/tasks/radius.py` and are declared under
-   the baselined `sessions.enforcement` as named migration debt. The module's
-   other STATE WRITES are declared there too, as named debt whose owner must be
-   decided: credential RADIUS-profile projection
-   (`apply_radius_profile_to_subscription`, `project_credentials_to_radius`, with
-   the `credentials_ambiguous`/`no_subscription_credentials` codes),
-   cancel/suspend/restore credential and RADIUS-user activation, served-IPv4
-   release on cancel, and the FUP-lift step. The transport contract covers only
+   the baselined `sessions.enforcement` as named migration debt, together with
+   one more: the cancel/suspend/restore and FUP-lift access-cleanup
+   coordination, which has no owner command (its only unowned writes are
+   `RadiusUser.is_active`). The module's other writes are parallel writers of
+   state that other services already own, recorded as debt against those
+   owners rather than claimed by `sessions.enforcement`:
+   `AccessCredential.radius_profile_id` (`access.credential_binding`, with the
+   `credentials_ambiguous`/`no_subscription_credentials` codes),
+   `AccessCredential.is_active` (`access.pppoe_credentials`), the served
+   IPv4/IPv6 cleared on cancel (`network.ip_assignment_lifecycle`, already in
+   `served_ipv4_writer_baseline.txt`), and `project_credentials_to_radius` as a
+   request to `access.radius_projection`. The transport contract covers only
    the transport functions, which write no row. Also, `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
    age-based reaper in `app/services/radius_reconciliation.py`). Decided by
    Michael (2026-09-26): `sessions.enforcement` is Sub's sole synthetic closure
