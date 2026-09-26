@@ -42,6 +42,13 @@ KNOWN_LEGACY_OUT_OF_BAND_WRITERS: tuple[str, ...] = (
     # A nested ONT/CPE helper that commits the detected TR-069 data-model root
     # on its own session while its caller may hold the same device row.
     "app/services/network/ont_action_common.py::persist_data_model_root",
+    # Notification delivery: called from
+    # app/services/operational_escalation_delivery.py's _send_to_target(db, ...)
+    # chain, which holds `db: Session` open across the call. Each opens its
+    # OWN session via db_session_adapter.session() and commits a delivery
+    # record mid-flow while that caller session may still be open.
+    "app/services/notification_adapter.py::EmailProvider.send",
+    "app/services/notification_adapter.py::SmsProvider.send",
 )
 
 _MODE = TransactionMode.OUT_OF_BAND_EVIDENCE.value
@@ -127,12 +134,14 @@ def test_known_legacy_out_of_band_writers_still_exist() -> None:
     it, ``from app.db import SessionLocal`` / any module-level
     ``sessionmaker(...)``-bound factory, or that enters one of the
     auto-committing ``with db_session_adapter.session()`` /
-    ``advisory_lock()`` context managers (no visible ``.commit()`` needed --
-    they commit on exit). ``owner_command_session()`` and ``read_session()``
-    never commit and are correctly never flagged. It does NOT yet recognise a
-    function-local (rather than module-level) session-factory alias, or a
-    session opened in one function and committed in another; see that
-    module's stated limitations.
+    ``advisory_lock()`` / ``task_session()`` context managers (no visible
+    ``.commit()`` needed -- they commit on exit; ``task_session`` is
+    recognised whether imported at module level or, as at every real call
+    site, function-locally). ``owner_command_session()`` and
+    ``read_session()`` never commit and are correctly never flagged. It does
+    NOT yet recognise a function-local (rather than module-level)
+    ``SessionLocal``/``sessionmaker`` alias, or a session opened in one
+    function and committed in another; see that module's stated limitations.
     """
     for entry in KNOWN_LEGACY_OUT_OF_BAND_WRITERS:
         module, function = entry.split("::")

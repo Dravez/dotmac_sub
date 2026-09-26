@@ -34,13 +34,30 @@ by entering the context manager alone. ``owner_command_session()`` and
 ``app/services/db_session_adapter.py``: the former only rolls back
 defensively (never commits) so the caller-registered command stays the sole
 transaction owner, and the latter always rolls back; neither is an
-out-of-band writer.
+out-of-band writer. Also covered: ``task_session()`` (``app/db.py``'s own
+bare-name auto-committing generator), recognised whether ``from app.db
+import task_session`` is imported at module level or -- the common case at
+every real call site -- function-locally, inside the very function that then
+calls ``task_session()``.
 
 Stated limitations (an unmonitored region, not an exemption; follow-up owed):
-the scan still does not recognise a FUNCTION-LOCAL alias of a session
-factory (only a module-level one), nor a session opened in one function and
-committed in another (cross-function commit) -- ADR 0017's own ratchet test
-docstring names this gap too.
+the scan still does not recognise a FUNCTION-LOCAL alias of ``SessionLocal``
+itself (only a function-local alias of ``task_session`` is handled; a
+module-level ``SessionLocal``/``sessionmaker`` alias is handled; a
+function-local ``SessionLocal`` import, e.g. ``app/services/enforcement.py``'s
+``_coa_neg_ttl`` or ``app/web/admin/nas.py``'s ``_radius_secret_length``, is
+not -- both are read-only today, not a live gap, but unmonitored), nor a
+session opened in one function and committed in another (cross-function
+commit) -- ADR 0017's own ratchet test docstring names this gap too.
+Deliberately EXCLUDED, not missed: a ``Session(bind=db.connection(),
+join_transaction_mode="create_savepoint")`` join (it explicitly joins the
+caller's transaction rather than opening an independent one -- see
+``app/services/auth_flow.py``, ``financial_imports.py``,
+``events/dispatcher.py``), lock-only helpers such as
+``app/tasks/_postgres_lock.py``'s ``postgres_session_advisory_lock`` (commits
+only the advisory-lock acquisition, never business data), and
+``engine.begin()`` against the external RADIUS accounting database (a
+different engine entirely, e.g. ``app/services/radius.py``/``usage.py``).
 """
 
 from __future__ import annotations
@@ -331,16 +348,12 @@ BASELINE: dict[str, str] = {
     "app/services/network_operation_dispatch.py::managed_network_operation_dispatch.decorator.wrapped": (
         "infrastructure: durable dispatch-claim decorator wraps a device task with its own execution-claim ledger session, independent of the wrapped task"
     ),
-    # -- Notification delivery adapters: each opens its own session for one
-    # -- send/availability probe. Invoked from arbitrary callers (API
-    # -- handlers, tasks), so the delivery attempt is deliberately isolated
+    # -- Notification delivery availability probes: each opens its own
+    # -- session for one read-only capability check. Invoked from arbitrary
+    # -- callers (API handlers, tasks), so the probe is deliberately isolated
     # -- from whatever transaction the caller happens to hold, not a caller
     # -- transaction it should join.
     "app/services/notification_adapter.py::EmailProvider.is_available": (
-        "adapter-owned session lifecycle (notification delivery adapter): "
-        "own session per send/availability probe, independent of caller"
-    ),
-    "app/services/notification_adapter.py::EmailProvider.send": (
         "adapter-owned session lifecycle (notification delivery adapter): "
         "own session per send/availability probe, independent of caller"
     ),
@@ -348,9 +361,57 @@ BASELINE: dict[str, str] = {
         "adapter-owned session lifecycle (notification delivery adapter): "
         "own session per send/availability probe, independent of caller"
     ),
+    # -- Legacy out-of-band writers, tracked by name in
+    # -- test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS:
+    # -- called from app/services/operational_escalation_delivery.py's
+    # -- ``_send_to_target(db, ...)`` chain (db: Session held open by the
+    # -- caller), each opens its OWN session via db_session_adapter.session()
+    # -- and commits a delivery record mid-flow while that caller session may
+    # -- still be open -- the same nested-commit-while-caller-holds-a-session
+    # -- shape as persist_data_model_root.
+    "app/services/notification_adapter.py::EmailProvider.send": (
+        "legacy out-of-band writer (listed in "
+        "test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS)"
+    ),
     "app/services/notification_adapter.py::SmsProvider.send": (
-        "adapter-owned session lifecycle (notification delivery adapter): "
-        "own session per send/availability probe, independent of caller"
+        "legacy out-of-band writer (listed in "
+        "test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS)"
+    ),
+    # -- New task_session_context hits: app/db.py's task_session() is a
+    # -- bare-name auto-committing generator (SessionLocal()+yield+commit),
+    # -- imported function-locally at every real call site here. Every one is
+    # -- a top-level Celery task or a standalone run_*() beat entry point with
+    # -- no caller holding an open session -- verified by grepping every
+    # -- caller (crm_ticket_pull/support_tickets are the @celery_app.task
+    # -- functions themselves; the dotmac_erp run_*() functions are each
+    # -- called only from a top-level task in app/tasks/dotmac_erp_outbox.py,
+    # -- or (run_repair_expense_claim_writebacks) not wired to a caller at
+    # -- all yet, per its own docstring).
+    "app/services/dotmac_erp/expense_sync.py::run_refresh_expense_claim_statuses": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/expense_sync.py::run_repair_expense_claim_writebacks": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/material_sync.py::run_refresh_material_request_statuses": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/outbox.py::run_deliver_pending": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/purchase_invoice_sync.py::run_refresh_purchase_invoice_statuses": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/purchase_invoice_sync.py::run_repair_purchase_invoice_sync": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/services/dotmac_erp/purchase_order_sync.py::run_repair_purchase_order_writebacks": (
+        "adapter-owned session lifecycle (task/runner)"
+    ),
+    "app/tasks/crm_ticket_pull.py::pull_crm_tickets": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/crm_ticket_pull.py::sync_crm_ticket": "adapter-owned session lifecycle (task/runner)",
+    "app/tasks/support_tickets.py::auto_confirm_resolved_tickets": (
+        "adapter-owned session lifecycle (task/runner)"
     ),
 }
 
@@ -364,6 +425,7 @@ SHAPE_CREATE_SESSION_COMMIT = "create_session_commit"
 SHAPE_SESSION_LOCAL_COMMIT = "session_local_commit"
 SHAPE_AUTO_COMMIT_SESSION = "auto_commit_session"
 SHAPE_AUTO_COMMIT_ADVISORY_LOCK = "auto_commit_advisory_lock"
+SHAPE_TASK_SESSION_CONTEXT = "task_session_context"
 
 #: ``with``-block context managers that commit on normal exit with no visible
 #: ``.commit()`` call at the use site (see app/services/db_session_adapter.py).
@@ -438,6 +500,54 @@ def _module_session_local_aliases(module: ast.Module) -> frozenset[str]:
     return frozenset(aliases)
 
 
+def _module_task_session_aliases(module: ast.Module) -> frozenset[str]:
+    """Module-level names bound to ``from app.db import task_session`` (optionally
+    ``as X``). ``task_session`` (app/db.py) is itself a ``@contextmanager``
+    generator that opens ``SessionLocal()``, yields, and commits on normal
+    exit -- the same auto-committing shape as
+    ``db_session_adapter.session()``, just a bare-name call rather than an
+    attribute call, and often imported function-locally (see
+    ``_local_task_session_aliases`` below) rather than at module level.
+    """
+    aliases: set[str] = set()
+    for node in module.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "app.db":
+            for alias in node.names:
+                if alias.name == "task_session":
+                    aliases.add(alias.asname or alias.name)
+    return frozenset(aliases)
+
+
+def _local_task_session_aliases(node: ast.AST) -> frozenset[str]:
+    """Function-local ``from app.db import task_session`` aliases within
+    ``node``'s OWN body (excluding nested defs) -- the common shape at every
+    real call site (e.g. ``app/services/dotmac_erp/outbox.py``), where the
+    import sits inside the function rather than at module level.
+    """
+    aliases: set[str] = set()
+
+    def walk(current: ast.AST) -> None:
+        for child in ast.iter_child_nodes(current):
+            if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                continue
+            if isinstance(child, ast.ImportFrom) and child.module == "app.db":
+                for alias in child.names:
+                    if alias.name == "task_session":
+                        aliases.add(alias.asname or alias.name)
+            walk(child)
+
+    walk(node)
+    return frozenset(aliases)
+
+
+def _is_task_session_call(call: ast.Call, aliases: frozenset[str]) -> bool:
+    """Whether ``call`` invokes a bare ``task_session``-style name."""
+    func = call.func
+    return isinstance(func, ast.Name) and func.id in aliases
+
+
 def _is_create_session_call(call: ast.Call, aliases: frozenset[str]) -> bool:
     func = call.func
     if isinstance(func, ast.Attribute) and func.attr == "create_session":
@@ -469,7 +579,10 @@ def _auto_commit_context_manager_shape(expr: ast.expr) -> str | None:
 
 
 def _own_body_shapes(
-    node: ast.AST, cs_aliases: frozenset[str], sl_aliases: frozenset[str]
+    node: ast.AST,
+    cs_aliases: frozenset[str],
+    sl_aliases: frozenset[str],
+    ts_module_aliases: frozenset[str],
 ) -> frozenset[str]:
     """Every shape matched by ``node``'s OWN body (excluding nested defs).
 
@@ -482,6 +595,7 @@ def _own_body_shapes(
     has_commit = False
     has_session_local = False
     shapes: set[str] = set()
+    ts_aliases = ts_module_aliases | _local_task_session_aliases(node)
 
     def walk(current: ast.AST) -> None:
         nonlocal has_create, has_commit, has_session_local
@@ -495,6 +609,11 @@ def _own_body_shapes(
                     shape = _auto_commit_context_manager_shape(item.context_expr)
                     if shape is not None:
                         shapes.add(shape)
+                    context_expr = item.context_expr
+                    if isinstance(context_expr, ast.Call) and _is_task_session_call(
+                        context_expr, ts_aliases
+                    ):
+                        shapes.add(SHAPE_TASK_SESSION_CONTEXT)
             if isinstance(child, ast.Call):
                 if _is_create_session_call(child, cs_aliases):
                     has_create = True
@@ -518,9 +637,12 @@ def find_out_of_band_writers_with_shapes(root: Path) -> dict[str, frozenset[str]
     ``create_session()``/a module-level alias of it, or via a bare
     ``SessionLocal()``-style factory call -- AND commits it, or (b) enters
     one of the auto-committing ``db_session_adapter`` context managers
-    (``session()``/``advisory_lock()``). Maps each hit's ``"path::qualname"``
-    (``qualname`` dotted through enclosing classes/functions) to the set of
-    shape labels (``SHAPE_*`` above) that matched it.
+    (``session()``/``advisory_lock()``), or (c) enters ``task_session()``
+    (``app/db.py``'s bare-name auto-committing generator, imported either at
+    module level or, more commonly, function-locally). Maps each hit's
+    ``"path::qualname"`` (``qualname`` dotted through enclosing
+    classes/functions) to the set of shape labels (``SHAPE_*`` above) that
+    matched it.
     """
     hits: dict[str, frozenset[str]] = {}
     app_root = root / "app"
@@ -532,8 +654,11 @@ def find_out_of_band_writers_with_shapes(root: Path) -> dict[str, frozenset[str]
             continue
         cs_aliases = _module_create_session_aliases(tree)
         sl_aliases = _module_session_local_aliases(tree)
+        ts_aliases = _module_task_session_aliases(tree)
         rel = path.relative_to(root).as_posix()
-        hits.update(_scan_module_functions(tree, cs_aliases, sl_aliases, rel))
+        hits.update(
+            _scan_module_functions(tree, cs_aliases, sl_aliases, ts_aliases, rel)
+        )
     return hits
 
 
@@ -550,6 +675,7 @@ def _scan_module_functions(
     node: ast.AST,
     cs_aliases: frozenset[str],
     sl_aliases: frozenset[str],
+    ts_aliases: frozenset[str],
     rel: str,
     stack: list[str] | None = None,
 ) -> dict[str, frozenset[str]]:
@@ -559,22 +685,24 @@ def _scan_module_functions(
         if isinstance(child, ast.ClassDef):
             found.update(
                 _scan_module_functions(
-                    child, cs_aliases, sl_aliases, rel, [*stack, child.name]
+                    child, cs_aliases, sl_aliases, ts_aliases, rel, [*stack, child.name]
                 )
             )
         elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             qualname = ".".join([*stack, child.name])
-            shapes = _own_body_shapes(child, cs_aliases, sl_aliases)
+            shapes = _own_body_shapes(child, cs_aliases, sl_aliases, ts_aliases)
             if shapes:
                 found[f"{rel}::{qualname}"] = shapes
             found.update(
                 _scan_module_functions(
-                    child, cs_aliases, sl_aliases, rel, [*stack, child.name]
+                    child, cs_aliases, sl_aliases, ts_aliases, rel, [*stack, child.name]
                 )
             )
         else:
             found.update(
-                _scan_module_functions(child, cs_aliases, sl_aliases, rel, stack)
+                _scan_module_functions(
+                    child, cs_aliases, sl_aliases, ts_aliases, rel, stack
+                )
             )
     return found
 
@@ -836,6 +964,101 @@ class TestScannerSensitivity:
         key = "app/services/sneaky_with_advisory_lock.py::write_something"
         assert key in hits_with_shapes
         assert hits_with_shapes[key] == frozenset({SHAPE_AUTO_COMMIT_ADVISORY_LOCK})
+
+    def test_a_planted_function_local_task_session_import_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """Mirrors the real call sites (e.g.
+        ``app/services/dotmac_erp/outbox.py``): the ``task_session`` import
+        sits INSIDE the function, not at module level."""
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_task_session.py").write_text(
+            "def write_something(x):\n"
+            "    from app.db import task_session\n"
+            "\n"
+            "    with task_session() as db:\n"
+            "        db.add(x)\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_task_session.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_TASK_SESSION_CONTEXT})
+
+    def test_a_planted_module_level_task_session_alias_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_task_session_alias.py").write_text(
+            "from app.db import task_session as owned_session\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    with owned_session() as db:\n"
+            "        db.add(x)\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_task_session_alias.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_TASK_SESSION_CONTEXT})
+
+    def test_a_planted_sessionlocal_import_alias_plus_commit_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """``from app.db import SessionLocal as X`` -- the aliased-import case."""
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_sessionlocal_alias.py").write_text(
+            "from app.db import SessionLocal as OwnSession\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    s = OwnSession()\n"
+            "    s.add(x)\n"
+            "    s.commit()\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_sessionlocal_alias.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_SESSION_LOCAL_COMMIT})
+
+    def test_a_planted_annotated_sessionmaker_assignment_plus_commit_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """A module-level ANNOTATED assignment (``NAME: T = sessionmaker(...)``),
+        not a plain ``Assign`` -- the ``AnnAssign`` branch of
+        ``_module_session_local_aliases``."""
+        app_dir = tmp_path / "app" / "services"
+        app_dir.mkdir(parents=True)
+        (app_dir / "sneaky_annotated_factory.py").write_text(
+            "from sqlalchemy.orm import sessionmaker, Session\n"
+            "\n"
+            "_engine = None\n"
+            "OwnSessionFactory: type[Session] = sessionmaker(bind=_engine)\n"
+            "\n"
+            "\n"
+            "def write_something(x):\n"
+            "    s = OwnSessionFactory()\n"
+            "    s.add(x)\n"
+            "    s.commit()\n",
+            encoding="utf-8",
+        )
+
+        hits_with_shapes = find_out_of_band_writers_with_shapes(tmp_path)
+
+        key = "app/services/sneaky_annotated_factory.py::write_something"
+        assert key in hits_with_shapes
+        assert hits_with_shapes[key] == frozenset({SHAPE_SESSION_LOCAL_COMMIT})
 
 
 def test_every_known_legacy_out_of_band_writer_is_in_the_baseline() -> None:
