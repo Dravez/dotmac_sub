@@ -21,12 +21,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.logging import sanitize_exception
+from app.models.catalog import NasDevice, Subscription, SubscriptionStatus
 from app.models.enforcement_application import (
     ENFORCEMENT_APPLICATION_DETAIL_MAX_LENGTH,
     EnforcementApplication,
@@ -43,7 +44,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["EnforcementOutcome", "record_enforcement_application"]
+__all__ = [
+    "EffectOutcomeTotal",
+    "EnforcementEvidenceShadowReport",
+    "EnforcementOutcome",
+    "FailedEnforcementRow",
+    "FailureClassTotal",
+    "NasEnforcementSummary",
+    "enforcement_evidence_shadow_report",
+    "record_enforcement_application",
+]
 
 
 @dataclass(frozen=True)
@@ -224,3 +234,246 @@ def record_enforcement_application(
     finally:
         if session is not None:
             session.close()
+
+
+#: Bound on the human-facing sections of the shadow report so an operator's
+#: terminal (or a JSON payload) stays reviewable. Totals/per-NAS rollups are
+#: full aggregates regardless of this bound; only the row-level lists below
+#: are truncated by it.
+_DEFAULT_SHADOW_REPORT_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class EffectOutcomeTotal:
+    """One (effect, outcome) rollup within the report window."""
+
+    effect: str
+    outcome: str
+    count: int
+
+
+@dataclass(frozen=True)
+class FailureClassTotal:
+    """One failure-class rollup within the report window."""
+
+    failure_class: str
+    count: int
+
+
+@dataclass(frozen=True)
+class NasEnforcementSummary:
+    """Per-NAS evidence rollup within the report window.
+
+    ``nas_name`` is ``None`` when ``nas_device_id`` no longer resolves to a
+    row in ``nas_devices`` — ``EnforcementApplication`` carries no foreign
+    key (ADR-0017 §3), so a dangling id must be tolerated, not treated as an
+    error.
+    """
+
+    nas_device_id: UUID
+    nas_name: str | None
+    failed_count: int
+    applied_count: int
+    last_success_at: datetime | None
+    oldest_first_failed_at: datetime | None
+
+
+@dataclass(frozen=True)
+class FailedEnforcementRow:
+    """One currently-failed evidence row, juxtaposed with the subscription's
+    CURRENT status.
+
+    ``subscription_status`` is read fresh at report time — it is never the
+    status implied by the evidence row, and it is ``None`` when
+    ``subscription_id`` no longer resolves to a row in ``subscriptions``
+    (again tolerated, not an error, per ADR-0017 §3).
+    """
+
+    subscription_id: UUID
+    nas_device_id: UUID
+    effect: str
+    failure_class: str | None
+    detail: str | None
+    attempt_count: int
+    first_failed_at: datetime | None
+    last_attempt_at: datetime
+    subscription_status: str | None
+
+
+@dataclass(frozen=True)
+class EnforcementEvidenceShadowReport:
+    """The ADR-0017 slice-2 cutover gate's read-only shadow comparison.
+
+    Juxtaposes recorded ``EnforcementApplication`` evidence against router
+    logs (an operator cross-checks those separately, see the runbook) and
+    against each subscription's current status. It never treats the record
+    as intended state — ``mismatch_candidates`` names a *candidate* for human
+    review, not a resolved discrepancy.
+    """
+
+    since: datetime
+    generated_at: datetime
+    limit: int
+    totals_by_effect_outcome: tuple[EffectOutcomeTotal, ...]
+    totals_by_failure_class: tuple[FailureClassTotal, ...]
+    per_nas: tuple[NasEnforcementSummary, ...]
+    currently_failed: tuple[FailedEnforcementRow, ...]
+    mismatch_candidates: tuple[FailedEnforcementRow, ...]
+
+
+def _failed_row(row: Any) -> FailedEnforcementRow:
+    status = row.subscription_status
+    return FailedEnforcementRow(
+        subscription_id=row.subscription_id,
+        nas_device_id=row.nas_device_id,
+        effect=row.effect,
+        failure_class=row.failure_class,
+        detail=row.detail,
+        attempt_count=row.attempt_count,
+        first_failed_at=row.first_failed_at,
+        last_attempt_at=row.last_attempt_at,
+        subscription_status=status.value if status is not None else None,
+    )
+
+
+def enforcement_evidence_shadow_report(
+    db: Session,
+    *,
+    since: datetime,
+    limit: int = _DEFAULT_SHADOW_REPORT_LIMIT,
+) -> EnforcementEvidenceShadowReport:
+    """Read-only shadow comparison over ``EnforcementApplication`` (ADR-0017).
+
+    Owned by ``access.enforcement_evidence`` because it is the record's
+    owner. Issues only ``SELECT`` statements against ``db`` — no flush, no
+    commit, no write of any kind — and is the tool an operator runs after the
+    ADR-0017 slice deploys, before slice 2 (a resolver reading this evidence)
+    is allowed to proceed (see
+    ``docs/runbooks/ENFORCEMENT_EVIDENCE_SHADOW_COMPARISON.md``).
+
+    This never treats the evidence row as intended state: ``mismatch_candidates``
+    only juxtaposes a failed enforcement attempt against the subscription's
+    CURRENT status for a human to review, exactly as ADR-0017's invariants
+    require of every reader of this record.
+    """
+    app_tbl = EnforcementApplication
+    window = app_tbl.last_attempt_at >= since
+
+    # Labelled "total", never "count": `Row` already exposes a tuple
+    # `.count()` method, and a `.label("count")` column silently shadows it
+    # with an int, which mypy (correctly) rejects as a type conflict.
+    totals_stmt = (
+        select(app_tbl.effect, app_tbl.outcome, func.count().label("total"))
+        .where(window)
+        .group_by(app_tbl.effect, app_tbl.outcome)
+    )
+    totals_by_effect_outcome = tuple(
+        EffectOutcomeTotal(effect=row.effect, outcome=row.outcome, count=row.total)
+        for row in db.execute(totals_stmt)
+    )
+
+    failure_totals_stmt = (
+        select(app_tbl.failure_class, func.count().label("total"))
+        .where(window, app_tbl.failure_class.isnot(None))
+        .group_by(app_tbl.failure_class)
+    )
+    totals_by_failure_class = tuple(
+        FailureClassTotal(failure_class=row.failure_class, count=row.total)
+        for row in db.execute(failure_totals_stmt)
+    )
+
+    per_nas_stmt = (
+        select(
+            app_tbl.nas_device_id,
+            NasDevice.name.label("nas_name"),
+            func.sum(
+                case(
+                    (app_tbl.outcome == EnforcementOutcomeValue.failed.value, 1),
+                    else_=0,
+                )
+            ).label("failed_count"),
+            func.sum(
+                case(
+                    (app_tbl.outcome == EnforcementOutcomeValue.applied.value, 1),
+                    else_=0,
+                )
+            ).label("applied_count"),
+            func.max(app_tbl.last_success_at).label("last_success_at"),
+            func.min(app_tbl.first_failed_at).label("oldest_first_failed_at"),
+        )
+        .select_from(app_tbl)
+        .outerjoin(NasDevice, NasDevice.id == app_tbl.nas_device_id)
+        .where(window)
+        .group_by(app_tbl.nas_device_id, NasDevice.name)
+    )
+    per_nas = tuple(
+        NasEnforcementSummary(
+            nas_device_id=row.nas_device_id,
+            nas_name=row.nas_name,
+            failed_count=int(row.failed_count or 0),
+            applied_count=int(row.applied_count or 0),
+            last_success_at=row.last_success_at,
+            oldest_first_failed_at=row.oldest_first_failed_at,
+        )
+        for row in db.execute(per_nas_stmt)
+    )
+
+    failed_base = (
+        select(
+            app_tbl.subscription_id,
+            app_tbl.nas_device_id,
+            app_tbl.effect,
+            app_tbl.failure_class,
+            app_tbl.detail,
+            app_tbl.attempt_count,
+            app_tbl.first_failed_at,
+            app_tbl.last_attempt_at,
+            Subscription.status.label("subscription_status"),
+        )
+        .select_from(app_tbl)
+        .outerjoin(Subscription, Subscription.id == app_tbl.subscription_id)
+        .where(window, app_tbl.outcome == EnforcementOutcomeValue.failed.value)
+    )
+
+    currently_failed_stmt = failed_base.order_by(app_tbl.first_failed_at.asc()).limit(
+        limit
+    )
+    currently_failed = tuple(
+        _failed_row(row) for row in db.execute(currently_failed_stmt)
+    )
+
+    # Mismatch candidates (ADR-0017 §8 cutover gate): a failed unblock while
+    # the subscription now reads active (still blocked?), or a failed block
+    # while the subscription now reads suspended/blocked (never blocked?).
+    # This is evidence juxtaposed with current status, never a resolved
+    # discrepancy or a claim about intended state.
+    mismatch_stmt = (
+        failed_base.where(
+            or_(
+                and_(
+                    app_tbl.effect == EnforcementEffect.address_list_unblock.value,
+                    Subscription.status == SubscriptionStatus.active,
+                ),
+                and_(
+                    app_tbl.effect == EnforcementEffect.address_list_block.value,
+                    Subscription.status.in_(
+                        (SubscriptionStatus.suspended, SubscriptionStatus.blocked)
+                    ),
+                ),
+            )
+        )
+        .order_by(app_tbl.first_failed_at.asc())
+        .limit(limit)
+    )
+    mismatch_candidates = tuple(_failed_row(row) for row in db.execute(mismatch_stmt))
+
+    return EnforcementEvidenceShadowReport(
+        since=since,
+        generated_at=datetime.now(UTC),
+        limit=limit,
+        totals_by_effect_outcome=totals_by_effect_outcome,
+        totals_by_failure_class=totals_by_failure_class,
+        per_nas=per_nas,
+        currently_failed=currently_failed,
+        mismatch_candidates=mismatch_candidates,
+    )
