@@ -1197,29 +1197,125 @@ DOMAIN = DomainSOT(
         SOTService(
             name="access.session_enforcement",
             module="app.services.enforcement",
-            owns=(
-                "typed access-state CoA/disconnect execution",
-                "NAS-evidenced accounting-session closure",
-                "single-flight access-control recovery execution",
-            ),
+            owns=("typed access-state CoA/disconnect execution",),
             depends_on=(
                 "access.radius_projection",
                 "access.radius_state",
                 "sessions.radius_resolution",
             ),
             notes=(
-                "Disconnect ACK, RFC 5176 session-not-found, rejection, timeout "
-                "and configuration failure remain distinct outcomes. Accounting "
-                "closes only when the NAS explicitly reports that the session "
-                "context is absent. Exact-old-IP projection repair issues one "
-                "disconnect and bounded-polls authoritative radacct for up to "
-                "15 seconds; it does not fall back to the lagging imported "
-                "accounting mirror, and polling never sends a second customer "
-                "interruption. "
-                "The periodic recovery loop is single-flight and caps attempts "
-                "rather than successes. "
-                "Hands each final per-NAS address-list and session-kick "
-                "outcome to access.enforcement_evidence (ADR 0017)."
+                "Read-only transport of access-state consequences to NAS devices: "
+                "RADIUS Disconnect/CoA, RouterOS API/SSH session kicks and "
+                "address-list blocks. Disconnect ACK, RFC 5176 session-not-found, "
+                "rejection, timeout and configuration failure remain distinct "
+                "outcomes. Exact-old-IP projection repair issues one disconnect "
+                "and bounded-polls authoritative radacct for up to 15 seconds "
+                "without a second customer interruption. This concern (the "
+                "transport functions: update_subscription_sessions, "
+                "disconnect_subscription_sessions[_confirmed], "
+                "disconnect_account_sessions, the CoA senders and the "
+                "address-list block/unblock paths) writes no database row; each "
+                "final per-NAS outcome is recorded by access.enforcement_evidence "
+                "(ADR 0017). The same module ALSO performs state writes that are "
+                "not this concern (credential RADIUS profiles, cancel/suspend/"
+                "restore activation, served-IPv4 release, the FUP-lift step); "
+                "they are declared under sessions.enforcement as migration "
+                "debt, with NAS-evidenced closure and single-flight recovery."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="typed access-state CoA/disconnect execution",
+                        role=OwnerRole.TRANSPORT,
+                        input_names=(
+                            "subscription service identity",
+                            "open RADIUS accounting sessions",
+                            "NAS device inventory",
+                            "NAS response to the enforcement command",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="subscription service identity",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="subscriptions and access_credentials",
+                    ),
+                    AuthorityInput(
+                        name="open RADIUS accounting sessions",
+                        owner="external:freeradius",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source="authoritative radacct rows with acctstoptime IS NULL",
+                    ),
+                    AuthorityInput(
+                        name="NAS device inventory",
+                        owner="network.nas_inventory",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="nas_devices",
+                    ),
+                    AuthorityInput(
+                        name="NAS response to the enforcement command",
+                        owner="external:routeros",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "Disconnect-ACK/NAK Error-Cause and RouterOS API read-back"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "the transport functions read through the caller's "
+                        "session and never flush or commit; per-NAS outcome "
+                        "evidence is written by access.enforcement_evidence on "
+                        "its own unit of work (ADR 0017). Other writes in the "
+                        "same module belong to the debt concerns declared under "
+                        "sessions.enforcement, not to this contract"
+                    ),
+                    locking=(
+                        "none; a process-local CoA negative cache avoids repeating "
+                        "known-unsupported CoA"
+                    ),
+                    idempotency=(
+                        "none: each call is a new customer interruption; the "
+                        "confirmed path sends one disconnect and then only polls"
+                    ),
+                    retries=(
+                        "caller-owned; the confirmed poll is bounded to 15 seconds "
+                        "and never re-sends"
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                        "access.session_enforcement.terminal_session_timeout",
+                        "access.session_enforcement.subscription_not_found",
+                    ),
+                    mapping_owner=(
+                        "app.services.events.handlers (enforcement, "
+                        "ip_assignment_projection)"
+                    ),
+                    fail_closed_on=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="access.session_enforcement",
+                ),
+                steward="network operations",
+                design_refs=(
+                    "docs/adr/0017-enforcement-application-evidence.md",
+                    "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
+                ),
+                test_refs=(
+                    "tests/test_ip_assignment_projection_handler.py",
+                    "tests/test_enforcement_gaps.py",
+                    "tests/integration/test_enforcement_application_evidence_durability.py",
+                ),
             ),
         ),
         SOTService(

@@ -137,12 +137,54 @@ DOMAIN = DomainSOT(
             name="sessions.enforcement",
             module="app.services.enforcement",
             owns=(
-                "CoA/disconnect execution",
-                "session refresh after access-state changes",
+                "NAS-evidenced accounting-session closure",
+                "single-flight access-control recovery execution",
+                "subscription cancel/suspend/restore/FUP-lift access-cleanup "
+                "coordination",
             ),
             depends_on=(
                 "financial.access_resolution",
                 "sessions.radius_resolution",
+            ),
+            notes=(
+                "Migration debt (legacy manifest baseline). The closure and "
+                "recovery concerns are implemented in the Celery task "
+                "app/tasks/radius.py: NAS-evidenced closure writes "
+                "FreeRADIUS radacct on its own connection on an RFC 5176 "
+                "session-not-found reply, and the single-flight recovery loop "
+                "runs under an advisory lock. Owed: extract recovery into a "
+                "coordinator-managed owner command; and migrate radacct closure "
+                "to the decided single path (Michael, 2026-09-26): this service "
+                "is Sub's only synthetic closure writer and sets acctstoptime "
+                "only on positive NAS evidence of session absence; FreeRADIUS "
+                "remains the source of real Stop and Accounting-On/Off; the "
+                "age-based reaper in app/services/radius_reconciliation.py "
+                "becomes identify-and-report (stale rows are unknown until "
+                "verified) and loses its direct update only through a measured "
+                "cutover. The access-cleanup coordination concern is the "
+                "cancel/suspend/restore and FUP-lift orchestration in "
+                "app.services.enforcement (cleanup_subscription_on_cancel, "
+                "cleanup_subscription_on_suspend, "
+                "restore_subscription_connectivity, lift_fup_enforcement), which "
+                "has no owner command; its only unowned writes are "
+                "RadiusUser.is_active. Its other writes are PARALLEL WRITERS of "
+                "state other services own, recorded as debt against them, not "
+                "owned here: AccessCredential.radius_profile_id via "
+                "apply_radius_profile_to_subscription (owner "
+                "access.credential_binding; raises "
+                "access.session_enforcement.credentials_ambiguous / "
+                "no_subscription_credentials); AccessCredential.is_active (owner "
+                "access.pppoe_credentials); Subscription.ipv4_address / "
+                "ipv6_address cleared on cancel (owner "
+                "network.ip_assignment_lifecycle, tracked in "
+                "tests/architecture/served_ipv4_writer_baseline.txt); and "
+                "project_credentials_to_radius, a request to "
+                "access.radius_projection rather than a projection of its own. "
+                "FUP state itself is cleared through access.fup_runtime_state. "
+                "Each needs its owner command or cutover. "
+                "CoA/disconnect execution "
+                "and session refresh are contracted under "
+                "access.session_enforcement."
             ),
         ),
     ),

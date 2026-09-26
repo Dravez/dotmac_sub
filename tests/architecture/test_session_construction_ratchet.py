@@ -87,7 +87,10 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: (tests/integration/test_enforcement_application_evidence_durability.py) use
 #: their own sessionmaker to observe the evidence from a fresh connection after
 #: the caller rolls back.
-TEST_FIXTURE_BASELINE_TOTAL = 144
+#: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
+#: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
+#: isolated like the writer tests (EnforcementApplication carries no FKs).
+TEST_FIXTURE_BASELINE_TOTAL = 146
 
 
 def _baseline() -> dict[str, int]:

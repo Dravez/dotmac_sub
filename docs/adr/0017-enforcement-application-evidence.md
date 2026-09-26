@@ -73,12 +73,35 @@ does afterwards, so evidence of it must not share that transaction's fate.
    that shape it needs no domain error codes or events, because the writer never
    raises into its caller and emits nothing
    (`tests/architecture/test_sot_manifest_out_of_band_evidence.py`).
-   `access.session_enforcement` performs the attempts and depends on it. Its own
-   CoA, session-closure and recovery concerns remain on the shrink-only legacy
-   manifest baseline as pre-existing debt, independent of this record.
-   `app/services/enforcement.py` is also registered under `sessions.enforcement`;
-   which name owns `update_subscription_sessions` is settled when that service
-   is contracted.
+   `access.session_enforcement` performs the attempts and hands each final
+   outcome to it. `access.session_enforcement` is itself contracted as a
+   read-only `transport` of access-state consequences (it writes no database
+   row), which covers CoA/disconnect execution including
+   `update_subscription_sessions`. The two concerns it could not honestly
+   contract, NAS-evidenced accounting closure and single-flight recovery, are
+   implemented in the Celery task `app/tasks/radius.py` and are declared under
+   the baselined `sessions.enforcement` as named migration debt, together with
+   one more: the cancel/suspend/restore and FUP-lift access-cleanup
+   coordination, which has no owner command (its only unowned writes are
+   `RadiusUser.is_active`). The module's other writes are parallel writers of
+   state that other services already own, recorded as debt against those
+   owners rather than claimed by `sessions.enforcement`:
+   `AccessCredential.radius_profile_id` (`access.credential_binding`, with the
+   `credentials_ambiguous`/`no_subscription_credentials` codes),
+   `AccessCredential.is_active` (`access.pppoe_credentials`), the served
+   IPv4/IPv6 cleared on cancel (`network.ip_assignment_lifecycle`, already in
+   `served_ipv4_writer_baseline.txt`), and `project_credentials_to_radius` as a
+   request to `access.radius_projection`. The transport contract covers only
+   the transport functions, which write no row. Also, `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
+   age-based reaper in `app/services/radius_reconciliation.py`). Decided by
+   Michael (2026-09-26): `sessions.enforcement` is Sub's sole synthetic closure
+   path and sets `acctstoptime` only on positive NAS evidence of session absence
+   (RFC 5176 Error-Cause 503); FreeRADIUS's own accounting remains the source of
+   actual Stop and Accounting-On/Off. An old interim timestamp is evidence that
+   observation went stale, not that the session ended, so the age-based reaper
+   becomes identify-and-report (stale rows are reported as unknown while
+   verification is unavailable) and its direct update is retired only through a
+   measured cutover, as its own reviewed slice.
 
 2. **Canonical writer.** `access.enforcement_evidence` is the only writer,
    through `record_enforcement_application` in
@@ -207,6 +230,8 @@ does afterwards, so evidence of it must not share that transaction's fate.
   (`access.enforcement_evidence`). Slice 2 may read the record only after the
   shadow comparison against logs and router state is recorded; its readers must
   tolerate dangling ids and never treat the record as the intended state.
+  The read-only tool an operator runs to produce that recorded comparison,
+  and how to read it, is `docs/runbooks/ENFORCEMENT_EVIDENCE_SHADOW_COMPARISON.md`.
 - Fallback retirement: the warning-only failure logs stay until the readiness
   projection slice lands, then are reduced to structured records.
 - Schema contract step: additive table only; no existing column changes.
@@ -235,8 +260,9 @@ does afterwards, so evidence of it must not share that transaction's fate.
   manifest rules have their own positive and negative tests.
 - SOT registry: `access.enforcement_evidence` carries a complete
   `ServiceContract` (mode `out_of_band_evidence`) and every registered contract
-  validates; `access.session_enforcement` is unchanged on the legacy baseline
-  (no new baseline entry).
+  validates. `access.session_enforcement` has a complete read-only transport
+  contract and has left the shrink-only legacy baseline; `sessions.enforcement`
+  stays on it for the two task-implemented concerns.
 
 ## Rollback or forward-fix
 

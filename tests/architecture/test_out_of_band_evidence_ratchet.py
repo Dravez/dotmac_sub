@@ -35,6 +35,13 @@ APPROVED_OUT_OF_BAND_EVIDENCE: Mapping[str, str] = {
 KNOWN_LEGACY_OUT_OF_BAND_WRITERS: tuple[str, ...] = (
     "app/services/prepaid_service_renewals.py::_record_review_item_out_of_band",
     "app/services/nas/_mikrotik.py::_record_mikrotik_auth_attempt",
+    # Found by tests/architecture/test_undeclared_out_of_band_writers.py: a
+    # retried, independent-connection staff-alert summary write that copies the
+    # review-item technique. Not an observation collector; listed, not migrated.
+    "app/services/prepaid_service_renewals.py::_finalize_scheduled_renewal_summary",
+    # A nested ONT/CPE helper that commits the detected TR-069 data-model root
+    # on its own session while its caller may hold the same device row.
+    "app/services/network/ont_action_common.py::persist_data_model_root",
 )
 
 _MODE = TransactionMode.OUT_OF_BAND_EVIDENCE.value
@@ -112,8 +119,14 @@ def test_known_legacy_out_of_band_writers_still_exist() -> None:
     """If a legacy writer is migrated or removed, update the list.
 
     One-directional by design: this does not detect a NEW out-of-band writer
-    that skips the mode. A scan for create_session() plus commit in
-    app/services outside the approved and legacy lists is an open follow-up.
+    that skips the mode. Partial detection is
+    ``tests/architecture/test_undeclared_out_of_band_writers.py``: an AST
+    scan for create_session() plus commit across all of app/, ratcheted
+    two-directionally against an approved and a classified baseline set. It
+    does NOT yet recognise SessionLocal()/sessionmaker-produced sessions or the
+    auto-committing ``with db_session_adapter.session()`` /
+    ``owner_command_session()`` / ``advisory_lock()`` shapes; see that module's
+    stated limitations.
     """
     for entry in KNOWN_LEGACY_OUT_OF_BAND_WRITERS:
         module, function = entry.split("::")
