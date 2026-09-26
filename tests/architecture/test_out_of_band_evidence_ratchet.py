@@ -15,6 +15,7 @@ change: an ADR that names it, a contract citing that ADR, and an entry here.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,13 @@ KNOWN_LEGACY_OUT_OF_BAND_WRITERS: tuple[str, ...] = (
     # A nested ONT/CPE helper that commits the detected TR-069 data-model root
     # on its own session while its caller may hold the same device row.
     "app/services/network/ont_action_common.py::persist_data_model_root",
+    # Notification delivery: called from
+    # app/services/operational_escalation_delivery.py's _send_to_target(db, ...)
+    # chain, which holds `db: Session` open across the call. Each opens its
+    # OWN session via db_session_adapter.session() and commits a delivery
+    # record mid-flow while that caller session may still be open.
+    "app/services/notification_adapter.py::EmailProvider.send",
+    "app/services/notification_adapter.py::SmsProvider.send",
 )
 
 _MODE = TransactionMode.OUT_OF_BAND_EVIDENCE.value
@@ -92,6 +100,29 @@ def _read_repo_text(relative_path: str) -> str | None:
     return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
+def _declares_qualified_function(source: str, qualified_name: str) -> bool:
+    """Return whether ``source`` declares a function or class method by name."""
+    nodes: list[ast.stmt] = ast.parse(source).body
+    *class_names, function_name = qualified_name.split(".")
+    for class_name in class_names:
+        matching_class = next(
+            (
+                node
+                for node in nodes
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ),
+            None,
+        )
+        if matching_class is None:
+            return False
+        nodes = matching_class.body
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+        for node in nodes
+    )
+
+
 def _registry_views() -> list[ServiceView]:
     from app.services.sot_registry.registry import all_services
 
@@ -121,18 +152,28 @@ def test_known_legacy_out_of_band_writers_still_exist() -> None:
     One-directional by design: this does not detect a NEW out-of-band writer
     that skips the mode. Partial detection is
     ``tests/architecture/test_undeclared_out_of_band_writers.py``: an AST
-    scan for create_session() plus commit across all of app/, ratcheted
-    two-directionally against an approved and a classified baseline set. It
-    does NOT yet recognise SessionLocal()/sessionmaker-produced sessions or the
+    scan across all of app/, ratcheted two-directionally against an approved
+    and a classified baseline set, for a function that in its own body opens
+    and commits a session via ``create_session()``, a module-level alias of
+    it, ``from app.db import SessionLocal`` / any module-level
+    ``sessionmaker(...)``-bound factory, or that enters one of the
     auto-committing ``with db_session_adapter.session()`` /
-    ``owner_command_session()`` / ``advisory_lock()`` shapes; see that module's
-    stated limitations.
+    ``advisory_lock()`` / ``task_session()`` context managers (no visible
+    ``.commit()`` needed -- they commit on exit; ``task_session`` is
+    recognised whether imported at module level or, as at every real call
+    site, function-locally). ``owner_command_session()`` and
+    ``read_session()`` never commit and are correctly never flagged. It does
+    NOT yet recognise a function-local (rather than module-level)
+    ``SessionLocal``/``sessionmaker`` alias, or a session opened in one
+    function and committed in another; see that module's stated limitations.
     """
     for entry in KNOWN_LEGACY_OUT_OF_BAND_WRITERS:
         module, function = entry.split("::")
         text = _read_repo_text(module)
         assert text is not None, f"{module} no longer exists; update the list"
-        assert f"def {function}(" in text, f"{entry} no longer exists; update the list"
+        assert _declares_qualified_function(text, function), (
+            f"{entry} no longer exists; update the list"
+        )
 
 
 class TestRatchetSensitivity:
