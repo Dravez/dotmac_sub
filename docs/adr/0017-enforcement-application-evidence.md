@@ -90,7 +90,8 @@ does afterwards, so evidence of it must not share that transaction's fate.
    `credentials_ambiguous`/`no_subscription_credentials` codes),
    `AccessCredential.is_active` (`access.pppoe_credentials`), the served
    IPv4/IPv6 cleared on cancel (`network.ip_assignment_lifecycle`, already in
-   `served_ipv4_writer_baseline.txt`), and `project_credentials_to_radius` as a
+   `served_ipv4_writer_baseline.txt` and `served_ipv6_writer_baseline.txt`),
+   and `project_credentials_to_radius` as a
    request to `access.radius_projection`. The transport contract covers only
    the transport functions, which write no row. Also, `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
    age-based reaper in `app/services/radius_reconciliation.py`). Decided by
