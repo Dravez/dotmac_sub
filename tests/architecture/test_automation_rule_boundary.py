@@ -17,6 +17,7 @@ def test_rule_definition_owner_is_fully_contracted() -> None:
     assert service.is_contracted
     assert service.depends_on == (
         "automation.capability_registry",
+        "customer.search",
         "support.ticket_assignment_rule_configuration",
         "support.ticket_automation_rule_configuration",
     )

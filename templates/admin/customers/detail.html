@@ -807,6 +807,10 @@
 
             </div>
         </div>
+        {% if custom_field_values %}
+        {% include "admin/customers/_custom_fields.html" %}
+        {% endif %}
+
 
     </div>
 
@@ -845,6 +849,7 @@
         {% set service_extension_history = billing_workspace.service_extension_history | default(none) %}
         {% set service_extension_items = service_extension_history.items if service_extension_history else [] %}
         {% set billing_account_id = accounts[0].id if accounts and accounts|length == 1 else customer.id %}
+        {% set can_read_payments = can(request, 'billing:payment:read') %}
 
         <div class="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm dark:border-slate-700/70 dark:bg-slate-800 sm:flex-row sm:items-center sm:justify-between">
             <div class="flex items-center gap-3">
@@ -977,13 +982,17 @@
             <div class="rounded-2xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
                 <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-700">
                     <h3 class="font-semibold text-slate-900 dark:text-white">Recent Payments</h3>
-                    <a href="/admin/billing/payments" class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400">View all</a>
+                    {% if can_read_payments %}<a href="/admin/billing/payments" class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400">View all</a>{% endif %}
                 </div>
                 {% if payments %}
                 <div class="divide-y divide-slate-100 dark:divide-slate-700">
                     {% for payment in payments[:5] %}
                     {% set payment_presentation = payment_status_presentations.get(payment.id|string) %}
-                    <div class="flex items-center justify-between px-5 py-3">
+                    {% if can_read_payments %}
+                    <a href="/admin/billing/payments/{{ payment.id }}" data-testid="recent-payment-{{ payment.id }}" class="flex items-center justify-between px-5 py-3 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 dark:hover:bg-slate-700/30">
+                    {% else %}
+                    <div data-testid="recent-payment-{{ payment.id }}" class="flex items-center justify-between px-5 py-3">
+                    {% endif %}
                         <div class="flex items-center gap-3">
                             <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-50 text-primary-600 dark:bg-primary-900/30 dark:text-primary-400">
                                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -997,7 +1006,7 @@
                             <p class="text-sm font-semibold text-slate-900 dark:text-white">₦{{ '{:,.2f}'.format(payment.amount | default(0)) }}</p>
                             {{ status_presentation_badge(payment_presentation, size="sm") }}
                         </div>
-                    </div>
+                    {% if can_read_payments %}</a>{% else %}</div>{% endif %}
                     {% endfor %}
                 </div>
                 {% else %}

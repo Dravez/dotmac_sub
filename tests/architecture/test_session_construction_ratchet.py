@@ -80,7 +80,17 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: independently-committing writer, with its own `sessionmaker`.
 #: +4 from tests/test_chat_widget_media_transaction.py: two isolated SQLite
 #: transaction-boundary proofs each construct one disposable Engine and Session.
-TEST_FIXTURE_BASELINE_TOTAL = 136
+#: +8 from ADR 0017 enforcement evidence proofs: the out-of-band writer tests
+#: (tests/test_enforcement_application_writer.py) each bind a disposable SQLite
+#: Engine/sessionmaker in place of db_session_adapter.create_session, and the
+#: PostgreSQL durability proofs
+#: (tests/integration/test_enforcement_application_evidence_durability.py) use
+#: their own sessionmaker to observe the evidence from a fresh connection after
+#: the caller rolls back.
+#: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
+#: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
+#: isolated like the writer tests (EnforcementApplication carries no FKs).
+TEST_FIXTURE_BASELINE_TOTAL = 146
 
 
 def _baseline() -> dict[str, int]:

@@ -94,6 +94,7 @@ DOMAIN = DomainSOT(
             owns=("automation rule definitions and immutable versions",),
             depends_on=(
                 "automation.capability_registry",
+                "customer.search",
                 "support.ticket_assignment_rule_configuration",
                 "support.ticket_automation_rule_configuration",
             ),
@@ -106,8 +107,10 @@ DOMAIN = DomainSOT(
                             "typed automation rule lifecycle command",
                             "declared automation capabilities",
                             "tenant-scoped automation rule records",
+                            "company-wide or selected-customer rule scope",
                             "active ticket assignment rules",
                             "active ticket-creation automation rules",
+                            "active Automation Center rules for the same trigger and action",
                         ),
                         canonical_writer="automation.rule_definitions",
                     ),
@@ -138,12 +141,21 @@ DOMAIN = DomainSOT(
                         source="AutomationRule and AutomationRuleVersion rows",
                     ),
                     AuthorityInput(
+                        name="company-wide or selected-customer rule scope",
+                        owner="customer.search",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "the exact selected set of currently active canonical "
+                            "customer identities"
+                        ),
+                    ),
+                    AuthorityInput(
                         name="active ticket assignment rules",
                         owner="support.ticket_assignment_rule_configuration",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source=(
                             "current active TicketAssignmentRule rows used to reject an "
-                            "overlapping urgent-ticket Automation Center publication"
+                            "overlapping Support Ticket assignment publication"
                         ),
                     ),
                     AuthorityInput(
@@ -152,7 +164,16 @@ DOMAIN = DomainSOT(
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source=(
                             "current active TicketAutomationRule rows used to reject an "
-                            "overlapping urgent-ticket Automation Center publication"
+                            "overlapping Support Ticket action publication"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="active Automation Center rules for the same trigger and action",
+                        owner="automation.rule_definitions",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "published AutomationRule active versions compared for shared "
+                            "trigger, action, and conditions that cannot prove disjointness"
                         ),
                     ),
                 ),
@@ -164,8 +185,8 @@ DOMAIN = DomainSOT(
                     ),
                     locking=(
                         "tenant and rule identity are rechecked; existing rules and "
-                        "draft versions are locked before mutation; current legacy rule "
-                        "evidence is re-read before publication"
+                        "draft versions are locked before mutation; current legacy and "
+                        "central active-rule evidence is re-read before publication or resume"
                     ),
                     idempotency=(
                         "tenant rule keys, rule-version numbers, and one-draft indexes "
@@ -182,13 +203,29 @@ DOMAIN = DomainSOT(
                         "automation.rule_definitions.condition_field_undeclared",
                         "automation.rule_definitions.condition_operator_unsupported",
                         "automation.rule_definitions.condition_value_invalid",
+                        "automation.rule_definitions.condition_contract_stale",
+                        "automation.rule_definitions.condition_limit",
+                        "automation.rule_definitions.customer_scope_invalid",
                         "automation.rule_definitions.action_inputs_invalid",
+                        "automation.rule_definitions.action_input_duplicate",
+                        "automation.rule_definitions.action_input_value_invalid",
+                        "automation.rule_definitions.actions_required",
+                        "automation.rule_definitions.action_contract_stale",
+                        "automation.rule_definitions.action_order_invalid",
+                        "automation.rule_definitions.action_schema_stale",
+                        "automation.rule_definitions.action_duplicate",
+                        "automation.rule_definitions.action_limit",
+                        "automation.rule_definitions.active_version_missing",
                         "automation.rule_definitions.action_target_mismatch",
                         "automation.rule_definitions.trigger_runtime_unavailable",
+                        "automation.rule_definitions.trigger_schema_stale",
                         "automation.rule_definitions.action_runtime_unavailable",
                         "automation.rule_definitions.legacy_scope_conflict",
                         "automation.rule_definitions.live_legacy_rule_conflict",
+                        "automation.rule_definitions.active_rule_conflict",
                         "automation.rule_definitions.status_conflict",
+                        "automation.rule_definitions.retired",
+                        "automation.rule_definitions.draft_not_found",
                         *owner_command_boundary_error_codes(
                             "automation.rule_definitions"
                         ),
@@ -197,6 +234,7 @@ DOMAIN = DomainSOT(
                     fail_closed_on=(
                         "unknown or stale capability contract",
                         "missing central or module permission",
+                        "missing or inactive customer scope member",
                         "legacy-exclusive capability conflict",
                     ),
                 ),

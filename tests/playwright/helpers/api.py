@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from typing import Any
 
 from playwright.sync_api import APIRequestContext, APIResponse
+from playwright.sync_api import Error as PlaywrightError
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 FORM_HEADERS = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -19,7 +21,14 @@ def api_get(
     url: str,
     headers: Mapping[str, str] | None = None,
 ) -> APIResponse:
-    return context.get(url, headers=dict(headers or {}))
+    for attempt in range(3):
+        try:
+            return context.get(url, headers=dict(headers or {}))
+        except PlaywrightError:
+            if attempt == 2:
+                raise
+            time.sleep(1)
+    raise RuntimeError("GET retry loop exhausted")
 
 
 def api_post_json(

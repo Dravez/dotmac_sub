@@ -30,6 +30,8 @@
       "adapter_paths": [],
       "drift_test_paths": [
         "tests/architecture/test_sot_manifest_contracts.py",
+        "tests/architecture/test_sot_manifest_out_of_band_evidence.py",
+        "tests/architecture/test_out_of_band_evidence_ratchet.py",
         "tests/architecture/test_sot_registry_integrity.py"
       ]
     }

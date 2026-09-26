@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.orm import Session
 
 from app.services import automation_capabilities, automation_rules
 from app.services.automation_contracts import (
@@ -86,9 +87,11 @@ def declared_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_definition_is_serialized_against_declared_contract(
     declared_capabilities: None,
+    db_session: Session,
 ) -> None:
     team_id = automation_rules.UUID("76a79707-c896-4db8-a802-6bce97cb0981")
     version, conditions, actions = automation_rules._validate_definition(
+        db=db_session,
         trigger_key="test.ticket.created",
         conditions=(
             automation_rules.AutomationCondition(
@@ -121,9 +124,11 @@ def test_definition_is_serialized_against_declared_contract(
 
 def test_definition_fails_without_module_permission(
     declared_capabilities: None,
+    db_session: Session,
 ) -> None:
     with pytest.raises(automation_rules.AutomationRuleError) as exc_info:
         automation_rules._validate_definition(
+            db=db_session,
             trigger_key="test.ticket.created",
             conditions=(),
             actions=(
@@ -146,6 +151,7 @@ def test_definition_fails_without_module_permission(
 
 def test_legacy_exclusive_scope_blocks_definition(
     monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
     declaration = DomainSOT(
         domain="legacy_test_domain",
@@ -197,6 +203,7 @@ def test_legacy_exclusive_scope_blocks_definition(
     )
     with pytest.raises(automation_rules.AutomationRuleError) as exc_info:
         automation_rules._validate_definition(
+            db=db_session,
             trigger_key="test.ticket.created",
             conditions=(),
             actions=(
