@@ -85,8 +85,15 @@ does afterwards, so evidence of it must not share that transaction's fate.
    `credentials_ambiguous`/`no_subscription_credentials` codes of
    `apply_radius_profile_to_subscription`) sit outside the transport concern,
    and `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
-   age-based reaper in `app/services/radius_reconciliation.py`), an ownership
-   decision reserved for Michael.
+   age-based reaper in `app/services/radius_reconciliation.py`). Decided by
+   Michael (2026-09-26): `sessions.enforcement` is Sub's sole synthetic closure
+   path and sets `acctstoptime` only on positive NAS evidence of session absence
+   (RFC 5176 Error-Cause 503); FreeRADIUS's own accounting remains the source of
+   actual Stop and Accounting-On/Off. An old interim timestamp is evidence that
+   observation went stale, not that the session ended, so the age-based reaper
+   becomes identify-and-report (stale rows are reported as unknown while
+   verification is unavailable) and its direct update is retired only through a
+   measured cutover, as its own reviewed slice.
 
 2. **Canonical writer.** `access.enforcement_evidence` is the only writer,
    through `record_enforcement_application` in
@@ -215,6 +222,8 @@ does afterwards, so evidence of it must not share that transaction's fate.
   (`access.enforcement_evidence`). Slice 2 may read the record only after the
   shadow comparison against logs and router state is recorded; its readers must
   tolerate dangling ids and never treat the record as the intended state.
+  The read-only tool an operator runs to produce that recorded comparison,
+  and how to read it, is `docs/runbooks/ENFORCEMENT_EVIDENCE_SHADOW_COMPARISON.md`.
 - Fallback retirement: the warning-only failure logs stay until the readiness
   projection slice lands, then are reduced to structured records.
 - Schema contract step: additive table only; no existing column changes.
