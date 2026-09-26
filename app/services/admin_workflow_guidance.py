@@ -180,17 +180,18 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Administration",
         "Review the Automation Center",
         "Administrators and automation operators",
-        "Review central automation and save the available ticket-assignment pilot as a draft.",
-        ("/admin/automation", "/admin/automation/ticket-assignment/new"),
+        "Review central automation and create rules from code-approved options.",
+        ("/admin/automation", "/admin/automation/rules/new"),
         "Confirm that your role has Automation Center access before opening the hub.",
         "Review the module registry to see which modules and events are eligible for central automation.",
         "Review how registered custom fields are governed when a module exposes them to central automation.",
         "Review central rules and recent execution evidence only when your role grants those additional permissions.",
-        "Use the ticket-assignment pilot to choose an active service team and save an urgent-ticket rule as a draft.",
+        "Use the rule builder to choose an approved trigger, conditions, and ordered actions, then save a draft.",
         "Use the existing automation ownership section to identify workflows that remain managed outside the hub.",
         notes=(
-            "The registry, published rules, and execution evidence remain read-only. The pilot saves a draft only; it cannot publish, assign a ticket, or start automation.",
-            "Publishing and migration of existing rules are outside this delivery sequence.",
+            "The builder saves a draft only. It does not affect tickets until an admin activates the rule.",
+            "Custom-field definitions are managed separately; the builder only offers fields declared for its trigger.",
+            "Existing rules remain on their current management pages until they are migrated.",
         ),
     ),
     _guide(
@@ -1036,8 +1037,8 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             "review-automation-rules", "Review central rules and execution evidence", 3
         ),
         _action(
-            "save-ticket-assignment-draft",
-            "Save an urgent-ticket assignment draft",
+            "save-automation-rule-draft",
+            "Create a rule draft from approved options",
             4,
         ),
         _action(
