@@ -421,8 +421,8 @@ def _editor_state(
                 )
                 input_definitions = {item.key: item for item in capability.inputs}
                 action_inputs: list[AutomationActionValue] = []
-                for item in _stored_mapping_list(step.get("inputs")) or ():
-                    key = str(item.get("key") or "")
+                for stored_input in _stored_mapping_list(step.get("inputs")) or ():
+                    key = str(stored_input.get("key") or "")
                     definition = input_definitions[key]
                     field = AutomationConditionField(
                         key=key,
@@ -431,7 +431,7 @@ def _editor_state(
                         operators=(AutomationOperator.equals,),
                         enum_values=definition.enum_values,
                     )
-                    raw_value = item.get("value")
+                    raw_value = stored_input.get("value")
                     if isinstance(raw_value, list):
                         restored: AutomationScalar | tuple[AutomationScalar, ...] = (
                             tuple(_restore_value(field, entry) for entry in raw_value)
