@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -35,6 +36,8 @@ from app.models.billing import (
     LedgerEntry,
     LedgerEntryType,
     LedgerSource,
+    Payment,
+    PaymentStatus,
 )
 from app.models.catalog import (
     AccessCredential,
@@ -249,6 +252,77 @@ def test_customer_detail_billing_overview_has_responsive_amount_contract() -> No
     assert billing_overview.count("min-w-0") >= 5
     assert billing_overview.count("text-[clamp(1.25rem,2.2vw,1.8rem)]") == 5
     assert billing_overview.count("break-words") == 5
+
+
+@pytest.mark.parametrize(
+    ("permission_keys", "expected_tag"),
+    [
+        (frozenset({"billing:payment:read"}), "a"),
+        (frozenset(), "div"),
+    ],
+)
+def test_customer_detail_recent_payment_navigation_respects_permission(
+    monkeypatch,
+    db_session,
+    subscriber,
+    permission_keys: frozenset[str],
+    expected_tag: str,
+) -> None:
+    subscriber.user_type = UserType.customer
+    payment = Payment(
+        account_id=subscriber.id,
+        amount=Decimal("1250.00"),
+        status=PaymentStatus.succeeded,
+        receipt_number="RECENT-1250",
+    )
+    db_session.add(payment)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        customer_routes.web_notifications_service,
+        "customer_notification_picker_context",
+        lambda _db: {},
+    )
+    monkeypatch.setattr(
+        customer_routes.subscriber_party_binding_repair,
+        "resolve_repair_context",
+        lambda _db, *, subscriber_id: None,
+    )
+    import app.web.admin as admin_module
+
+    monkeypatch.setattr(admin_module, "get_current_user", lambda request: None)
+    monkeypatch.setattr(admin_module, "get_sidebar_stats", lambda db: {})
+    request = _bare_request(f"/admin/customers/person/{subscriber.id}#billing")
+    request.state.auth = {
+        "principal_id": uuid.uuid4(),
+        "principal_type": "system_user",
+        "roles": [],
+        "scopes": list(permission_keys),
+        "permission_keys": permission_keys,
+    }
+
+    response = customer_routes.person_detail(
+        request=request,
+        customer_id=str(subscriber.id),
+        panel=None,
+        usage_period="current",
+        usage_page=1,
+        usage_per_page=25,
+        usage_view="chart",
+        db=db_session,
+    )
+    rendered = response.body.decode("utf-8")
+    marker = f"recent-payment-{payment.id}"
+    row_match = re.search(
+        rf'<(?P<tag>a|div) [^>]*data-testid="{marker}"[^>]*>', rendered
+    )
+
+    assert row_match is not None
+    assert row_match.group("tag") == expected_tag
+    if expected_tag == "a":
+        assert f'href="/admin/billing/payments/{payment.id}"' in row_match.group(0)
+    else:
+        assert "href=" not in row_match.group(0)
 
 
 def test_customer_detail_billing_workspace_includes_pending_extension_request(
