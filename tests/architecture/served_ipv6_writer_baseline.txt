@@ -1,7 +1,7 @@
-# Direct writes to ``Subscription.ipv4_address`` — the served IPv4
+# Direct writes to ``Subscription.ipv6_address`` — the served IPv6
 # compatibility projection.
 #
-# ``network.ip_assignment_lifecycle`` owns the desired IPv4 at exact service
+# ``network.ip_assignment_lifecycle`` owns the desired IPv6 at exact service
 # grain; the column is its projection (app/models/catalog.py,
 # docs/SOT_RELATIONSHIP_MAP.md, docs/designs/IP_ASSIGNMENT_LIFECYCLE_SOT.md).
 # A write from anywhere else produces a served address with no IPAM record
@@ -19,10 +19,10 @@
 #
 # A second, uncounted path: the operator/admin form in
 # ``app/services/web_catalog_subscriptions.py`` reads the raw form field
-# (~568) and validates it through ``_valid_assigned_ipv4`` (~719-720) before
-# it reaches the payload. That dict flows into ``app/schemas/catalog.py``'s
-# ``SubscriptionCreate``/``SubscriptionUpdate``/``SubscriptionTechnicalUpdate``
-# (~505/~544/~585), and from there into
+# (~569) and, unlike IPv4's ``_valid_assigned_ipv4`` (~719-720), passes the
+# IPv6 value through with NO validation (~712). That dict flows into
+# ``app/schemas/catalog.py``'s ``SubscriptionCreate``/``SubscriptionUpdate``/
+# ``SubscriptionTechnicalUpdate`` (~506/~545/~586), and from there into
 # ``app/services/catalog/subscriptions.py``'s ``Subscription(**data)``
 # (~1033) and ``setattr(subscription, key, value)`` (~1538) — both dict-driven
 # writes the attribute-name scan cannot see either.
@@ -31,10 +31,5 @@
 #
 # Format: count repository-relative-path.
 1 app/services/connectivity_backup.py
-1 app/services/connectivity_reconciler.py
 1 app/services/enforcement.py
-1 app/services/ip_assignment_lifecycle.py
 1 app/services/ip_lifecycle.py
-3 app/services/network/ip.py
-2 app/services/radius_reject.py
-1 app/services/web_network_ip.py
