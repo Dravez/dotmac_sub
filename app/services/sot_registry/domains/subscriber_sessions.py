@@ -139,15 +139,19 @@ DOMAIN = DomainSOT(
             owns=(
                 "NAS-evidenced accounting-session closure",
                 "single-flight access-control recovery execution",
+                "enforcement RADIUS profile and credential projection",
+                "cancel/suspend/restore credential and RADIUS-user activation",
+                "served IPv4 release on subscription cancel",
+                "FUP-lift enforcement step",
             ),
             depends_on=(
                 "financial.access_resolution",
                 "sessions.radius_resolution",
             ),
             notes=(
-                "Migration debt (legacy manifest baseline). Both concerns are "
-                "implemented in the Celery task app/tasks/radius.py, not in "
-                "app.services.enforcement: NAS-evidenced closure writes "
+                "Migration debt (legacy manifest baseline). The closure and "
+                "recovery concerns are implemented in the Celery task "
+                "app/tasks/radius.py: NAS-evidenced closure writes "
                 "FreeRADIUS radacct on its own connection on an RFC 5176 "
                 "session-not-found reply, and the single-flight recovery loop "
                 "runs under an advisory lock. Owed: extract recovery into a "
@@ -159,7 +163,17 @@ DOMAIN = DomainSOT(
                 "age-based reaper in app/services/radius_reconciliation.py "
                 "becomes identify-and-report (stale rows are unknown until "
                 "verified) and loses its direct update only through a measured "
-                "cutover. CoA/disconnect execution "
+                "cutover. The four other concerns are STATE WRITES in "
+                "app.services.enforcement that no contract covers yet: "
+                "apply_radius_profile_to_subscription and "
+                "project_credentials_to_radius (credential RADIUS profile, "
+                "raising access.session_enforcement.credentials_ambiguous / "
+                "no_subscription_credentials); cleanup_subscription_on_cancel, "
+                "cleanup_subscription_on_suspend and "
+                "restore_subscription_connectivity (AccessCredential and "
+                "RadiusUser activation); served IPv4 clearing on cancel; and "
+                "lift_fup_enforcement's flush. Each needs its owner decided and "
+                "a contract. CoA/disconnect execution "
                 "and session refresh are contracted under "
                 "access.session_enforcement."
             ),

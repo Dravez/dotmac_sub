@@ -84,6 +84,21 @@ def _print_human(report: EnforcementEvidenceShadowReport) -> None:
         )
 
 
+def _print_coverage(report: EnforcementEvidenceShadowReport) -> None:
+    print(
+        f"\n  uncovered blocked subscriptions (blocked-intent status, served IPv4, "
+        f"provisioning NAS, no address-list-block evidence; up to {report.limit}):"
+    )
+    if not report.uncovered_blocked_subscriptions:
+        print("    none")
+    for uncovered in report.uncovered_blocked_subscriptions:
+        print(
+            f"    subscription={uncovered.subscription_id} "
+            f"status={uncovered.subscription_status} "
+            f"nas={uncovered.provisioning_nas_device_id}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -110,6 +125,7 @@ def main() -> int:
         print(json.dumps(_report_payload(report), indent=2, default=str))
     else:
         _print_human(report)
+        _print_coverage(report)
 
     return 0
 

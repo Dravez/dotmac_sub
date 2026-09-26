@@ -1210,11 +1210,17 @@ DOMAIN = DomainSOT(
                 "rejection, timeout and configuration failure remain distinct "
                 "outcomes. Exact-old-IP projection repair issues one disconnect "
                 "and bounded-polls authoritative radacct for up to 15 seconds "
-                "without a second customer interruption. It writes no database "
-                "row; each final per-NAS outcome is recorded by "
-                "access.enforcement_evidence (ADR 0017). NAS-evidenced accounting "
-                "closure and single-flight recovery are declared under "
-                "sessions.enforcement as migration debt."
+                "without a second customer interruption. This concern (the "
+                "transport functions: update_subscription_sessions, "
+                "disconnect_subscription_sessions[_confirmed], "
+                "disconnect_account_sessions, the CoA senders and the "
+                "address-list block/unblock paths) writes no database row; each "
+                "final per-NAS outcome is recorded by access.enforcement_evidence "
+                "(ADR 0017). The same module ALSO performs state writes that are "
+                "not this concern (credential RADIUS profiles, cancel/suspend/"
+                "restore activation, served-IPv4 release, the FUP-lift step); "
+                "they are declared under sessions.enforcement as migration "
+                "debt, with NAS-evidenced closure and single-flight recovery."
             ),
             contract=ServiceContract(
                 concerns=(
@@ -1260,10 +1266,12 @@ DOMAIN = DomainSOT(
                 transaction=TransactionContract(
                     mode=TransactionMode.READ_ONLY,
                     boundary=(
-                        "reads through the caller's session and never flushes or "
-                        "commits; per-NAS outcome evidence is written by "
-                        "access.enforcement_evidence on its own unit of work "
-                        "(ADR 0017)"
+                        "the transport functions read through the caller's "
+                        "session and never flush or commit; per-NAS outcome "
+                        "evidence is written by access.enforcement_evidence on "
+                        "its own unit of work (ADR 0017). Other writes in the "
+                        "same module belong to the debt concerns declared under "
+                        "sessions.enforcement, not to this contract"
                     ),
                     locking=(
                         "none; a process-local CoA negative cache avoids repeating "

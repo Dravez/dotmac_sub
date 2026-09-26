@@ -51,6 +51,7 @@ __all__ = [
     "FailedEnforcementRow",
     "FailureClassTotal",
     "NasEnforcementSummary",
+    "UncoveredBlockedSubscription",
     "enforcement_evidence_shadow_report",
     "record_enforcement_application",
 ]
@@ -300,6 +301,25 @@ class FailedEnforcementRow:
     subscription_status: str | None
 
 
+#: Statuses whose intended access is blocked (the enforcement handler blocks on
+#: suspended, disabled and expired events; blocked is the explicit state).
+_BLOCKED_INTENT_STATUSES = (
+    SubscriptionStatus.suspended,
+    SubscriptionStatus.blocked,
+    SubscriptionStatus.disabled,
+    SubscriptionStatus.expired,
+)
+
+
+@dataclass(frozen=True)
+class UncoveredBlockedSubscription:
+    """A blocked-intent subscription with no address-list-block evidence."""
+
+    subscription_id: UUID
+    subscription_status: str
+    provisioning_nas_device_id: UUID
+
+
 @dataclass(frozen=True)
 class EnforcementEvidenceShadowReport:
     """The ADR-0017 slice-2 cutover gate's read-only shadow comparison.
@@ -319,6 +339,7 @@ class EnforcementEvidenceShadowReport:
     per_nas: tuple[NasEnforcementSummary, ...]
     currently_failed: tuple[FailedEnforcementRow, ...]
     mismatch_candidates: tuple[FailedEnforcementRow, ...]
+    uncovered_blocked_subscriptions: tuple[UncoveredBlockedSubscription, ...]
 
 
 def _failed_row(row: Any) -> FailedEnforcementRow:
@@ -432,7 +453,10 @@ def enforcement_evidence_shadow_report(
         )
         .select_from(app_tbl)
         .outerjoin(Subscription, Subscription.id == app_tbl.subscription_id)
-        .where(window, app_tbl.outcome == EnforcementOutcomeValue.failed.value)
+        # NOT windowed: the table is current state and slice 1 has no retrying
+        # reconciler, so a failure recorded before `since` and never retried
+        # is still the live state (e.g. a customer still blocked on the NAS).
+        .where(app_tbl.outcome == EnforcementOutcomeValue.failed.value)
     )
 
     currently_failed_stmt = failed_base.order_by(app_tbl.first_failed_at.asc()).limit(
@@ -444,7 +468,8 @@ def enforcement_evidence_shadow_report(
 
     # Mismatch candidates (ADR-0017 §8 cutover gate): a failed unblock while
     # the subscription now reads active (still blocked?), or a failed block
-    # while the subscription now reads suspended/blocked (never blocked?).
+    # while the subscription now reads a blocked-intent status (never
+    # blocked?).
     # This is evidence juxtaposed with current status, never a resolved
     # discrepancy or a claim about intended state.
     mismatch_stmt = (
@@ -456,9 +481,7 @@ def enforcement_evidence_shadow_report(
                 ),
                 and_(
                     app_tbl.effect == EnforcementEffect.address_list_block.value,
-                    Subscription.status.in_(
-                        (SubscriptionStatus.suspended, SubscriptionStatus.blocked)
-                    ),
+                    Subscription.status.in_(_BLOCKED_INTENT_STATUSES),
                 ),
             )
         )
@@ -466,6 +489,42 @@ def enforcement_evidence_shadow_report(
         .limit(limit)
     )
     mismatch_candidates = tuple(_failed_row(row) for row in db.execute(mismatch_stmt))
+
+    # Coverage: a blocked-intent subscription with a served IPv4 and a
+    # provisioning NAS but NO address-list-block evidence row at all. That is
+    # what a silently failing (or never-reached) evidence writer looks like.
+    # Not windowed: absence has no timestamp.
+    has_block_evidence = (
+        select(app_tbl.id)
+        .where(
+            app_tbl.subscription_id == Subscription.id,
+            app_tbl.effect == EnforcementEffect.address_list_block.value,
+        )
+        .exists()
+    )
+    uncovered_stmt = (
+        select(
+            Subscription.id,
+            Subscription.status,
+            Subscription.provisioning_nas_device_id,
+        )
+        .where(
+            Subscription.status.in_(_BLOCKED_INTENT_STATUSES),
+            Subscription.ipv4_address.isnot(None),
+            Subscription.provisioning_nas_device_id.isnot(None),
+            ~has_block_evidence,
+        )
+        .order_by(Subscription.id)
+        .limit(limit)
+    )
+    uncovered_blocked_subscriptions = tuple(
+        UncoveredBlockedSubscription(
+            subscription_id=row.id,
+            subscription_status=row.status.value,
+            provisioning_nas_device_id=row.provisioning_nas_device_id,
+        )
+        for row in db.execute(uncovered_stmt)
+    )
 
     return EnforcementEvidenceShadowReport(
         since=since,
@@ -476,4 +535,5 @@ def enforcement_evidence_shadow_report(
         per_nas=per_nas,
         currently_failed=currently_failed,
         mismatch_candidates=mismatch_candidates,
+        uncovered_blocked_subscriptions=uncovered_blocked_subscriptions,
     )

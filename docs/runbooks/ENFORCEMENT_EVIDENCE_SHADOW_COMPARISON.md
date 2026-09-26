@@ -72,18 +72,25 @@ change as recorded evidence).
 ## Cross-check against logs (Loki)
 
 The pre-ADR-0017 failure path was log-only (`app.services.enforcement`),
-using exactly these two warning messages:
+using these warning messages:
 
 ```
 Address-list %s: API fallback failed for %s
 API kick failed on %s
+API kick (profile refresh) failed on %s
 ```
 
 On the observability host, query Loki for the same window (Sub's production
 logs carry `app="dotmac-sub"`):
 
 ```logql
-{app="dotmac-sub"} |= "API fallback failed" or |= "API kick failed on"
+{app="dotmac-sub"} |~ "API fallback failed|API kick failed on|API kick \\(profile refresh\\) failed on"
+```
+
+Also count evidence-writer failures in the same window (they must be zero):
+
+```logql
+{app="dotmac-sub"} |= "enforcement_application_record_failed"
 ```
 
 Cross-check: every NAS/subscription pair the shadow report names under
@@ -120,8 +127,39 @@ If the router state actually agrees with the subscription's current status
 run — it does not invalidate the mechanism, but note it in the recorded
 evidence for slice 2's reviewers.
 
+## Sample `applied` rows too (false successes)
+
+Mismatch candidates come only from `failed` rows, so they cannot catch the
+worst defect class: an `applied` row for an attempt that did not take effect.
+Take a sample of recent `applied` `address_list_block` rows (at least 10, or
+all if fewer, spread across NAS devices) and run the same read-only router
+spot-check above: the subscriber's IP must be present in the suspended address
+list. For `applied` `address_list_unblock` rows it must be absent.
+
+## Coverage
+
+"uncovered blocked subscriptions" lists subscriptions whose status intends a
+block, with a served IPv4 and a provisioning NAS, but no address-list-block
+evidence row at all. Each one is either explained (for example, blocked before
+the evidence slice deployed and not re-enforced since, or the address-list
+block feature disabled) or is a sign the writer is not being reached.
+
+## Pass criterion
+
+The comparison passes, and slice 2 may start reading the record, only when all
+of these hold for a window of at least 7 days after deploy:
+
+1. zero confirmed false successes in the `applied` sample;
+2. every mismatch candidate either reproduces on the router (a real,
+   evidence-correct failure) or is explained;
+3. every uncovered blocked subscription is explained;
+4. zero `enforcement_application_record_failed` log lines;
+5. every failure logged by the old warning messages in the window has a
+   matching `failed` evidence row (same NAS and subscription).
+
 ## Recording the result
 
-Attach the `--json` output (or a summary quoting the counts above) to the
-slice-2 change as the recorded shadow comparison ADR-0017 requires. Slice 2
-must not proceed without this evidence attached and reviewed.
+Attach the `--json` output, the applied-sample and spot-check results, and the
+pass-criterion checklist to the slice-2 change as the recorded shadow
+comparison ADR 0017 requires. Slice 2 must not proceed without this evidence
+attached and reviewed.

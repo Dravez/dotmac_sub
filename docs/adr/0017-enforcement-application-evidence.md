@@ -80,11 +80,14 @@ does afterwards, so evidence of it must not share that transaction's fate.
    `update_subscription_sessions`. The two concerns it could not honestly
    contract, NAS-evidenced accounting closure and single-flight recovery, are
    implemented in the Celery task `app/tasks/radius.py` and are declared under
-   the baselined `sessions.enforcement` as named migration debt. Also owed: the
-   module's other writes (credential activation, RADIUS profile changes and the
-   `credentials_ambiguous`/`no_subscription_credentials` codes of
-   `apply_radius_profile_to_subscription`) sit outside the transport concern,
-   and `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
+   the baselined `sessions.enforcement` as named migration debt. The module's
+   other STATE WRITES are declared there too, as named debt whose owner must be
+   decided: credential RADIUS-profile projection
+   (`apply_radius_profile_to_subscription`, `project_credentials_to_radius`, with
+   the `credentials_ambiguous`/`no_subscription_credentials` codes),
+   cancel/suspend/restore credential and RADIUS-user activation, served-IPv4
+   release on cancel, and the FUP-lift step. The transport contract covers only
+   the transport functions, which write no row. Also, `radacct.acctstoptime` has two writers (NAS-evidenced closure and the
    age-based reaper in `app/services/radius_reconciliation.py`). Decided by
    Michael (2026-09-26): `sessions.enforcement` is Sub's sole synthetic closure
    path and sets `acctstoptime` only on positive NAS evidence of session absence

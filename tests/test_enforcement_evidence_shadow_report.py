@@ -88,13 +88,22 @@ def _add_nas(session, *, nas_device_id, name: str) -> None:
     session.add(NasDevice(id=nas_device_id, name=name))
 
 
-def _add_subscription(session, *, subscription_id, status: SubscriptionStatus) -> None:
+def _add_subscription(
+    session,
+    *,
+    subscription_id,
+    status: SubscriptionStatus,
+    ipv4_address: str | None = None,
+    provisioning_nas_device_id=None,
+) -> None:
     session.add(
         Subscription(
             id=subscription_id,
             subscriber_id=uuid4(),
             offer_id=uuid4(),
             status=status,
+            ipv4_address=ipv4_address,
+            provisioning_nas_device_id=provisioning_nas_device_id,
         )
     )
 
@@ -341,6 +350,111 @@ class TestMismatchCandidates:
         assert suspended_sub in candidate_subs
         assert blocked_sub in candidate_subs
         assert active_sub not in candidate_subs
+
+
+class TestCurrentStateIsNotWindowed:
+    def test_a_never_retried_failure_before_the_window_is_still_reported(
+        self, report_sessionmaker
+    ):
+        """The table is current state and slice 1 has no reconciler: a failed
+        unblock recorded before `since` and never retried is still live."""
+        sub_id, nas_id = uuid4(), uuid4()
+        with report_sessionmaker() as session:
+            _add_subscription(
+                session, subscription_id=sub_id, status=SubscriptionStatus.active
+            )
+            _add_evidence(
+                session,
+                subscription_id=sub_id,
+                nas_device_id=nas_id,
+                effect=EnforcementEffect.address_list_unblock,
+                outcome=EnforcementOutcomeValue.failed,
+                failure_class=EnforcementFailureClass.auth_rejected,
+                attempt_count=1,
+                first_failed_at=BEFORE_WINDOW,
+                last_attempt_at=BEFORE_WINDOW,
+            )
+            session.commit()
+            report = enforcement_evidence_shadow_report(session, since=SINCE)
+
+        # Sensitivity: the row really is outside the window.
+        assert BEFORE_WINDOW < SINCE
+        assert sub_id in {row.subscription_id for row in report.currently_failed}
+        assert sub_id in {row.subscription_id for row in report.mismatch_candidates}
+
+
+class TestBlockedIntentStatuses:
+    def test_failed_block_on_a_disabled_subscription_is_a_mismatch_candidate(
+        self, report_sessionmaker
+    ):
+        sub_id, nas_id = uuid4(), uuid4()
+        with report_sessionmaker() as session:
+            _add_subscription(
+                session, subscription_id=sub_id, status=SubscriptionStatus.disabled
+            )
+            _add_evidence(
+                session,
+                subscription_id=sub_id,
+                nas_device_id=nas_id,
+                effect=EnforcementEffect.address_list_block,
+                outcome=EnforcementOutcomeValue.failed,
+                failure_class=EnforcementFailureClass.unreachable,
+                attempt_count=1,
+                first_failed_at=NOW,
+            )
+            session.commit()
+            report = enforcement_evidence_shadow_report(session, since=SINCE)
+
+        assert sub_id in {row.subscription_id for row in report.mismatch_candidates}
+
+
+class TestCoverage:
+    def test_blocked_subscription_with_no_block_evidence_is_uncovered(
+        self, report_sessionmaker
+    ):
+        uncovered, covered, no_ip, active = uuid4(), uuid4(), uuid4(), uuid4()
+        nas_id = uuid4()
+        with report_sessionmaker() as session:
+            _add_subscription(
+                session,
+                subscription_id=uncovered,
+                status=SubscriptionStatus.suspended,
+                ipv4_address="10.0.0.1",
+                provisioning_nas_device_id=nas_id,
+            )
+            _add_subscription(
+                session,
+                subscription_id=covered,
+                status=SubscriptionStatus.suspended,
+                ipv4_address="10.0.0.2",
+                provisioning_nas_device_id=nas_id,
+            )
+            _add_evidence(
+                session,
+                subscription_id=covered,
+                nas_device_id=nas_id,
+                effect=EnforcementEffect.address_list_block,
+                outcome=EnforcementOutcomeValue.applied,
+            )
+            # Near-misses: no served IPv4 (no attempt expected), and active.
+            _add_subscription(
+                session,
+                subscription_id=no_ip,
+                status=SubscriptionStatus.suspended,
+                provisioning_nas_device_id=nas_id,
+            )
+            _add_subscription(
+                session,
+                subscription_id=active,
+                status=SubscriptionStatus.active,
+                ipv4_address="10.0.0.3",
+                provisioning_nas_device_id=nas_id,
+            )
+            session.commit()
+            report = enforcement_evidence_shadow_report(session, since=SINCE)
+
+        ids = {row.subscription_id for row in report.uncovered_blocked_subscriptions}
+        assert ids == {uncovered}
 
 
 class TestNoWrite:

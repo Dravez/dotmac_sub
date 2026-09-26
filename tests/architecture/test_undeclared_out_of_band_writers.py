@@ -21,6 +21,17 @@ is either a genuinely new out-of-band writer that needs an ADR and a
 registry declaration (ADR 0017), or it needs classifying into BASELINE with
 a reason. A BASELINE entry that stops matching must be removed, so this
 ratchet only shrinks.
+
+Stated limitations (an unmonitored region, not an exemption; follow-up owed):
+the scan recognises only ``<x>.create_session()`` and module-level aliases of
+it, followed by a literal ``.commit()`` in the same function. It does NOT yet
+recognise ``from app.db import SessionLocal; SessionLocal()``, other
+``sessionmaker``-produced factories or function-local aliases, the
+auto-committing ``with db_session_adapter.session()`` /
+``owner_command_session()`` / ``advisory_lock()`` blocks (no visible
+``.commit()``), or a session opened in one function and committed in another.
+Together those forms appear in roughly 60 files and need classification before
+they can be ratcheted.
 """
 
 from __future__ import annotations
@@ -92,8 +103,10 @@ BASELINE: dict[str, str] = {
         "adapter-owned session lifecycle (task/runner)"
     ),
     "app/services/network/ont_action_common.py::persist_data_model_root": (
-        "adapter-owned session lifecycle: isolated best-effort side-transaction "
-        "persisting a detected TR-069 data-model root, own session per call"
+        "legacy out-of-band writer (listed in "
+        "test_out_of_band_evidence_ratchet.KNOWN_LEGACY_OUT_OF_BAND_WRITERS): a "
+        "nested helper called mid-flow by ONT/CPE action helpers that commits "
+        "OntUnit/CPEDevice.tr069_data_model on its own session"
     ),
     "app/services/task_idempotency.py::idempotent_task.decorator.wrapper": (
         "infrastructure: the idempotent_task decorator's own TaskExecution "
