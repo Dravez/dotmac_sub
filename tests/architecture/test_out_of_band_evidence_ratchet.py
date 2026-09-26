@@ -15,6 +15,7 @@ change: an ADR that names it, a contract citing that ADR, and an entry here.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,29 @@ def _read_repo_text(relative_path: str) -> str | None:
     return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
+def _declares_qualified_function(source: str, qualified_name: str) -> bool:
+    """Return whether ``source`` declares a function or class method by name."""
+    nodes: list[ast.stmt] = ast.parse(source).body
+    *class_names, function_name = qualified_name.split(".")
+    for class_name in class_names:
+        matching_class = next(
+            (
+                node
+                for node in nodes
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ),
+            None,
+        )
+        if matching_class is None:
+            return False
+        nodes = matching_class.body
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+        for node in nodes
+    )
+
+
 def _registry_views() -> list[ServiceView]:
     from app.services.sot_registry.registry import all_services
 
@@ -147,7 +171,9 @@ def test_known_legacy_out_of_band_writers_still_exist() -> None:
         module, function = entry.split("::")
         text = _read_repo_text(module)
         assert text is not None, f"{module} no longer exists; update the list"
-        assert f"def {function}(" in text, f"{entry} no longer exists; update the list"
+        assert _declares_qualified_function(text, function), (
+            f"{entry} no longer exists; update the list"
+        )
 
 
 class TestRatchetSensitivity:
