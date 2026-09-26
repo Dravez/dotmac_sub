@@ -178,24 +178,24 @@ def persistence_writer_modules(
     }
 
 
-@cache
-def served_ipv4_projection_writes(
+def _served_projection_writes(
+    attribute: str,
     *,
-    app_dir: Path = PROJECT_ROOT / "app",
-    project_root: Path = PROJECT_ROOT,
+    app_dir: Path,
+    project_root: Path,
 ) -> dict[str, int]:
-    """Return per-file counts of direct writes to the served IPv4 projection.
+    """Return per-file counts of direct writes to one served-address attribute.
 
-    ``network.ip_assignment_lifecycle`` owns the desired IPv4 at exact service
-    grain; ``Subscription.ipv4_address`` is its compatibility projection
-    (``app/models/catalog.py``, ``docs/SOT_RELATIONSHIP_MAP.md``). A write that
-    does not come from the owner creates a served address with no IPAM record —
-    the ``assignment_missing`` cohort — or a served value that silently
-    disagrees with its assignment.
+    ``network.ip_assignment_lifecycle`` owns the desired address at exact
+    service grain; ``Subscription.<attribute>`` is its compatibility
+    projection (``app/models/catalog.py``, ``docs/SOT_RELATIONSHIP_MAP.md``).
+    A write that does not come from the owner creates a served address with
+    no IPAM record — the ``assignment_missing`` cohort — or a served value
+    that silently disagrees with its assignment.
 
-    Only ``<something>.ipv4_address = ...`` counts. ``ipv4_address_id`` is the
-    IPAM foreign key on ``IPAssignment``, not the projection, and is excluded by
-    the exact attribute match.
+    Only ``<something>.<attribute> = ...`` counts. ``<attribute>_id`` is the
+    IPAM foreign key on ``IPAssignment``, not the projection, and is excluded
+    by the exact attribute match.
     """
 
     counts: dict[str, int] = {}
@@ -214,11 +214,43 @@ def served_ipv4_projection_writes(
             elif isinstance(node, ast.AugAssign | ast.AnnAssign):
                 targets = [node.target]
             for target in targets:
-                if isinstance(target, ast.Attribute) and target.attr == "ipv4_address":
+                if isinstance(target, ast.Attribute) and target.attr == attribute:
                     hits += 1
         if hits:
             counts[str(path.relative_to(project_root))] = hits
     return counts
+
+
+@cache
+def served_ipv4_projection_writes(
+    *,
+    app_dir: Path = PROJECT_ROOT / "app",
+    project_root: Path = PROJECT_ROOT,
+) -> dict[str, int]:
+    """Return per-file counts of direct writes to the served IPv4 projection.
+
+    See ``_served_projection_writes`` for the shared detection rule.
+    """
+
+    return _served_projection_writes(
+        "ipv4_address", app_dir=app_dir, project_root=project_root
+    )
+
+
+@cache
+def served_ipv6_projection_writes(
+    *,
+    app_dir: Path = PROJECT_ROOT / "app",
+    project_root: Path = PROJECT_ROOT,
+) -> dict[str, int]:
+    """Return per-file counts of direct writes to the served IPv6 projection.
+
+    See ``_served_projection_writes`` for the shared detection rule.
+    """
+
+    return _served_projection_writes(
+        "ipv6_address", app_dir=app_dir, project_root=project_root
+    )
 
 
 def declared_owner_modules(domains: Iterable[Any]) -> set[str]:

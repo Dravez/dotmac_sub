@@ -42,8 +42,10 @@ def build_automation_center_data(
     can_read_rules: bool,
     can_read_runs: bool,
     can_create_rules: bool,
-    can_read_support_tickets: bool,
-    can_update_support_tickets: bool,
+    can_update_rules: bool,
+    can_publish_rules: bool,
+    can_operate_rules: bool,
+    permission_keys: frozenset[str],
 ) -> dict[str, object]:
     """Build one permission-aware, tenant-scoped hub projection."""
 
@@ -83,17 +85,19 @@ def build_automation_center_data(
     legacy_surfaces = tuple(
         surface for manifest in manifests for surface in manifest.legacy_surfaces
     )
-    support_manifest = automation_capabilities.module_manifest("support_operations")
-    ticket_assignment_draft_authoring_available = (
+    authorized = "*" in permission_keys
+    rule_builder_available = (
         can_create_rules
-        and can_read_support_tickets
-        and can_update_support_tickets
         and any(
-            item.key == "support.ticket.created" for item in support_manifest.triggers
-        )
-        and any(
-            item.key == "support.ticket.assign_service_team"
-            for item in support_manifest.actions
+            (authorized or trigger.author_permission in permission_keys)
+            and any(
+                action.entity_type == trigger.entity_type
+                and (authorized or action.author_permission in permission_keys)
+                for candidate in manifests
+                for action in candidate.actions
+            )
+            for manifest in manifests
+            for trigger in manifest.triggers
         )
         and not automation_capabilities.capability_registry_errors()
     )
@@ -109,10 +113,12 @@ def build_automation_center_data(
         "legacy_surfaces": legacy_surfaces,
         "can_read_rules": can_read_rules,
         "can_read_runs": can_read_runs,
+        "can_create_rules": can_create_rules,
+        "can_update_rules": can_update_rules,
+        "can_publish_rules": can_publish_rules,
+        "can_operate_rules": can_operate_rules,
         "authoring_available": ready_count > 0 and not registry_errors,
-        "ticket_assignment_draft_authoring_available": (
-            ticket_assignment_draft_authoring_available
-        ),
+        "rule_builder_available": rule_builder_available,
     }
 
 

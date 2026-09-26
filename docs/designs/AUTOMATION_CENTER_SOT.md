@@ -1,16 +1,16 @@
 # Automation Center source of truth
 
-Status: pilot runtime foundation
+Status: reusable rule builder runtime foundation
 
 Decision owner: Michael
 
 ## Scope
 
-The Automation Center is a new control plane for rules created after its
-deployment. It does not migrate, reinterpret, disable, or become the writer for
-existing assignment, alert, FUP, inbox, NAS, provisioning, SLA, escalation, or
-routing rules. Existing engines remain authoritative until a separately
-approved migration and retirement slice says otherwise.
+The Automation Center is the central authoring and lifecycle surface for
+Automation Center rules. Existing assignment, alert, FUP, inbox, NAS,
+provisioning, SLA, escalation, and routing rules remain managed by their
+existing owners until a later, separately approved migration. That migration
+must hand off each rule without leaving two active writers.
 
 Custom fields are explicitly out of scope.
 
@@ -30,6 +30,9 @@ owning domain.
 Every trigger declares the exact payload fields carrying tenant and target
 identity. Events without both identities cannot be registered for automation;
 the runtime never guesses tenancy from an unrelated record or a UI session.
+Customer-specific rules may also name an explicit set of customer identities.
+Those identities come from the trigger's declared customer field and are
+validated against the customer owner when a draft is saved and published.
 
 ## Rule shape
 
@@ -85,30 +88,38 @@ read-only. It exposes registry readiness, central definitions, run evidence,
 and legacy ownership links without implying that rule authoring is available
 before a complete module adapter exists.
 
-The first admitted UI slice is a draft-only Support Ticket Assignment pilot.
-An authorized administrator can save exactly one shape of draft: a newly
-created urgent support ticket assigned to one existing active Service Team.
-The UI cannot publish, pause, resume, or execute that draft. The capability is
-explicitly marked runtime-unavailable, so the rule owner rejects publication
-even if a caller bypasses the UI. The runtime foundation now exists, but remains
-disabled: the Ticket owner stages the dedicated `support.ticket.created` event
-with only the operator tenant, Ticket identity, and priority; the declared
-action delegates through the typed Ticket lifecycle command with stable event,
-rule-version, and step provenance.
+The reusable builder currently admits the Support Ticket created trigger and
+its declared priority, customer, ticket-type, channel, and region facts.
+Administrators can add multiple AND conditions, select all customers or a
+bounded set, and combine the declared actions in order: assign a Service Team
+and set Ticket priority. Each action delegates through a typed Ticket lifecycle
+command with stable event, rule-version, and step provenance. The event carries
+only the declared fields and canonical customer identity. New capabilities are
+added through reviewed domain declarations and typed runtime adapters; existing
+rules stay at their current owners until a separate migration is approved.
+Event schema 4 explicitly remains compatible with schema 3 rules because their
+priority and customer conditions retain the same meaning.
+
+Editing creates or replaces a draft version; activating it changes only future
+event decisions. Pausing prevents new runs, while already claimed runs finish.
 
 Before publishing, the rule owner reads active legacy Ticket assignment and
-Ticket-creation automation rules. A rule that can also assign an urgent Ticket
-blocks publication and identifies the legacy rule. The check is deliberately
-conservative where the Automation Center rule has no condition that proves a
-legacy region, type, source, or tag rule cannot overlap.
+Ticket-creation automation rules, then checks other active Automation Center
+rules for the same trigger and action. A possible overlap blocks publication
+and identifies the existing rule. The overlap check only treats conditions as
+disjoint when a shared field proves they cannot both match; uncertain overlaps
+are blocked. Legacy rules remain in their existing pages and are not migrated.
 
-Runtime acceptance tests, including event delivery, replay, assignment audit,
-and conflict cases, are still required before the capability can be enabled.
+Support ticket creation, service-team assignment, and priority updates are
+admitted to the runtime by this reviewed code contract. Focused checks for
+event delivery, customer scoping, replay, action audit, activation, pause
+behavior, and both legacy and central rule conflicts run with the pull
+request's CI suite before merge.
 
 The current ticket-assignment and ticket-creation automation pages are listed
-as legacy ownership links only. Their rules are neither changed nor migrated by
-the pilot. They have no static conflict scope because the live rule-by-rule
-check supplies the current evidence at publication time.
+as legacy ownership links. Their rules are not moved by this implementation
+slice. The live rule-by-rule check supplies current conflict evidence when an
+Automation Center rule is activated.
 
 ## Legacy coexistence
 
@@ -121,6 +132,7 @@ writers for the same decision.
 ## Deployment
 
 Schema changes are additive. Permissions are seeded as assignable and are not
-granted broadly. The runtime handler ships disabled until at least one module
-adapter is reviewed and its capability is enabled. Deployment creates no rules
-and produces no new business side effects by itself.
+granted broadly. The runtime handler is registered for the reviewed Support
+Ticket trigger; it only acts on rules an authorized administrator has
+explicitly activated. Deployment creates no rules and produces no new business
+side effects by itself.
