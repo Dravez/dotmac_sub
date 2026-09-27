@@ -30,11 +30,13 @@ from app.models.billing import (
 from app.models.catalog import BillingMode, SubscriptionStatus
 from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.event_store import EventStore
+from app.models.payment_proof import PaymentProof, PaymentProofStatus
 from app.models.prepaid_funding import (
     PrepaidDraftReconciliationException,
     PrepaidOpeningFundingConsumption,
 )
 from app.models.subscriber import SubscriberStatus
+from app.models.system_user import SystemUser
 from app.services import prepaid_draft_reconciliation as reconciliation_service
 from app.services.customer_financial_ledger import calculate_customer_balance
 from app.services.customer_financial_position import prepaid_available_balance
@@ -60,6 +62,10 @@ from app.services.prepaid_draft_reconciliation import (
     PrepaidProformaAdoptionQuery,
     ReconcilePrepaidDraftCommand,
     RepairHistoricalPaidPrepaidInvoiceCommand,
+    ReviewedExistingDraftSettlementApproval,
+    ReviewedExistingDraftSettlementDisposition,
+    ReviewedExistingDraftSettlementQuery,
+    SettleReviewedExistingPrepaidDraftCommand,
     adopt_funded_prepaid_proforma,
     create_reviewed_paid_prepaid_invoice,
     preview_funded_prepaid_proforma_adoption,
@@ -68,9 +74,11 @@ from app.services.prepaid_draft_reconciliation import (
     preview_missing_paid_prepaid_invoice_repair,
     preview_prepaid_draft_cohort,
     preview_prepaid_draft_reconciliation,
+    preview_reviewed_existing_prepaid_draft_settlement,
     reconcile_prepaid_draft_invoice,
     repair_exact_paid_prepaid_invoice_after_settlement_for_owner,
     repair_historical_paid_prepaid_invoice,
+    settle_reviewed_existing_prepaid_draft,
     stage_prepaid_draft_after_funding_change,
 )
 from app.services.prepaid_funding_reconstruction import (
@@ -1774,6 +1782,7 @@ def test_reviewed_missing_invoice_uses_exact_payment_without_opening_baseline(
     assert result.replayed is False
     assert replay.replayed is True
     assert replay.invoice_id == result.invoice_id
+    assert result.remaining_credit == Decimal("75.00")
     assert invoice.status is InvoiceStatus.paid
     assert invoice.subtotal == Decimal("17500.00")
     assert invoice.tax_total == Decimal("1312.50")
@@ -1840,6 +1849,211 @@ def test_missing_invoice_preview_fails_closed_when_expected_remainder_changes(
         preview.reason == "reviewed account credit or selected payment capacity changed"
     )
     assert db_session.query(Invoice).count() == 0
+
+
+def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
+    db_session,
+    subscriber,
+    subscription,
+):
+    invoice = _draft(
+        db_session,
+        subscriber,
+        subscription,
+        total=Decimal("100.00"),
+    )
+    ensure_test_prepaid_contract(db_session, subscription, Decimal("100.00"))
+    line = db_session.query(InvoiceLine).filter_by(invoice_id=invoice.id).one()
+    invoice.billing_period_start = None
+    invoice.billing_period_end = None
+    line.subscription_id = None
+    reviewed_start = datetime(2026, 7, 26, 23, tzinfo=UTC)
+    reviewed_end = datetime(2026, 8, 26, 23, tzinfo=UTC)
+    subscription.next_billing_at = reviewed_start
+    payment = _payment(
+        db_session,
+        subscriber,
+        amount=Decimal("100.00"),
+        paid_at=datetime(2026, 9, 26, 10, tzinfo=UTC),
+    )
+    proof_reference = "TRF-REVIEWED-TEST"
+    db_session.add(
+        PaymentProof(
+            account_id=subscriber.id,
+            amount=Decimal("100.00"),
+            verified_amount=Decimal("100.00"),
+            currency="NGN",
+            reference=proof_reference,
+            paid_at=payment.paid_at,
+            file_path="pytest/reviewed-payment-proof.pdf",
+            status=PaymentProofStatus.verified,
+            verified_by="Finance reviewer",
+            payment_id=payment.id,
+        )
+    )
+    approver = SystemUser(
+        first_name="Finance",
+        last_name="Approver",
+        email=f"finance-approver-{uuid4().hex}@example.com",
+    )
+    db_session.add(approver)
+    db_session.flush()
+    approver_id = approver.id
+    db_session.commit()
+
+    query = ReviewedExistingDraftSettlementQuery(
+        invoice_id=invoice.id,
+        subscription_id=subscription.id,
+        payment_id=payment.id,
+        service_start_on=date(2026, 7, 27),
+        next_billing_on=date(2026, 8, 27),
+        expected_total=Decimal("100.00"),
+        expected_remaining_credit=Decimal("0.00"),
+        payment_reference=proof_reference,
+        approval=ReviewedExistingDraftSettlementApproval(
+            approver_system_user_id=approver_id,
+            approver_name="Finance Approver",
+            approved_at=datetime(2026, 9, 27, 8, 15, tzinfo=UTC),
+            ticket_reference="28519",
+            evidence_sha256="a" * 64,
+        ),
+    )
+    preview = preview_reviewed_existing_prepaid_draft_settlement(db_session, query)
+
+    assert preview.disposition is (
+        ReviewedExistingDraftSettlementDisposition.exact_reviewed_draft
+    )
+    assert preview.actionable is True
+    assert preview.payment_reference == proof_reference
+    assert preview.service_period_start == reviewed_start
+    assert preview.service_period_end == reviewed_end
+    db_session.commit()
+
+    command = SettleReviewedExistingPrepaidDraftCommand(
+        context=CommandContext.system(
+            actor="pytest:billing-operator",
+            scope=REPAIR_SCOPE,
+            reason="Finance approved exact historical draft settlement",
+            idempotency_key=f"pytest-reviewed-draft-{query.invoice_id}",
+        ),
+        query=query,
+        preview_fingerprint=preview.fingerprint,
+        permission_granted=True,
+        actor_system_user_id=approver_id,
+    )
+    result = settle_reviewed_existing_prepaid_draft(db_session, command)
+    replay = settle_reviewed_existing_prepaid_draft(db_session, command)
+
+    db_session.refresh(invoice)
+    db_session.refresh(subscription)
+    db_session.refresh(line)
+    assert result.replayed is False
+    assert replay.replayed is True
+    assert replay.invoice_id == result.invoice_id
+    assert replay.subscription_id == subscription.id
+    assert replay.payment_id == payment.id
+    assert replay.allocation_id == result.allocation_id
+    assert replay.entitlement_id == result.entitlement_id
+    assert replay.next_billing_at == reviewed_end
+    assert replay.remaining_credit == Decimal("0.00")
+    assert replay.payment_reference == proof_reference
+    assert invoice.status is InvoiceStatus.paid
+    assert invoice.balance_due == Decimal("0.00")
+    assert invoice.billing_period_start == reviewed_start.replace(tzinfo=None)
+    assert invoice.billing_period_end == reviewed_end.replace(tzinfo=None)
+    assert line.subscription_id == subscription.id
+    assert subscription.next_billing_at == reviewed_end.replace(tzinfo=None)
+    allocation = db_session.query(PaymentAllocation).one()
+    assert allocation.payment_id == payment.id
+    assert allocation.invoice_id == invoice.id
+    assert allocation.amount == Decimal("100.00")
+    entitlement = db_session.query(ServiceEntitlement).one()
+    assert entitlement.source_invoice_id == invoice.id
+    assert entitlement.source_invoice_line_id == line.id
+    assert entitlement.starts_at == reviewed_start.replace(tzinfo=None)
+    assert entitlement.ends_at == reviewed_end.replace(tzinfo=None)
+    assert calculate_customer_balance(db_session, subscriber.id) == Decimal("0.00")
+    metadata = invoice.metadata_["reviewed_existing_prepaid_draft_settlement"]
+    assert metadata["ticket_reference"] == "28519"
+    assert metadata["evidence_sha256"] == "a" * 64
+    assert metadata["approver_system_user_id"] == str(approver.id)
+    assert metadata["approver_name"] == "Finance Approver"
+    assert metadata["payment_reference"] == proof_reference
+    assert (
+        db_session.query(EventStore)
+        .filter(
+            EventStore.event_type == EventType.prepaid_reviewed_draft_settled.value,
+            EventStore.invoice_id == invoice.id,
+        )
+        .count()
+        == 1
+    )
+    assert (
+        db_session.query(AuditEvent)
+        .filter(
+            AuditEvent.action == "settle_reviewed_existing_prepaid_draft",
+            AuditEvent.entity_id == str(invoice.id),
+        )
+        .count()
+        == 1
+    )
+
+
+def test_reviewed_existing_draft_refuses_unverified_reference(
+    db_session,
+    subscriber,
+    subscription,
+):
+    invoice = _draft(
+        db_session,
+        subscriber,
+        subscription,
+        total=Decimal("100.00"),
+    )
+    ensure_test_prepaid_contract(db_session, subscription, Decimal("100.00"))
+    line = db_session.query(InvoiceLine).filter_by(invoice_id=invoice.id).one()
+    invoice.billing_period_start = None
+    invoice.billing_period_end = None
+    line.subscription_id = None
+    subscription.next_billing_at = datetime(2026, 7, 26, 23, tzinfo=UTC)
+    payment = _payment(db_session, subscriber, amount=Decimal("100.00"))
+    approver = SystemUser(
+        first_name="Finance",
+        last_name="Approver",
+        email=f"finance-approver-{uuid4().hex}@example.com",
+    )
+    db_session.add(approver)
+    db_session.commit()
+
+    preview = preview_reviewed_existing_prepaid_draft_settlement(
+        db_session,
+        ReviewedExistingDraftSettlementQuery(
+            invoice_id=invoice.id,
+            subscription_id=subscription.id,
+            payment_id=payment.id,
+            service_start_on=date(2026, 7, 27),
+            next_billing_on=date(2026, 8, 27),
+            expected_total=Decimal("100.00"),
+            expected_remaining_credit=Decimal("0.00"),
+            payment_reference="TRF-NOT-VERIFIED",
+            approval=ReviewedExistingDraftSettlementApproval(
+                approver_system_user_id=approver.id,
+                approver_name="Finance Approver",
+                approved_at=datetime(2026, 9, 27, 8, 15, tzinfo=UTC),
+                ticket_reference="28519",
+                evidence_sha256="b" * 64,
+            ),
+        ),
+    )
+
+    assert preview.disposition is (
+        ReviewedExistingDraftSettlementDisposition.manual_review
+    )
+    assert (
+        preview.reason == "selected payment or reviewed payment reference is not exact"
+    )
+    assert db_session.query(PaymentAllocation).count() == 0
+    assert db_session.query(ServiceEntitlement).count() == 0
 
 
 def test_fifty_kobo_shortfall_stays_draft(
