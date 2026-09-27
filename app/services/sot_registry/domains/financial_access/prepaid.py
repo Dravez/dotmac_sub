@@ -3107,6 +3107,7 @@ SERVICES: tuple[SOTService, ...] = (
             "bounded scheduled renewal catch-up",
             "fingerprint-approved missed renewal execution",
             "reviewed legacy prepaid renewal tax-invoice correction",
+            "reviewed unused prepaid renewal correction",
         ),
         depends_on=(
             "billing.contracts",
@@ -3183,7 +3184,11 @@ SERVICES: tuple[SOTService, ...] = (
             "entitlement, creates and fully settles the canonical tax-inclusive "
             "invoice from payment-backed credit, and replaces the entitlement "
             "atomically. It is fingerprint-bound, account-scoped, audited, and "
-            "fails closed on any evidence or balance drift."
+            "fails closed on any evidence or balance drift. A reviewed unused "
+            "renewal correction accepts only one exact un-invoiced adjustment "
+            "and linked active entitlement: it reverses the historical ledger "
+            "debit and entitlement atomically, restoring verified prepaid funding "
+            "without creating money, service access, or a replacement period."
         ),
         contract=ServiceContract(
             concerns=(
@@ -3338,6 +3343,17 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
                 ),
+                ConcernContract(
+                    name="reviewed unused prepaid renewal correction",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "prepaid subscription and renewal terms",
+                        "verified customer funding position",
+                        "funded service entitlement evidence",
+                        "exact legacy account-adjustment evidence",
+                    ),
+                    canonical_writer="financial.prepaid_service_renewals",
+                ),
             ),
             authoritative_inputs=(
                 AuthorityInput(
@@ -3429,7 +3445,7 @@ SERVICES: tuple[SOTService, ...] = (
                 mode=TransactionMode.OWNER_MANAGED,
                 boundary=(
                     "Settlement-triggered, scheduled, reviewed missed-period, "
-                    "and legacy tax-correction "
+                    "legacy tax-correction, and unused-renewal correction "
                     "public commands enter "
                     "execute_owner_command once on a transaction-free session. "
                     "Validation, adjustment reversal, paid invoice, entitlement, "
@@ -3438,7 +3454,8 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 locking=(
                     "The account is locked before idempotency lookup and funding "
-                    "re-preview. Legacy correction additionally locks the exact "
+                    "re-preview. Legacy and unused-renewal corrections additionally "
+                    "lock the exact "
                     "subscription, adjustment, and entitlement before re-preview; "
                     "entitlement overlap and unique period-line identity prevent a "
                     "second funded result for the same period."
@@ -3451,7 +3468,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "exact paid invoice, entitlement, period, and application effects. "
                     "Legacy correction binds account, subscription, adjustment, "
                     "entitlement, canonical invoice total, retained credit, and "
-                    "preview fingerprint to one reservation."
+                    "preview fingerprint to one reservation. Unused-renewal "
+                    "correction binds the exact account, subscription, adjustment, "
+                    "entitlement, preview fingerprint, and idempotency key."
                 ),
                 retries=(
                     "The durable event redriver or scheduled adapter retries the "
@@ -3502,6 +3521,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.prepaid_service_renewals.subscription_not_eligible",
                     "financial.prepaid_service_renewals.subscription_not_found",
                     "financial.prepaid_service_renewals.trigger_execution_conflict",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_missing_idempotency_key",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_not_actionable",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_not_found",
                     "financial.prepaid_service_renewals.unsupported_cadence",
                 ),
                 mapping_owner=("billing automation, durable event, and staff adapters"),
@@ -3514,6 +3536,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "stale preview or entitlement overlap",
                     "invoice, allocation, entitlement, or posting-group failure",
                     "legacy adjustment, entitlement, tax, amount, or credit drift",
+                    "unused-renewal adjustment, entitlement, invoice-link, or fingerprint drift",
                 ),
             ),
             events=EventContract(
@@ -3590,6 +3613,7 @@ SERVICES: tuple[SOTService, ...] = (
                 "docs/designs/USAGE_ALLOWANCE_RESET_CYCLES.md",
                 "docs/runbooks/LEGACY_PREPAID_RENEWAL_TAX_INVOICE_CORRECTION.md",
                 "docs/runbooks/REVIEWED_MIGRATED_PREPAID_OPENING_REPAIR.md",
+                "docs/runbooks/UNUSED_PREPAID_RENEWAL_CORRECTION.md",
             ),
             test_refs=(
                 "tests/test_prepaid_service_renewals.py",
