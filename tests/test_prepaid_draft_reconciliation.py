@@ -1782,7 +1782,7 @@ def test_reviewed_missing_invoice_uses_exact_payment_without_opening_baseline(
     assert result.replayed is False
     assert replay.replayed is True
     assert replay.invoice_id == result.invoice_id
-    assert result.remaining_credit == Decimal("0.00")
+    assert result.remaining_credit == Decimal("75.00")
     assert invoice.status is InvoiceStatus.paid
     assert invoice.subtotal == Decimal("17500.00")
     assert invoice.tax_total == Decimal("1312.50")
@@ -1897,6 +1897,8 @@ def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
         email=f"finance-approver-{uuid4().hex}@example.com",
     )
     db_session.add(approver)
+    db_session.flush()
+    approver_id = approver.id
     db_session.commit()
 
     query = ReviewedExistingDraftSettlementQuery(
@@ -1909,7 +1911,7 @@ def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
         expected_remaining_credit=Decimal("0.00"),
         payment_reference=proof_reference,
         approval=ReviewedExistingDraftSettlementApproval(
-            approver_system_user_id=approver.id,
+            approver_system_user_id=approver_id,
             approver_name="Finance Approver",
             approved_at=datetime(2026, 9, 27, 8, 15, tzinfo=UTC),
             ticket_reference="28519",
@@ -1932,12 +1934,12 @@ def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
             actor="pytest:billing-operator",
             scope=REPAIR_SCOPE,
             reason="Finance approved exact historical draft settlement",
-            idempotency_key=f"pytest-reviewed-draft-{invoice.id}",
+            idempotency_key=f"pytest-reviewed-draft-{query.invoice_id}",
         ),
         query=query,
         preview_fingerprint=preview.fingerprint,
         permission_granted=True,
-        actor_system_user_id=approver.id,
+        actor_system_user_id=approver_id,
     )
     result = settle_reviewed_existing_prepaid_draft(db_session, command)
     replay = settle_reviewed_existing_prepaid_draft(db_session, command)

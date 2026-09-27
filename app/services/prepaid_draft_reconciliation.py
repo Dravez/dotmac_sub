@@ -5541,7 +5541,9 @@ def _reviewed_existing_draft_result(
         )
     )
     payment_reference = (
-        _reviewed_draft_payment_reference(db, payment) if payment is not None else ""
+        _reviewed_draft_payment_reference(db, payment=payment)
+        if payment is not None
+        else ""
     )
     if (
         not isinstance(metadata, dict)
@@ -5557,8 +5559,7 @@ def _reviewed_existing_draft_result(
         or metadata.get("preview_fingerprint") != preview_fingerprint
         or str(metadata.get("payment_reference") or "").casefold()
         != payment_reference.casefold()
-        or payment_reference.casefold()
-        != query.payment_reference.strip().casefold()
+        or payment_reference.casefold() != query.payment_reference.strip().casefold()
         or metadata.get("approver_system_user_id")
         != str(query.approval.approver_system_user_id)
         or metadata.get("approver_name") != query.approval.approver_name.strip()
