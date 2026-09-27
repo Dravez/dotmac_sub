@@ -10,6 +10,7 @@ is asserted to send nothing (the inert guarantee).
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -1117,6 +1118,20 @@ def test_submit_atomically_enqueues_v3_event(db_session):
     rows = _outbox_rows(db_session, request)
     assert len(rows) == 1
     assert rows[0].payload["_expense_action"] == "expense_submit_v3"
+
+
+def test_submission_payload_normalizes_uuid_shaped_source_references(db_session):
+    request = _make_submitted_request(db_session)
+    ticket_reference = uuid4()
+    project_reference = uuid4()
+    request.work_order_mirror.crm_ticket_id = ticket_reference
+    request.work_order_mirror.crm_project_id = project_reference
+
+    payload = expense_sync.build_expense_submission_payload(request)
+
+    assert payload["ticket_source_reference"] == str(ticket_reference)
+    assert payload["project_source_reference"] == str(project_reference)
+    json.dumps(payload)
 
 
 def test_requester_retry_requeues_same_dead_submission_event(db_session):

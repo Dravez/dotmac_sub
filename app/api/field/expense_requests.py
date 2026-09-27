@@ -91,6 +91,8 @@ def _expense_command_error(exc: FieldExpenseRequestError) -> HTTPException:
         ("work_order_not_found", "requester_not_found", "request_not_found")
     ):
         status_code = 404
+    elif exc.code.endswith(("erp_staging_failed", "erp_delivery_not_configured")):
+        status_code = 503
     elif exc.code.endswith("_unavailable"):
         status_code = 503
     elif exc.code.endswith(

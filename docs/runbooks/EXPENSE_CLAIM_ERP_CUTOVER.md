@@ -66,6 +66,14 @@
 4. Submit one newly created canary expense and verify exactly one submission
    event is accepted, all required receipts are attached, and ERP reports
    `SUBMITTED`. Confirm no ERP `DRAFT` is visible to normal ERP users.
+   If submission returns
+   `operations.expense_requests.erp_staging_failed` or
+   `operations.expense_requests.erp_delivery_not_configured`, treat HTTP 503 as
+   a temporary staging/configuration outage. Correlate the server log by the
+   non-secret expense request and command IDs, correct the outbox or capability
+   problem, and retry the original submission with the same client reference
+   and unchanged input. Do not call `retry-delivery`: no request or durable
+   outbox event committed, so that endpoint correctly has nothing to requeue.
 5. With the selected approver, who must be different from the requester, approve
    the canary in the Field app and verify the separate approval event is
    accepted and the same ERP claim becomes `APPROVED`, not `PENDING_APPROVAL`.

@@ -128,6 +128,27 @@ An explicit requester retry revalidates current receipt evidence and requeues
 the same dead `expense_submit_v3` event with its original idempotency key. It
 does not create another request or ERP claim.
 
+Submission staging failures are availability failures, not lifecycle conflicts.
+The Field API returns HTTP 503 with the stable
+`operations.expense_requests.erp_staging_failed` or
+`operations.expense_requests.erp_delivery_not_configured` code and a safe retry
+message. The owner logs the request, command/correlation, work-order, requester,
+and exception type with redacted exception values while retaining traceback
+frames. Payment tokens, account numbers, receipt contents, SQL parameters, and
+provider response bodies are never included. Work-order and imported source
+references are explicitly normalized to strings at the expense payload boundary
+before the JSON outbox row is flushed.
+
+An enqueue exception still rolls back the expense and outbox together. The
+requester retry endpoint cannot safely represent this case because it operates
+on an already-committed request plus a durable dead `expense_submit_v3` event;
+persisting `delivery_failed` without that event would break the atomic outbox
+invariant and give the retry owner no event or stable delivery key to requeue.
+The mobile client instead retries the original submission with the same client
+reference and unchanged inputs. The command fingerprint returns the exact
+committed result if the first attempt actually committed, and rejects changed
+inputs as an idempotency conflict.
+
 Sub remains authoritative for the manager decision. Approval and rejection
 stage separate `expense_approve_v4` and `expense_reject_v3` consequences ordered
 after accepted submission. A decision that arrives first remains pending without
