@@ -2306,6 +2306,11 @@ SERVICES: tuple[SOTService, ...] = (
             "document identity, issues and fully allocates the selected "
             "payment, creates canonical entitlement, projects the reviewed "
             "billing anchor, and records approval evidence atomically."
+            " When the reviewed command explicitly selects continuous-period "
+            "funding, the same owner retires the wrong paid invoice, settles "
+            "the historical draft from its selected Payment, and invokes the "
+            "canonical renewal participant to consume only the released "
+            "payment-proof Payment for the immediately following period."
         ),
         contract=ServiceContract(
             concerns=(
@@ -2374,6 +2379,8 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical prepaid subscription contract",
                         "canonical payment-backed account credit",
                         "verified payment proof",
+                        "canonical superseded paid invoice allocation evidence",
+                        "canonical funded service entitlement",
                         "invoice and payment participant protocols",
                         "financial access restoration protocol",
                     ),
@@ -2473,6 +2480,8 @@ SERVICES: tuple[SOTService, ...] = (
                         "against a named staff principal plus exact invoice, "
                         "subscription, payment, service dates, total, expected "
                         "remaining credit, payment reference, Finance approver, "
+                        "optional exact superseded invoice and payment, "
+                        "explicit continuous-period funding decision, "
                         "approval timestamp, ticket, evidence digest, preview "
                         "fingerprint, actor, reason, and idempotency evidence"
                     ),
@@ -2559,6 +2568,17 @@ SERVICES: tuple[SOTService, ...] = (
                         "verified proof linked to the selected successful "
                         "Payment, including its reviewed transfer reference "
                         "when present"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical superseded paid invoice allocation evidence",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "one operator-named paid future-period invoice, its sole "
+                        "full-value active allocation from a verified payment "
+                        "proof, exact invoice-backed active entitlement, and "
+                        "matching current subscription billing anchor"
                     ),
                 ),
                 AuthorityInput(
@@ -2674,7 +2694,11 @@ SERVICES: tuple[SOTService, ...] = (
                     "audit, event, metadata, and idempotency evidence together. The "
                     "reviewed existing-draft command locks the named account, "
                     "draft, subscription, payment, settlement, returns, and "
-                    "approver; then atomically commits documentary adoption, "
+                    "approver plus any explicitly selected superseded invoice, "
+                    "payment, allocation, proof, and entitlement; then atomically "
+                    "voids that exact wrong document, releases its allocation, "
+                    "reverses its ledger effects, retires its entitlement, "
+                    "retracts the anchor to surviving prior coverage, and commits documentary adoption, "
                     "issue, selected-payment allocation, entitlement, reviewed "
                     "anchor projection, conditional access restoration, Finance "
                     "approval metadata, audit, event, and idempotency evidence. The "
@@ -3162,6 +3186,7 @@ SERVICES: tuple[SOTService, ...] = (
             "prepaid subscription paid-through advancement",
             "billing-anchor projection from entitlement evidence",
             "billing-anchor retraction after funding reversal",
+            "reviewed billing-anchor retraction after invoice supersession",
             "missing or stale billing-anchor repair from exact funded coverage",
             "canonical prepaid renewed-through outcome",
             "post-credit-application due-service consequence",
@@ -3336,6 +3361,19 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "settled payment evidence",
                         "funded service entitlement evidence",
+                    ),
+                    canonical_writer="financial.prepaid_service_renewals",
+                ),
+                ConcernContract(
+                    name=(
+                        "reviewed billing-anchor retraction after invoice supersession"
+                    ),
+                    role=OwnerRole.PROJECTION_WRITER,
+                    input_names=(
+                        "prepaid subscription and renewal terms",
+                        "funded service entitlement evidence",
+                        "applied service-extension coverage evidence",
+                        "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
                 ),

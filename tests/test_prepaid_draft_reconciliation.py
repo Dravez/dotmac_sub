@@ -6,6 +6,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import select
 
 from app.models.audit import AuditEvent
 from app.models.billing import (
@@ -37,7 +38,12 @@ from app.models.prepaid_funding import (
 )
 from app.models.subscriber import SubscriberStatus
 from app.models.system_user import SystemUser
+from app.schemas.billing import (
+    PaymentAllocationConfirm,
+    PaymentAllocationPreviewRequest,
+)
 from app.services import prepaid_draft_reconciliation as reconciliation_service
+from app.services.billing.payments import PaymentAllocations
 from app.services.customer_financial_ledger import calculate_customer_balance
 from app.services.customer_financial_position import prepaid_available_balance
 from app.services.domain_errors import DomainError
@@ -1942,6 +1948,15 @@ def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
         actor_system_user_id=approver_id,
     )
     result = settle_reviewed_existing_prepaid_draft(db_session, command)
+    replay_metadata = dict(invoice.metadata_ or {})
+    settlement_metadata = dict(
+        replay_metadata["reviewed_existing_prepaid_draft_settlement"]
+    )
+    settlement_metadata["subscription_id"] = str(uuid4())
+    settlement_metadata["payment_id"] = str(uuid4())
+    replay_metadata["reviewed_existing_prepaid_draft_settlement"] = settlement_metadata
+    invoice.metadata_ = replay_metadata
+    db_session.commit()
     replay = settle_reviewed_existing_prepaid_draft(db_session, command)
 
     db_session.refresh(invoice)
@@ -2054,6 +2069,211 @@ def test_reviewed_existing_draft_refuses_unverified_reference(
     )
     assert db_session.query(PaymentAllocation).count() == 0
     assert db_session.query(ServiceEntitlement).count() == 0
+
+
+def test_reviewed_existing_draft_atomically_supersedes_wrong_future_paid_period(
+    db_session,
+    subscriber,
+    subscription,
+):
+    target = _draft(db_session, subscriber, subscription, total=Decimal("100.00"))
+    ensure_test_prepaid_contract(db_session, subscription, Decimal("100.00"))
+    target_line = db_session.query(InvoiceLine).filter_by(invoice_id=target.id).one()
+    target.billing_period_start = None
+    target.billing_period_end = None
+    target_line.subscription_id = None
+    reviewed_start = datetime(2026, 7, 26, 23, tzinfo=UTC)
+    reviewed_end = datetime(2026, 8, 26, 23, tzinfo=UTC)
+    db_session.add(
+        ServiceEntitlement(
+            account_id=subscriber.id,
+            subscription_id=subscription.id,
+            starts_at=datetime(2026, 6, 26, 23, tzinfo=UTC),
+            ends_at=reviewed_start,
+            amount_funded=Decimal("100.00"),
+            currency="NGN",
+            status=ServiceEntitlementStatus.active,
+        )
+    )
+
+    wrong_invoice = _draft(
+        db_session,
+        subscriber,
+        subscription,
+        total=Decimal("100.00"),
+    )
+    wrong_start = datetime(2026, 9, 26, 23, tzinfo=UTC)
+    wrong_end = datetime(2026, 10, 26, 23, tzinfo=UTC)
+    wrong_invoice.status = InvoiceStatus.issued
+    wrong_invoice.billing_period_start = wrong_start
+    wrong_invoice.billing_period_end = wrong_end
+    wrong_invoice.issued_at = wrong_start
+    wrong_invoice.due_at = wrong_start
+    db_session.add(
+        LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=wrong_invoice.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.invoice,
+            amount=Decimal("100.00"),
+            currency="NGN",
+            memo="Wrong future prepaid invoice",
+            is_active=True,
+            affects_customer_position=False,
+            effective_date=wrong_start,
+            created_at=wrong_start,
+        )
+    )
+    wrong_payment = _payment(
+        db_session,
+        subscriber,
+        amount=Decimal("100.00"),
+        paid_at=datetime(2026, 9, 25, 10, tzinfo=UTC),
+    )
+    db_session.add(
+        PaymentProof(
+            account_id=subscriber.id,
+            amount=Decimal("100.00"),
+            verified_amount=Decimal("100.00"),
+            currency="NGN",
+            reference="TRF-WRONG-FUTURE",
+            paid_at=wrong_payment.paid_at,
+            file_path="pytest/wrong-future-proof.pdf",
+            status=PaymentProofStatus.verified,
+            verified_by="Finance reviewer",
+            payment_id=wrong_payment.id,
+        )
+    )
+    db_session.commit()
+
+    wrong_allocation_preview = PaymentAllocations.preview(
+        db_session,
+        PaymentAllocationPreviewRequest(
+            payment_id=wrong_payment.id,
+            invoice_id=wrong_invoice.id,
+            amount=Decimal("100.00"),
+        ),
+    )
+    wrong_allocation = PaymentAllocations.stage_confirm(
+        db_session,
+        PaymentAllocationConfirm(
+            payment_id=wrong_payment.id,
+            invoice_id=wrong_invoice.id,
+            amount=Decimal("100.00"),
+            preview_fingerprint=wrong_allocation_preview.fingerprint,
+            idempotency_key=f"pytest-wrong-future-{wrong_invoice.id}",
+        ),
+    ).allocation
+    subscription.next_billing_at = wrong_end
+    db_session.commit()
+
+    wrong_entitlement = db_session.scalar(
+        select(ServiceEntitlement).where(
+            ServiceEntitlement.source_invoice_id == wrong_invoice.id,
+            ServiceEntitlement.status == ServiceEntitlementStatus.active,
+        )
+    )
+    assert wrong_entitlement is not None
+    selected_payment = _payment(
+        db_session,
+        subscriber,
+        amount=Decimal("100.00"),
+        paid_at=datetime(2026, 9, 25, 11, tzinfo=UTC),
+    )
+    selected_payment.external_id = "paystack-reviewed-target"
+    approver = SystemUser(
+        first_name="Finance",
+        last_name="Approver",
+        email=f"finance-supersession-{uuid4().hex}@example.com",
+    )
+    db_session.add(approver)
+    db_session.flush()
+    approver_id = approver.id
+    db_session.commit()
+
+    query = ReviewedExistingDraftSettlementQuery(
+        invoice_id=target.id,
+        subscription_id=subscription.id,
+        payment_id=selected_payment.id,
+        service_start_on=date(2026, 7, 27),
+        next_billing_on=date(2026, 8, 27),
+        expected_total=Decimal("100.00"),
+        expected_remaining_credit=Decimal("0.00"),
+        payment_reference="paystack-reviewed-target",
+        superseded_invoice_id=wrong_invoice.id,
+        superseded_payment_id=wrong_payment.id,
+        fund_next_continuous_period=True,
+        approval=ReviewedExistingDraftSettlementApproval(
+            approver_system_user_id=approver_id,
+            approver_name="Finance Approver",
+            approved_at=datetime(2026, 9, 27, 8, 15, tzinfo=UTC),
+            ticket_reference="3292",
+            evidence_sha256="c" * 64,
+        ),
+    )
+    preview = preview_reviewed_existing_prepaid_draft_settlement(db_session, query)
+
+    assert preview.actionable is True
+    assert preview.superseded_invoice_id == wrong_invoice.id
+    assert preview.superseded_allocation_id == wrong_allocation.id
+    assert preview.superseded_entitlement_id == wrong_entitlement.id
+    assert preview.account_credit_before == Decimal("200.00")
+    assert preview.successor_payment_id == wrong_payment.id
+    assert preview.successor_period_start == reviewed_end
+    assert preview.successor_period_end == wrong_start
+    assert preview.successor_amount == Decimal("100.00")
+    db_session.commit()
+
+    command = SettleReviewedExistingPrepaidDraftCommand(
+        context=CommandContext.system(
+            actor="pytest:billing-operator",
+            scope=REPAIR_SCOPE,
+            reason="Finance reviewed incorrect future allocation",
+            idempotency_key=f"pytest-reviewed-supersession-{query.invoice_id}",
+        ),
+        query=query,
+        preview_fingerprint=preview.fingerprint,
+        permission_granted=True,
+        actor_system_user_id=approver_id,
+    )
+    result = settle_reviewed_existing_prepaid_draft(db_session, command)
+    replay = settle_reviewed_existing_prepaid_draft(db_session, command)
+
+    db_session.refresh(target)
+    db_session.refresh(wrong_invoice)
+    db_session.refresh(wrong_allocation)
+    db_session.refresh(wrong_entitlement)
+    db_session.refresh(subscription)
+    assert replay.replayed is True
+    assert result.superseded_invoice_id == wrong_invoice.id
+    assert result.superseded_payment_id == wrong_payment.id
+    assert wrong_invoice.status is InvoiceStatus.void
+    assert wrong_allocation.is_active is False
+    assert wrong_entitlement.status is ServiceEntitlementStatus.reversed
+    assert target.status is InvoiceStatus.paid
+    assert target.balance_due == Decimal("0.00")
+    assert result.successor_invoice_id is not None
+    assert result.successor_invoice_line_id is not None
+    assert result.successor_allocation_id is not None
+    assert result.successor_entitlement_id is not None
+    assert replay.successor_invoice_id == result.successor_invoice_id
+    successor_invoice = db_session.get(Invoice, result.successor_invoice_id)
+    successor_allocation = db_session.get(
+        PaymentAllocation, result.successor_allocation_id
+    )
+    successor_entitlement = db_session.get(
+        ServiceEntitlement, result.successor_entitlement_id
+    )
+    assert successor_invoice is not None
+    assert successor_invoice.status is InvoiceStatus.paid
+    assert successor_allocation is not None
+    assert successor_allocation.payment_id == wrong_payment.id
+    assert successor_allocation.amount == Decimal("100.00")
+    assert successor_entitlement is not None
+    assert successor_entitlement.starts_at == reviewed_end.replace(tzinfo=None)
+    assert successor_entitlement.ends_at == wrong_start.replace(tzinfo=None)
+    assert subscription.next_billing_at == wrong_start.replace(tzinfo=None)
+    assert calculate_customer_balance(db_session, subscriber.id) == Decimal("0.00")
 
 
 def test_fifty_kobo_shortfall_stays_draft(

@@ -54,6 +54,14 @@ def test_prepaid_draft_reconciliation_has_one_contracted_owner():
     )
     assert missing_invoice_repair.role is OwnerRole.RECONCILER
     assert missing_invoice_repair.canonical_writer == service.name
+    reviewed_draft = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed existing prepaid draft settlement"
+    )
+    assert reviewed_draft.role is OwnerRole.RECONCILER
+    assert reviewed_draft.canonical_writer == service.name
+    assert "canonical funded service entitlement" in reviewed_draft.input_names
     opening_settlement = next(
         item
         for item in service.contract.concerns
@@ -103,6 +111,10 @@ def test_funded_prepaid_renewal_uses_invoice_and_credit_participants_only():
     assert "Invoices.stage_system_invoice_for_owner(" in confirm_source
     assert "InvoiceLines.stage_system_line_for_owner(" in confirm_source
     assert "AccountCreditApplications.apply_invoice_fully(" in exact_source
+    assert (
+        "AccountCreditApplications.apply_invoice_from_selected_payment_fully("
+        in exact_source
+    )
     assert "AccountCreditApplications.apply_invoice_available(" in opening_source
     assert "stage_prepaid_draft_after_funding_change(" not in combined
     assert "_stage_action(" not in combined

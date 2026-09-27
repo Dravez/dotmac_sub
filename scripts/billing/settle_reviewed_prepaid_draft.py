@@ -84,6 +84,9 @@ def _query(args: argparse.Namespace) -> ReviewedExistingDraftSettlementQuery:
         expected_total=args.expected_total,
         expected_remaining_credit=args.expected_remaining_credit,
         payment_reference=args.payment_reference,
+        superseded_invoice_id=args.superseded_invoice_id,
+        superseded_payment_id=args.superseded_payment_id,
+        fund_next_continuous_period=args.fund_next_continuous_period,
         approval=ReviewedExistingDraftSettlementApproval(
             approver_system_user_id=args.approver_system_user_id,
             approver_name=args.approver_name,
@@ -104,6 +107,9 @@ def main() -> int:
     parser.add_argument("--expected-total", type=_money, required=True)
     parser.add_argument("--expected-remaining-credit", type=_money, required=True)
     parser.add_argument("--payment-reference", required=True)
+    parser.add_argument("--superseded-invoice-id", type=_uuid)
+    parser.add_argument("--superseded-payment-id", type=_uuid)
+    parser.add_argument("--fund-next-continuous-period", action="store_true")
     parser.add_argument("--approver-system-user-id", type=_uuid, required=True)
     parser.add_argument("--approver-name", required=True)
     parser.add_argument("--approved-at", type=_timestamp, required=True)
@@ -145,6 +151,50 @@ def main() -> int:
                     ),
                     "expected_remaining_credit": str(preview.expected_remaining_credit),
                     "payment_reference": preview.payment_reference,
+                    "superseded_invoice_id": (
+                        str(preview.superseded_invoice_id)
+                        if preview.superseded_invoice_id
+                        else None
+                    ),
+                    "superseded_payment_id": (
+                        str(preview.superseded_payment_id)
+                        if preview.superseded_payment_id
+                        else None
+                    ),
+                    "superseded_allocation_id": (
+                        str(preview.superseded_allocation_id)
+                        if preview.superseded_allocation_id
+                        else None
+                    ),
+                    "superseded_entitlement_id": (
+                        str(preview.superseded_entitlement_id)
+                        if preview.superseded_entitlement_id
+                        else None
+                    ),
+                    "superseded_void_fingerprint": (
+                        preview.superseded_void_fingerprint
+                    ),
+                    "successor_payment_id": (
+                        str(preview.successor_payment_id)
+                        if preview.successor_payment_id
+                        else None
+                    ),
+                    "successor_period_start": (
+                        preview.successor_period_start.isoformat()
+                        if preview.successor_period_start
+                        else None
+                    ),
+                    "successor_period_end": (
+                        preview.successor_period_end.isoformat()
+                        if preview.successor_period_end
+                        else None
+                    ),
+                    "successor_amount": (
+                        str(preview.successor_amount)
+                        if preview.successor_amount is not None
+                        else None
+                    ),
+                    "successor_currency": preview.successor_currency,
                     "disposition": preview.disposition.value,
                     "actionable": preview.actionable,
                     "reason": preview.reason,
@@ -208,6 +258,56 @@ def main() -> int:
                 "payment_reference": result.payment_reference,
                 "preview_fingerprint": result.preview_fingerprint,
                 "replayed": result.replayed,
+                "superseded_invoice_id": (
+                    str(result.superseded_invoice_id)
+                    if result.superseded_invoice_id
+                    else None
+                ),
+                "superseded_payment_id": (
+                    str(result.superseded_payment_id)
+                    if result.superseded_payment_id
+                    else None
+                ),
+                "superseded_allocation_id": (
+                    str(result.superseded_allocation_id)
+                    if result.superseded_allocation_id
+                    else None
+                ),
+                "superseded_entitlement_id": (
+                    str(result.superseded_entitlement_id)
+                    if result.superseded_entitlement_id
+                    else None
+                ),
+                "successor_invoice_id": (
+                    str(result.successor_invoice_id)
+                    if result.successor_invoice_id
+                    else None
+                ),
+                "successor_invoice_line_id": (
+                    str(result.successor_invoice_line_id)
+                    if result.successor_invoice_line_id
+                    else None
+                ),
+                "successor_allocation_id": (
+                    str(result.successor_allocation_id)
+                    if result.successor_allocation_id
+                    else None
+                ),
+                "successor_entitlement_id": (
+                    str(result.successor_entitlement_id)
+                    if result.successor_entitlement_id
+                    else None
+                ),
+                "successor_period_start": (
+                    result.successor_period_start.isoformat()
+                    if result.successor_period_start
+                    else None
+                ),
+                "successor_period_end": (
+                    result.successor_period_end.isoformat()
+                    if result.successor_period_end
+                    else None
+                ),
             },
             indent=2,
             sort_keys=True,
