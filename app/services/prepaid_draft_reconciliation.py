@@ -5496,6 +5496,7 @@ def _reviewed_existing_draft_result(
     *,
     invoice: Invoice,
     query: ReviewedExistingDraftSettlementQuery,
+    idempotency_key: str,
     preview_fingerprint: str,
     replayed: bool,
 ) -> ReviewedExistingDraftSettlementResult:
@@ -5524,20 +5525,40 @@ def _reviewed_existing_draft_result(
             ServiceEntitlement.status == ServiceEntitlementStatus.active,
         )
     )
+    subscription = db.get(Subscription, query.subscription_id)
+    payment = db.get(Payment, query.payment_id)
+    access_consequence = db.scalar(
+        select(FinancialAccessConsequence).where(
+            FinancialAccessConsequence.idempotency_key
+            == f"reviewed-draft-access:{idempotency_key}"
+        )
+    )
+    remaining_credit = round_money(
+        get_account_credit_balance(
+            db,
+            str(invoice.account_id),
+            currency=(invoice.currency or "NGN").upper(),
+        )
+    )
+    payment_reference = (
+        _reviewed_draft_payment_reference(db, payment) if payment is not None else ""
+    )
     if (
         not isinstance(metadata, dict)
         or line is None
         or allocation is None
         or entitlement is None
+        or subscription is None
+        or payment is None
         or invoice.status is not InvoiceStatus.paid
         or round_money(to_decimal(invoice.balance_due)) != Decimal("0.00")
         or invoice.billing_period_start is None
         or invoice.billing_period_end is None
         or metadata.get("preview_fingerprint") != preview_fingerprint
         or str(metadata.get("payment_reference") or "").casefold()
+        != payment_reference.casefold()
+        or payment_reference.casefold()
         != query.payment_reference.strip().casefold()
-        or metadata.get("subscription_id") != str(query.subscription_id)
-        or metadata.get("payment_id") != str(query.payment_id)
         or metadata.get("approver_system_user_id")
         != str(query.approval.approver_system_user_id)
         or metadata.get("approver_name") != query.approval.approver_name.strip()
@@ -5550,15 +5571,24 @@ def _reviewed_existing_draft_result(
         or metadata.get("service_period_end")
         != _business_midnight(query.next_billing_on).isoformat()
         or round_money(to_decimal(invoice.total)) != round_money(query.expected_total)
-        or metadata.get("remaining_credit")
-        != str(round_money(query.expected_remaining_credit))
+        or remaining_credit != round_money(query.expected_remaining_credit)
+        or subscription.next_billing_at is None
+        or _utc(subscription.next_billing_at) != _utc(invoice.billing_period_end)
+        or (
+            access_consequence is not None
+            and (
+                access_consequence.account_id != invoice.account_id
+                or access_consequence.action is not FinancialAccessAction.restore
+                or access_consequence.origin
+                is not FinancialAccessOrigin.prepaid_enforcement
+            )
+        )
     ):
         _error(
             "incomplete_repair",
             "Reviewed existing-draft settlement evidence is incomplete.",
             invoice_id=str(invoice.id),
         )
-    access_value = metadata.get("access_consequence_id")
     return ReviewedExistingDraftSettlementResult(
         invoice_id=invoice.id,
         invoice_number=invoice.invoice_number,
@@ -5568,13 +5598,13 @@ def _reviewed_existing_draft_result(
         allocation_id=allocation.id,
         entitlement_id=entitlement.id,
         access_consequence_id=(
-            UUID(access_value) if isinstance(access_value, str) else None
+            access_consequence.id if access_consequence is not None else None
         ),
         service_period_start=_utc(invoice.billing_period_start),
         service_period_end=_utc(invoice.billing_period_end),
-        next_billing_at=_utc(datetime.fromisoformat(str(metadata["next_billing_at"]))),
-        remaining_credit=round_money(Decimal(str(metadata["remaining_credit"]))),
-        payment_reference=str(metadata["payment_reference"]),
+        next_billing_at=_utc(subscription.next_billing_at),
+        remaining_credit=remaining_credit,
+        payment_reference=payment_reference,
         preview_fingerprint=preview_fingerprint,
         replayed=replayed,
     )
@@ -5625,6 +5655,7 @@ def settle_reviewed_existing_prepaid_draft(
                 db,
                 invoice=replay_invoice,
                 query=command.query,
+                idempotency_key=reservation.key,
                 preview_fingerprint=command.preview_fingerprint,
                 replayed=True,
             )
@@ -5929,6 +5960,7 @@ def settle_reviewed_existing_prepaid_draft(
             db,
             invoice=changed_invoice,
             query=command.query,
+            idempotency_key=key,
             preview_fingerprint=current.fingerprint,
             replayed=False,
         )

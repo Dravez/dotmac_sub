@@ -1948,6 +1948,13 @@ def test_reviewed_existing_draft_settles_selected_verified_payment_atomically(
     assert result.replayed is False
     assert replay.replayed is True
     assert replay.invoice_id == result.invoice_id
+    assert replay.subscription_id == subscription.id
+    assert replay.payment_id == payment.id
+    assert replay.allocation_id == result.allocation_id
+    assert replay.entitlement_id == result.entitlement_id
+    assert replay.next_billing_at == reviewed_end
+    assert replay.remaining_credit == Decimal("0.00")
+    assert replay.payment_reference == proof_reference
     assert invoice.status is InvoiceStatus.paid
     assert invoice.balance_due == Decimal("0.00")
     assert invoice.billing_period_start == reviewed_start.replace(tzinfo=None)
