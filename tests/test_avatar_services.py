@@ -36,14 +36,13 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"valid-image-payload"
 def test_startup_refuses_unsupported_avatar_overrides(
     monkeypatch, setting_name: str, value: str | int
 ) -> None:
-    monkeypatch.setattr(settings, "avatar_max_size_bytes", 2 * 1024 * 1024)
-    monkeypatch.setattr(
+    baseline = replace(
         settings,
-        "avatar_allowed_types",
-        "image/jpeg,image/png,image/gif,image/webp",
+        avatar_max_size_bytes=2 * 1024 * 1024,
+        avatar_allowed_types="image/jpeg,image/png,image/gif,image/webp",
+        avatar_url_prefix="/static/avatars",
     )
-    monkeypatch.setattr(settings, "avatar_url_prefix", "/static/avatars")
-    monkeypatch.setattr(settings, setting_name, value)
+    monkeypatch.setattr(avatar, "settings", replace(baseline, **{setting_name: value}))
     with pytest.raises(RuntimeError, match="AVATAR_"):
         avatar.require_compatible_avatar_policy()
 
@@ -68,9 +67,16 @@ def test_avatar_signature_check_is_prefix_only() -> None:
 
 
 def test_startup_accepts_supported_stricter_avatar_policy(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "avatar_max_size_bytes", 1024 * 1024)
-    monkeypatch.setattr(settings, "avatar_allowed_types", "image/png")
-    monkeypatch.setattr(settings, "avatar_url_prefix", "/static/avatars")
+    monkeypatch.setattr(
+        avatar,
+        "settings",
+        replace(
+            settings,
+            avatar_max_size_bytes=1024 * 1024,
+            avatar_allowed_types="image/png",
+            avatar_url_prefix="/static/avatars",
+        ),
+    )
     avatar.require_compatible_avatar_policy()
 
 
@@ -104,6 +110,10 @@ def _subscriber(db_session, avatar_url: str | None = None) -> Subscriber:
         avatar_url=avatar_url,
     )
     db_session.add(subscriber)
+    db_session.flush()
+    # Keep the loaded id available without starting a read transaction after
+    # commit; owner commands require a transaction-free Session at entry.
+    db_session.expunge(subscriber)
     db_session.commit()
     return subscriber
 
@@ -143,7 +153,9 @@ def test_upload_uses_s3_and_selects_metadata_in_one_owner_command(
 
 def test_authenticated_upload_reads_only_size_limit_plus_one(monkeypatch) -> None:
     subscriber_id = uuid4()
-    monkeypatch.setattr(settings, "avatar_max_size_bytes", 10)
+    monkeypatch.setattr(
+        user_profile, "settings", replace(settings, avatar_max_size_bytes=10)
+    )
     file = MagicMock(spec=UploadFile)
     file.read = AsyncMock(return_value=b"x" * 11)
 
@@ -161,7 +173,9 @@ def test_authenticated_upload_reads_only_size_limit_plus_one(monkeypatch) -> Non
 
 def test_authenticated_upload_carries_principal_attribution(monkeypatch) -> None:
     subscriber_id = uuid4()
-    monkeypatch.setattr(settings, "avatar_max_size_bytes", 100)
+    monkeypatch.setattr(
+        user_profile, "settings", replace(settings, avatar_max_size_bytes=100)
+    )
     file = MagicMock(spec=UploadFile)
     file.filename = "photo.png"
     file.content_type = "image/png"
@@ -240,6 +254,7 @@ def test_replace_and_remove_keep_physical_objects(db_session, monkeypatch) -> No
     assert avatar.resolve_public_avatar(db_session, first_id) is None
     assert storage.deleted == []
     assert len(storage.objects) == 2
+    db_session.rollback()  # Close the assertion's read transaction.
 
     avatar.remove_avatar(
         db_session,
