@@ -46,6 +46,23 @@ server {
         proxy_read_timeout 86400;
     }
 
+    # Exact avatar endpoint: cap chunked multipart bodies before app parsing.
+    location = /api/v1/auth/me/avatar {
+        client_max_body_size 3m;
+        proxy_request_buffering on;
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
     # Server-Sent Events for live bandwidth widgets
     location ~ ^/(api/v1/bandwidth/live|portal/bandwidth/my/live) {
         proxy_pass http://127.0.0.1:8001;

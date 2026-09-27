@@ -2,7 +2,7 @@
 Unified File Upload Service.
 
 Central service for file validation, storage, and deletion.
-Upload services (avatar, branding, subscriber docs, attachments)
+Upload services (legacy branding, subscriber docs, attachments)
 delegate to this core service.
 
 Key features:
@@ -393,20 +393,6 @@ class FileUploadService:
 # ---------------------------------------------------------------------------
 
 
-def _avatar_config() -> FileUploadConfig:
-    """Avatar upload configuration."""
-
-    return FileUploadConfig(
-        base_dir=os.getenv("AVATAR_UPLOAD_DIR", "static/avatars"),
-        allowed_content_types=frozenset(
-            os.getenv(
-                "AVATAR_ALLOWED_TYPES", "image/jpeg,image/png,image/gif,image/webp"
-            ).split(",")
-        ),
-        max_size_bytes=int(os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024))),
-    )
-
-
 def _branding_config() -> FileUploadConfig:
     """Branding (logo, favicon) upload configuration."""
 
@@ -512,11 +498,6 @@ def _attachment_config() -> FileUploadConfig:
         max_size_bytes=int(os.getenv("ATTACHMENT_MAX_SIZE", str(10 * 1024 * 1024))),
         compute_checksum=True,
     )
-
-
-def get_avatar_upload() -> FileUploadService:
-    """Get avatar upload service."""
-    return FileUploadService(_avatar_config())
 
 
 def get_branding_upload() -> FileUploadService:
