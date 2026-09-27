@@ -5878,48 +5878,92 @@ def _reviewed_existing_draft_result(
         )
     )
     metadata_map = metadata if isinstance(metadata, dict) else {}
-    superseded_invoice_value = metadata_map.get("superseded_invoice_id")
-    superseded_payment_value = metadata_map.get("superseded_payment_id")
-    superseded_allocation_value = metadata_map.get("superseded_allocation_id")
-    superseded_entitlement_value = metadata_map.get("superseded_entitlement_id")
-    successor_invoice_value = metadata_map.get("successor_invoice_id")
-    successor_line_value = metadata_map.get("successor_invoice_line_id")
-    successor_allocation_value = metadata_map.get("successor_allocation_id")
-    successor_entitlement_value = metadata_map.get("successor_entitlement_id")
     superseded_invoice = (
-        db.get(Invoice, UUID(str(superseded_invoice_value)))
-        if superseded_invoice_value
+        db.get(Invoice, query.superseded_invoice_id)
+        if query.superseded_invoice_id is not None
+        else None
+    )
+    superseded_payment = (
+        db.get(Payment, query.superseded_payment_id)
+        if query.superseded_payment_id is not None
         else None
     )
     superseded_allocation = (
-        db.get(PaymentAllocation, UUID(str(superseded_allocation_value)))
-        if superseded_allocation_value
+        db.scalar(
+            select(PaymentAllocation).where(
+                PaymentAllocation.invoice_id == query.superseded_invoice_id,
+                PaymentAllocation.payment_id == query.superseded_payment_id,
+            )
+        )
+        if query.superseded_invoice_id is not None
+        and query.superseded_payment_id is not None
         else None
     )
     superseded_entitlement = (
-        db.get(ServiceEntitlement, UUID(str(superseded_entitlement_value)))
-        if superseded_entitlement_value
+        db.scalar(
+            select(ServiceEntitlement).where(
+                ServiceEntitlement.source_invoice_id == query.superseded_invoice_id,
+                ServiceEntitlement.subscription_id == query.subscription_id,
+            )
+        )
+        if query.superseded_invoice_id is not None
         else None
     )
-    successor_invoice = (
-        db.get(Invoice, UUID(str(successor_invoice_value)))
-        if successor_invoice_value
-        else None
-    )
-    successor_line = (
-        db.get(InvoiceLine, UUID(str(successor_line_value)))
-        if successor_line_value
-        else None
+    successor_allocations = (
+        tuple(
+            db.scalars(
+                select(PaymentAllocation).where(
+                    PaymentAllocation.payment_id == query.superseded_payment_id,
+                    PaymentAllocation.invoice_id != query.superseded_invoice_id,
+                    PaymentAllocation.is_active.is_(True),
+                )
+            ).all()
+        )
+        if query.fund_next_continuous_period
+        and query.superseded_payment_id is not None
+        and query.superseded_invoice_id is not None
+        else ()
     )
     successor_allocation = (
-        db.get(PaymentAllocation, UUID(str(successor_allocation_value)))
-        if successor_allocation_value
+        successor_allocations[0] if len(successor_allocations) == 1 else None
+    )
+    successor_invoice = (
+        db.get(Invoice, successor_allocation.invoice_id)
+        if successor_allocation is not None
         else None
     )
+    successor_invoice_items = (
+        tuple(
+            db.scalars(
+                select(InvoiceLine).where(
+                    InvoiceLine.invoice_id == successor_invoice.id,
+                    InvoiceLine.subscription_id == query.subscription_id,
+                    InvoiceLine.is_active.is_(True),
+                    InvoiceLine.amount > Decimal("0.00"),
+                )
+            ).all()
+        )
+        if successor_invoice is not None
+        else ()
+    )
+    successor_invoice_item = (
+        successor_invoice_items[0] if len(successor_invoice_items) == 1 else None
+    )
+    successor_entitlements = (
+        tuple(
+            db.scalars(
+                select(ServiceEntitlement).where(
+                    ServiceEntitlement.source_invoice_id == successor_invoice.id,
+                    ServiceEntitlement.subscription_id == query.subscription_id,
+                    ServiceEntitlement.status == ServiceEntitlementStatus.active,
+                )
+            ).all()
+        )
+        if successor_invoice is not None
+        else ()
+    )
     successor_entitlement = (
-        db.get(ServiceEntitlement, UUID(str(successor_entitlement_value)))
-        if successor_entitlement_value
-        else None
+        successor_entitlements[0] if len(successor_entitlements) == 1 else None
     )
     subscription = db.get(Subscription, query.subscription_id)
     payment = db.get(Payment, query.payment_id)
@@ -5941,79 +5985,84 @@ def _reviewed_existing_draft_result(
         if payment is not None
         else ""
     )
+    # These recorded IDs bind a retry to the original reviewed intent only.
+    # Every returned identity and state below comes from the locked domain rows.
     supersession_complete = (
         query.superseded_invoice_id is None
         and query.superseded_payment_id is None
-        and superseded_invoice_value is None
-        and superseded_payment_value is None
-        and superseded_allocation_value is None
-        and superseded_entitlement_value is None
+        and metadata_map.get("superseded_invoice_id") is None
+        and metadata_map.get("superseded_payment_id") is None
+        and superseded_invoice is None
+        and superseded_payment is None
+        and superseded_allocation is None
+        and superseded_entitlement is None
     ) or (
         query.superseded_invoice_id is not None
         and query.superseded_payment_id is not None
-        and superseded_invoice_value == str(query.superseded_invoice_id)
-        and superseded_payment_value == str(query.superseded_payment_id)
+        and metadata_map.get("superseded_invoice_id")
+        == str(query.superseded_invoice_id)
+        and metadata_map.get("superseded_payment_id")
+        == str(query.superseded_payment_id)
         and superseded_invoice is not None
+        and superseded_invoice.id == query.superseded_invoice_id
         and superseded_invoice.status is InvoiceStatus.void
+        and superseded_payment is not None
+        and superseded_payment.id == query.superseded_payment_id
         and superseded_allocation is not None
+        and superseded_allocation.invoice_id == superseded_invoice.id
+        and superseded_allocation.payment_id == superseded_payment.id
         and not superseded_allocation.is_active
         and superseded_entitlement is not None
+        and superseded_entitlement.source_invoice_id == superseded_invoice.id
+        and superseded_entitlement.subscription_id == query.subscription_id
         and superseded_entitlement.status is ServiceEntitlementStatus.reversed
     )
     successor_values = (
-        successor_invoice_value,
-        successor_line_value,
-        successor_allocation_value,
-        successor_entitlement_value,
-        metadata_map.get("successor_payment_id"),
-        metadata_map.get("successor_period_start"),
-        metadata_map.get("successor_period_end"),
-        metadata_map.get("successor_amount"),
-        metadata_map.get("successor_currency"),
+        successor_invoice,
+        successor_invoice_item,
+        successor_allocation,
+        successor_entitlement,
     )
     successor_complete = (
         not query.fund_next_continuous_period
-        and metadata_map.get("fund_next_continuous_period") in (None, False)
+        and metadata_map.get("fund_next_continuous_period") is False
+        and metadata_map.get("successor_payment_id") is None
         and all(value is None for value in successor_values)
     ) or (
         query.fund_next_continuous_period
         and metadata_map.get("fund_next_continuous_period") is True
         and query.superseded_payment_id is not None
         and metadata_map.get("successor_payment_id") == str(query.superseded_payment_id)
+        and superseded_payment is not None
         and successor_invoice is not None
+        and metadata_map.get("successor_invoice_id") == str(successor_invoice.id)
         and successor_invoice.status is InvoiceStatus.paid
         and round_money(to_decimal(successor_invoice.balance_due)) == Decimal("0.00")
-        and metadata_map.get("successor_amount") is not None
         and round_money(to_decimal(successor_invoice.total))
-        == round_money(Decimal(str(metadata_map["successor_amount"])))
-        and metadata_map.get("successor_currency") is not None
+        == round_money(to_decimal(superseded_payment.amount))
         and (successor_invoice.currency or "NGN").upper()
-        == metadata_map.get("successor_currency")
-        and successor_line is not None
-        and successor_line.invoice_id == successor_invoice.id
-        and successor_line.subscription_id == query.subscription_id
+        == (superseded_payment.currency or "NGN").upper()
+        and successor_invoice_item is not None
+        and successor_invoice_item.invoice_id == successor_invoice.id
+        and successor_invoice_item.subscription_id == query.subscription_id
         and successor_allocation is not None
         and successor_allocation.invoice_id == successor_invoice.id
         and successor_allocation.payment_id == query.superseded_payment_id
         and successor_allocation.is_active
         and round_money(to_decimal(successor_allocation.amount))
-        == round_money(Decimal(str(metadata_map["successor_amount"])))
+        == round_money(to_decimal(successor_invoice.total))
         and successor_entitlement is not None
         and successor_entitlement.status is ServiceEntitlementStatus.active
         and successor_entitlement.source_invoice_id == successor_invoice.id
-        and successor_entitlement.source_invoice_line_id == successor_line.id
-        and _utc(successor_entitlement.starts_at).isoformat()
-        == metadata_map.get("successor_period_start")
-        and _utc(successor_entitlement.ends_at).isoformat()
-        == metadata_map.get("successor_period_end")
-        and metadata_map.get("successor_period_start")
-        == _business_midnight(query.next_billing_on).isoformat()
+        and successor_entitlement.source_invoice_line_id == successor_invoice_item.id
+        and _utc(successor_entitlement.starts_at)
+        == _business_midnight(query.next_billing_on)
         and successor_invoice.billing_period_start is not None
         and successor_invoice.billing_period_end is not None
-        and _utc(successor_invoice.billing_period_start).isoformat()
-        == metadata_map.get("successor_period_start")
-        and _utc(successor_invoice.billing_period_end).isoformat()
-        == metadata_map.get("successor_period_end")
+        and _utc(successor_invoice.billing_period_start)
+        == _utc(successor_entitlement.starts_at)
+        and _utc(successor_invoice.billing_period_end)
+        == _utc(successor_entitlement.ends_at)
     )
     projected_anchor = (
         _utc(successor_invoice.billing_period_end)
@@ -6037,12 +6086,16 @@ def _reviewed_existing_draft_result(
         or round_money(to_decimal(invoice.balance_due)) != Decimal("0.00")
         or invoice.billing_period_start is None
         or invoice.billing_period_end is None
+        or _utc(invoice.billing_period_start)
+        != _business_midnight(query.service_start_on)
+        or _utc(invoice.billing_period_end) != _business_midnight(query.next_billing_on)
+        or _utc(entitlement.starts_at) != _utc(invoice.billing_period_start)
+        or _utc(entitlement.ends_at) != _utc(invoice.billing_period_end)
+        or entitlement.source_invoice_line_id != line.id
         or metadata.get("preview_fingerprint") != preview_fingerprint
         or str(metadata.get("payment_reference") or "").casefold()
         != payment_reference.casefold()
         or payment_reference.casefold() != query.payment_reference.strip().casefold()
-        or metadata.get("subscription_id") != str(query.subscription_id)
-        or metadata.get("payment_id") != str(query.payment_id)
         or metadata.get("approver_system_user_id")
         != str(query.approval.approver_system_user_id)
         or metadata.get("approver_name") != query.approval.approver_name.strip()
@@ -6050,18 +6103,11 @@ def _reviewed_existing_draft_result(
         or metadata.get("ticket_reference") != query.approval.ticket_reference.strip()
         or metadata.get("evidence_sha256")
         != query.approval.evidence_sha256.strip().lower()
-        or metadata.get("service_period_start")
-        != _business_midnight(query.service_start_on).isoformat()
-        or metadata.get("service_period_end")
-        != _business_midnight(query.next_billing_on).isoformat()
         or round_money(to_decimal(invoice.total)) != round_money(query.expected_total)
-        or metadata.get("remaining_credit")
-        != str(round_money(query.expected_remaining_credit))
         or remaining_credit != round_money(query.expected_remaining_credit)
         or subscription.next_billing_at is None
         or projected_anchor is None
         or _utc(subscription.next_billing_at) != projected_anchor
-        or metadata.get("next_billing_at") != projected_anchor.isoformat()
         or (
             access_consequence is not None
             and (
@@ -6098,45 +6144,37 @@ def _reviewed_existing_draft_result(
         preview_fingerprint=preview_fingerprint,
         replayed=replayed,
         superseded_invoice_id=(
-            UUID(str(superseded_invoice_value)) if superseded_invoice_value else None
+            superseded_invoice.id if superseded_invoice is not None else None
         ),
         superseded_payment_id=(
-            UUID(str(superseded_payment_value)) if superseded_payment_value else None
+            superseded_payment.id if superseded_payment is not None else None
         ),
         superseded_allocation_id=(
-            UUID(str(superseded_allocation_value))
-            if superseded_allocation_value
-            else None
+            superseded_allocation.id if superseded_allocation is not None else None
         ),
         superseded_entitlement_id=(
-            UUID(str(superseded_entitlement_value))
-            if superseded_entitlement_value
-            else None
+            superseded_entitlement.id if superseded_entitlement is not None else None
         ),
         successor_invoice_id=(
-            UUID(str(successor_invoice_value)) if successor_invoice_value else None
+            successor_invoice.id if successor_invoice is not None else None
         ),
         successor_invoice_line_id=(
-            UUID(str(successor_line_value)) if successor_line_value else None
+            successor_invoice_item.id if successor_invoice_item is not None else None
         ),
         successor_allocation_id=(
-            UUID(str(successor_allocation_value))
-            if successor_allocation_value
-            else None
+            successor_allocation.id if successor_allocation is not None else None
         ),
         successor_entitlement_id=(
-            UUID(str(successor_entitlement_value))
-            if successor_entitlement_value
-            else None
+            successor_entitlement.id if successor_entitlement is not None else None
         ),
         successor_period_start=(
-            _utc(datetime.fromisoformat(str(metadata_map["successor_period_start"])))
-            if metadata_map.get("successor_period_start")
+            _utc(successor_entitlement.starts_at)
+            if successor_entitlement is not None
             else None
         ),
         successor_period_end=(
-            _utc(datetime.fromisoformat(str(metadata_map["successor_period_end"])))
-            if metadata_map.get("successor_period_end")
+            _utc(successor_entitlement.ends_at)
+            if successor_entitlement is not None
             else None
         ),
     )
@@ -6464,7 +6502,7 @@ def settle_reviewed_existing_prepaid_draft(
             )
         )
         successor_invoice: Invoice | None = None
-        successor_line: InvoiceLine | None = None
+        renewal_line: InvoiceLine | None = None
         successor_allocation: PaymentAllocation | None = None
         successor_entitlement: ServiceEntitlement | None = None
         if current.successor_payment_id is not None:
@@ -6518,7 +6556,7 @@ def settle_reviewed_existing_prepaid_draft(
                     participant_error=exc.code,
                 )
             successor_invoice = successor_renewal.invoice
-            successor_line = successor_renewal.invoice_line
+            renewal_line = successor_renewal.invoice_line
             successor_entitlement = successor_renewal.entitlement
             successor_allocation = (
                 db.scalar(
@@ -6534,7 +6572,7 @@ def settle_reviewed_existing_prepaid_draft(
             if (
                 successor_renewal.replayed
                 or successor_invoice is None
-                or successor_line is None
+                or renewal_line is None
                 or successor_allocation is None
                 or successor_entitlement.source_invoice_id != successor_invoice.id
                 or round_money(to_decimal(successor_allocation.amount))
@@ -6651,7 +6689,7 @@ def settle_reviewed_existing_prepaid_draft(
                 str(successor_invoice.id) if successor_invoice is not None else None
             ),
             "successor_invoice_line_id": (
-                str(successor_line.id) if successor_line is not None else None
+                str(renewal_line.id) if renewal_line is not None else None
             ),
             "successor_allocation_id": (
                 str(successor_allocation.id)

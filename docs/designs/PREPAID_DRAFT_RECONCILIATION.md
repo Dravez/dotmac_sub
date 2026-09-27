@@ -225,6 +225,14 @@ reservation retain the payment reference, approver, timestamp, ticket, evidence
 digest, dates, allocation, entitlement, and preview fingerprint in the same
 transaction.
 
+On idempotent replay, those metadata values remain provenance only. The owner
+reconstructs settlement identity from the invoice's active subscription line,
+the selected Payment's active allocation, the invoice-backed entitlement, and
+the subscription billing anchor. For a supersession, it resolves the named
+invoice and Payment from the reviewed command and checks their allocation and
+entitlement rows; any successor period is reconstructed from its active
+allocation, invoice line, invoice, entitlement, and released Payment.
+
 One narrow supersession shape may be included in that same reviewed command.
 The operator must name both the wrongly paid future-period invoice and the
 verified payment-proof Payment that solely funded it. Preview requires one
