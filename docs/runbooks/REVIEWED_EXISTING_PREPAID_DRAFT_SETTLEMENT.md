@@ -18,6 +18,12 @@ Permission: `billing:prepaid_reconciliation:repair`
 - ticket reference and lowercase SHA-256 evidence digest; and
 - operator actor, reason, and stable idempotency key.
 
+When the correction also replaces an incorrectly paid future period, record
+the exact superseded invoice and its verified payment-proof Payment. Do not use
+this option for a partial allocation, multiple allocations or entitlements,
+refund/reversal evidence, overlapping periods, or an anchor that is not exactly
+the superseded entitlement end.
+
 Do not apply when the preview is not `exact_reviewed_draft`. Resolve changed
 contract/tax terms, financial activity, refund/reversal evidence, payment
 capacity, overlapping coverage, or cutoff-balance differences first.
@@ -41,8 +47,28 @@ python -m scripts.billing.settle_reviewed_prepaid_draft \
   --evidence-sha256 <64-lowercase-hex-digest>
 ```
 
-Record the returned fingerprint. Repeat the preview separately for the next
-invoice, using the expected credit that remains after the earlier settlement.
+For the reviewed supersession shape, add both identifiers:
+
+```bash
+  --superseded-invoice-id <wrong-paid-invoice-uuid> \
+  --superseded-payment-id <wrong-payment-proof-payment-uuid>
+```
+
+When Finance has approved the released payment-proof credit for the immediately
+following continuous period, also add:
+
+```bash
+  --fund-next-continuous-period
+```
+
+In that mode, `--expected-remaining-credit` is the final balance after the
+historical draft and the continuous successor period are both funded. Preview
+must show the released proof Payment, successor dates, exact canonical amount,
+and currency before apply.
+
+Record the returned fingerprint. Without continuous funding, repeat the preview
+separately for each later historical invoice, using the expected credit that
+remains after the earlier settlement.
 
 ## Apply
 
@@ -77,6 +103,16 @@ Confirm all of the following before proceeding to the next invoice:
    payment reference, evidence digest, and preview fingerprint.
 7. Access is active only when current canonical coverage permits restoration;
    an expired historical period alone must not restore service.
+8. When supersession was selected without continuous funding, the old invoice
+   is `void`, its allocation is inactive, its entitlement is `reversed`, its
+   released payment remains customer credit, and no unrelated allocation or
+   entitlement changed.
+9. When continuous funding was selected, the released payment alone funds one
+   new paid invoice for the immediately following period, its exact allocation
+   and entitlement are active, the anchor equals that entitlement end, and the
+   final credit equals the reviewed expectation.
+10. Financial restoration never clears an unrelated administrative lock;
+    resolve that lock separately through its own owner and evidence.
 
 For a sequence of historical invoices, apply them chronologically and rerun a
 fresh preview before each write. At the final cutoff, verify the subscription

@@ -225,6 +225,32 @@ reservation retain the payment reference, approver, timestamp, ticket, evidence
 digest, dates, allocation, entitlement, and preview fingerprint in the same
 transaction.
 
+One narrow supersession shape may be included in that same reviewed command.
+The operator must name both the wrongly paid future-period invoice and the
+verified payment-proof Payment that solely funded it. Preview requires one
+full-value active allocation, one exact invoice-backed active entitlement,
+matching invoice/entitlement dates, and a subscription anchor equal to that
+entitlement end. The wrong period must start no earlier than the reviewed
+draft's period end, and surviving coverage must end exactly at the reviewed
+draft's start. Confirmation first voids the named invoice through the invoice
+owner, releases only its allocation and reverses its ledger effects, retires
+only its entitlement, and asks the renewal owner to retract the anchor to the
+end of surviving coverage. It then settles the reviewed draft from the selected
+Payment. Both document transitions, both allocation projections, entitlement
+replacement, anchor projection, audit/event evidence, and idempotency evidence
+commit or roll back together. Generic void, reallocation, and direct anchor
+updates are not substitutes.
+
+When Finance explicitly selects continuous-period funding, preview also proves
+that the released payment-proof Payment exactly matches the canonical charge
+for the immediately following period and that no other invoice or entitlement
+overlaps it. Confirmation uses the Paystack Payment only for the historical
+draft and the released payment-proof Payment only for that next period. The
+renewal owner creates the second paid invoice, allocation, entitlement,
+outcome, and anchor projection inside the repair owner's transaction. Expected
+remaining credit is the balance after both periods, not the intermediate
+balance after the historical draft.
+
 The operational procedure and post-settlement checks are in
 `docs/runbooks/REVIEWED_EXISTING_PREPAID_DRAFT_SETTLEMENT.md`.
 

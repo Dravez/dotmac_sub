@@ -242,6 +242,7 @@ def test_the_owner_defines_the_single_anchor_projection() -> None:
     names = _module_function_names(OWNER)
     assert "project_prepaid_billing_anchor_for_invoice" in names
     assert "retract_prepaid_billing_anchors_after_funding_reversal" in names
+    assert "project_reviewed_invoice_supersession_anchor_for_owner" in names
     # Advancement and retraction both flow through the one projection.
     assert _assigns_next_billing_at(OWNER) == set()
     assert "stage_subscription_billing_anchor(" in OWNER.read_text(encoding="utf-8")

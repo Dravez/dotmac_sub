@@ -2068,6 +2068,7 @@ class _InvoiceBackedRenewalEvidence:
     line: InvoiceLine
     entitlement: ServiceEntitlement
     payment_allocation_ids: tuple[UUID, ...]
+    payment_ids: tuple[UUID, ...]
     preview_fingerprint: str
     funding_before: Decimal
     funding_after: Decimal
@@ -2192,6 +2193,7 @@ def _invoice_backed_renewal_evidence(
         line=line,
         entitlement=entitlement,
         payment_allocation_ids=tuple(allocation.id for allocation in allocations),
+        payment_ids=tuple(allocation.payment_id for allocation in allocations),
         preview_fingerprint=fingerprint,
         funding_before=funding_before,
         funding_after=funding_after,
@@ -2339,6 +2341,7 @@ def confirm_prepaid_service_renewal(
     *,
     effective_at: datetime,
     evidence_ref: str,
+    selected_payment_id: UUID | None = None,
 ) -> PrepaidServiceRenewalResult:
     """Lock, re-preview, and atomically settle invoice + entitlement + anchor."""
     evidence = evidence_ref.strip()
@@ -2363,7 +2366,10 @@ def confirm_prepaid_service_renewal(
         origin_ref=preview.origin_ref,
     )
     if invoice_evidence is not None:
-        if invoice_evidence.preview_fingerprint != preview.fingerprint:
+        if invoice_evidence.preview_fingerprint != preview.fingerprint or (
+            selected_payment_id is not None
+            and invoice_evidence.payment_ids != (selected_payment_id,)
+        ):
             _error(
                 "idempotency_conflict",
                 "Prepaid renewal idempotency evidence does not match the request.",
@@ -2402,6 +2408,11 @@ def confirm_prepaid_service_renewal(
         )
     )
     if existing_adjustment is not None:
+        if selected_payment_id is not None:
+            _error(
+                "idempotency_conflict",
+                "Selected-payment renewal cannot replay legacy adjustment evidence.",
+            )
         entitlement = db.scalar(
             select(ServiceEntitlement).where(
                 ServiceEntitlement.source_ledger_entry_id
@@ -2550,6 +2561,15 @@ def confirm_prepaid_service_renewal(
             disposition=classification.disposition.value,
             reason=classification.reason,
         )
+    if (
+        selected_payment_id is not None
+        and classification.disposition
+        is not PrepaidDraftDisposition.exact_payment_fundable
+    ):
+        _error(
+            "selected_payment_rejected",
+            "Selected payment is not the exact funding source for this renewal.",
+        )
 
     # Decision made. Mutate now, and only now.
     local_start = current.starts_at.astimezone(APP_TIMEZONE).date()
@@ -2634,6 +2654,7 @@ def confirm_prepaid_service_renewal(
             db,
             invoice=invoice,
             decision_at=decision_at,
+            selected_payment_id=selected_payment_id,
         )
     else:
         opening_funding_consumption_id = _settle_reviewed_opening_fundable_renewal(
@@ -2696,6 +2717,7 @@ def _settle_exact_payment_fundable_renewal(
     *,
     invoice: Invoice,
     decision_at: datetime,
+    selected_payment_id: UUID | None = None,
 ) -> None:
     """Settle a canonical renewal invoice this owner just created, directly.
 
@@ -2732,16 +2754,24 @@ def _settle_exact_payment_fundable_renewal(
         # fingerprint covers — previewing before issuing would bind a
         # fingerprint to a status the invoice no longer has by the time
         # `apply_invoice_fully` re-derives and checks it.
-        funding_preview = preview_payment_funding_for_owner(
-            db,
-            invoice=invoice,
-        )
-        AccountCreditApplications.apply_invoice_fully(
-            db,
-            invoice,
-            preview_fingerprint=funding_preview.fingerprint,
-            funding_position_at=funding_preview.funding_position_at,
-        )
+        if selected_payment_id is not None:
+            AccountCreditApplications.apply_invoice_from_selected_payment_fully(
+                db,
+                invoice,
+                payment_id=selected_payment_id,
+                expected_amount=round_money(invoice.balance_due),
+            )
+        else:
+            funding_preview = preview_payment_funding_for_owner(
+                db,
+                invoice=invoice,
+            )
+            AccountCreditApplications.apply_invoice_fully(
+                db,
+                invoice,
+                preview_fingerprint=funding_preview.fingerprint,
+                funding_position_at=funding_preview.funding_position_at,
+            )
     except (InvoiceOwnerError, AccountCreditApplicationError) as exc:
         # Money may already have partially moved inside this try block (e.g.
         # `issue_draft_for_owner` succeeded, `apply_invoice_fully` then
@@ -4104,6 +4134,118 @@ class BillingAnchorProjection:
     changed: bool
     retracted: bool
     authority: BillingAnchorAuthority = BillingAnchorAuthority.funding_observation
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedInvoiceSupersessionAnchorCommand:
+    """Exact anchor retraction after one reviewed invalid invoice is retired."""
+
+    account_id: UUID
+    subscription_id: UUID
+    superseded_invoice_id: UUID
+    expected_previous: datetime
+    reviewed_period_start: datetime
+    evidence_ref: str
+
+
+def project_reviewed_invoice_supersession_anchor_for_owner(
+    db: Session,
+    command: ReviewedInvoiceSupersessionAnchorCommand,
+) -> BillingAnchorProjection:
+    """Retract only to the end of surviving coverage after reviewed supersession."""
+
+    invoice = db.get(Invoice, command.superseded_invoice_id)
+    subscription = db.get(Subscription, command.subscription_id)
+    retired_entitlements = tuple(
+        db.scalars(
+            select(ServiceEntitlement).where(
+                ServiceEntitlement.source_invoice_id == command.superseded_invoice_id,
+                ServiceEntitlement.subscription_id == command.subscription_id,
+            )
+        ).all()
+    )
+    if (
+        invoice is None
+        or subscription is None
+        or invoice.account_id != command.account_id
+        or subscription.subscriber_id != command.account_id
+        or invoice.status is not InvoiceStatus.void
+        or not retired_entitlements
+        or any(
+            item.status is ServiceEntitlementStatus.active
+            for item in retired_entitlements
+        )
+    ):
+        _error(
+            "reviewed_anchor_supersession_rejected",
+            "Superseded invoice and entitlement evidence is incomplete.",
+            invoice_id=str(command.superseded_invoice_id),
+            subscription_id=str(command.subscription_id),
+        )
+
+    surviving_ends = list(
+        db.scalars(
+            select(ServiceEntitlement.ends_at).where(
+                ServiceEntitlement.subscription_id == command.subscription_id,
+                ServiceEntitlement.status == ServiceEntitlementStatus.active,
+            )
+        ).all()
+    )
+    for grant_end in db.scalars(
+        select(ServiceExtensionEntry.grant_ends_at)
+        .join(
+            ServiceExtension,
+            ServiceExtension.id == ServiceExtensionEntry.extension_id,
+        )
+        .where(
+            ServiceExtensionEntry.subscription_id == command.subscription_id,
+            ServiceExtension.status == ServiceExtensionStatus.applied,
+            ServiceExtensionEntry.grant_ends_at.isnot(None),
+        )
+    ).all():
+        if grant_end is not None:
+            surviving_ends.append(grant_end)
+    target = _utc(command.reviewed_period_start)
+    surviving_end = max(
+        (_utc(value) for value in surviving_ends if value is not None),
+        default=None,
+    )
+    current = (
+        _utc(subscription.next_billing_at)
+        if subscription.next_billing_at is not None
+        else None
+    )
+    if (
+        current != _utc(command.expected_previous)
+        or surviving_end != target
+        or not command.evidence_ref.strip()
+    ):
+        _error(
+            "reviewed_anchor_supersession_rejected",
+            "Surviving coverage does not prove the reviewed billing-anchor target.",
+            subscription_id=str(command.subscription_id),
+        )
+    changed = stage_subscription_billing_anchor(
+        db,
+        subscription,
+        BillingAnchorProjectionCommand(
+            subscription_id=subscription.id,
+            expected_previous=subscription.next_billing_at,
+            target=target,
+            source=BillingAnchorProjectionSource.reviewed_reconciliation,
+            evidence_ref=command.evidence_ref,
+        ),
+    )
+    db.flush()
+    return BillingAnchorProjection(
+        subscription_id=subscription.id,
+        previous_next_billing_at=current,
+        next_billing_at=target,
+        coverage_end=surviving_end,
+        changed=changed,
+        retracted=bool(changed and current is not None and target < current),
+        authority=BillingAnchorAuthority.reviewed_reconciliation,
+    )
 
 
 def project_prepaid_billing_anchor_for_invoice(
@@ -5823,6 +5965,7 @@ __all__ = [
     "PrepaidServiceRenewedOutcome",
     "RunDuePrepaidServiceRenewalsCommand",
     "ReviewedPrepaidServiceRenewalResult",
+    "ReviewedInvoiceSupersessionAnchorCommand",
     "StaleBillingAnchorCandidate",
     "StaleBillingAnchorRepairPreview",
     "StaleBillingAnchorRepairResult",
@@ -5841,6 +5984,7 @@ __all__ = [
     "preview_prepaid_recurring_charge",
     "preview_stale_prepaid_billing_anchor_repair",
     "project_prepaid_billing_anchor_for_invoice",
+    "project_reviewed_invoice_supersession_anchor_for_owner",
     "renewal_outcomes_for_payment",
     "retract_prepaid_billing_anchors_after_funding_reversal",
     "resolve_prepaid_monthly_charge",
