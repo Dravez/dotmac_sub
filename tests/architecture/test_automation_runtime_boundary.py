@@ -70,7 +70,7 @@ def test_manual_run_retry_is_audited_and_permission_gated() -> None:
     assert "AutomationRunRetry" in service
     assert '"/runs/{run_id}/retry"' in web
     assert "RUN_REDRIVE_PERMISSION" in web
-    assert "execute_prepared_run" in web
+    assert "execute_prepared_run" in service
 
 
 def test_run_history_exposes_only_tenant_scoped_owner_projections() -> None:
