@@ -20,7 +20,9 @@ from app.db import get_db
 from app.services import (
     automation_capabilities,
     automation_rules,
+    automation_runtime,
     customer_search,
+    event_replay_evidence,
     service_team_lifecycle,
     web_automation_center,
 )
@@ -37,9 +39,13 @@ from app.services.automation_rules import (
     RULE_READ_PERMISSION,
     RULE_UPDATE_PERMISSION,
 )
-from app.services.automation_runtime import RUN_READ_PERMISSION
+from app.services.automation_runtime import (
+    RUN_READ_PERMISSION,
+    RUN_REDRIVE_PERMISSION,
+)
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
+from app.services.events.types import EventType
 from app.services.owner_commands import CommandContext
 
 templates = Jinja2Templates(directory="templates")
@@ -391,6 +397,203 @@ def automation_center_index(
             **state,
             "page_error": request.query_params.get("error"),
         },
+    )
+
+
+@router.get(
+    "/runs",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(RUN_READ_PERMISSION)),
+    ],
+)
+def automation_run_history(
+    request: Request,
+    status: automation_runtime.AutomationRunStatus | None = Query(default=None),
+    page: int = Query(default=1, ge=1, le=10000),
+    per_page: int = Query(default=50, ge=1, le=100),
+    sort: str | None = Query(default=None),
+    sort_dir: str | None = Query(default=None, alias="dir"),
+    db: Session = Depends(get_db),
+):
+    """List recent runs with optional status filtering."""
+
+    with db_session_adapter.read_session() as read_db:
+        page_data = automation_runtime.list_run_history(
+            read_db,
+            automation_runtime.GetAutomationRunHistoryQuery(
+                tenant_id=web_automation_center.OPERATOR_TENANT_ID,
+                status=status,
+                page=page,
+                per_page=per_page,
+                sort_by=sort,
+                sort_dir=sort_dir,
+            ),
+        )
+    if page != page_data.page.page:
+        return RedirectResponse(
+            url=page_data.list_query.url("/admin/automation/runs"),
+            status_code=303,
+        )
+    return templates.TemplateResponse(
+        "admin/automation/run_history.html",
+        {
+            **_base_context(request, db),
+            "runs": page_data.runs,
+            "list_query": page_data.list_query,
+            "page_meta": page_data.page,
+            "previous_url": page_data.previous_url,
+            "next_url": page_data.next_url,
+            "selected_status": page_data.list_query.filter_value("status") or "",
+            "selected_per_page": page_data.list_query.per_page,
+            "statuses": tuple(automation_runtime.AutomationRunStatus),
+        },
+    )
+
+
+@router.get(
+    "/runs/{run_id}",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(RUN_READ_PERMISSION)),
+    ],
+)
+def automation_run_detail(
+    run_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    """Show one run, its affected record, ordered steps, and retry history."""
+
+    if not has_permission(auth, db, RUN_READ_PERMISSION):
+        return RedirectResponse(url="/admin/automation", status_code=303)
+    with db_session_adapter.read_session() as read_db:
+        try:
+            detail = automation_runtime.get_run_detail(
+                read_db,
+                automation_runtime.GetAutomationRunDetailQuery(
+                    tenant_id=web_automation_center.OPERATOR_TENANT_ID,
+                    run_id=run_id,
+                ),
+            )
+        except DomainError:
+            return RedirectResponse(
+                url="/admin/automation?error=Run%20not%20found",
+                status_code=303,
+            )
+    action_labels: dict[UUID, str] = {}
+    for step in detail.steps:
+        try:
+            action_labels[step.step_id] = automation_capabilities.action_capability(
+                step.action_key
+            ).label
+        except automation_capabilities.AutomationCapabilityError:
+            action_labels[step.step_id] = step.action_key
+    return templates.TemplateResponse(
+        "admin/automation/run_detail.html",
+        {
+            **_base_context(request, db),
+            "detail": detail,
+            "action_labels": action_labels,
+            "can_retry": (
+                has_permission(auth, db, RUN_REDRIVE_PERMISSION)
+                and detail.summary.status
+                is automation_runtime.AutomationRunStatus.failed
+            ),
+            "target_href": (
+                f"/admin/support/tickets/{detail.summary.target_id}"
+                if detail.summary.target_type == "support.ticket"
+                else None
+            ),
+            "page_error": request.query_params.get("error"),
+            "page_notice": request.query_params.get("notice"),
+        },
+    )
+
+
+@router.post(
+    "/runs/{run_id}/retry",
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(RUN_REDRIVE_PERMISSION)),
+    ],
+)
+def retry_automation_run(
+    run_id: UUID,
+    request: Request,
+    command_token: str = Form(...),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    """Continue a failed run from its first unfinished step."""
+
+    if not has_permission(auth, db, RUN_REDRIVE_PERMISSION):
+        return RedirectResponse(url="/admin/automation", status_code=303)
+    detail_url = f"/admin/automation/runs/{run_id}"
+    try:
+        command_id = UUID(command_token)
+    except (TypeError, ValueError):
+        return RedirectResponse(
+            url=f"{detail_url}?error=Retry%20request%20is%20invalid",
+            status_code=303,
+        )
+    try:
+        with db_session_adapter.read_session() as read_db:
+            detail = automation_runtime.get_run_detail(
+                read_db,
+                automation_runtime.GetAutomationRunDetailQuery(
+                    tenant_id=web_automation_center.OPERATOR_TENANT_ID,
+                    run_id=run_id,
+                ),
+            )
+            try:
+                expected_event_type = EventType(detail.summary.event_type)
+            except ValueError as exc:
+                raise DomainError(
+                    code="automation.execution.retry_event_type_invalid",
+                    message="The original event type can no longer be retried.",
+                ) from exc
+            evidence = event_replay_evidence.get_durable_event_for_replay(
+                read_db,
+                event_replay_evidence.GetDurableEventForReplayQuery(
+                    event_id=detail.summary.event_id,
+                    expected_event_type=expected_event_type,
+                ),
+            )
+        retry_context = CommandContext.system(
+            actor=_actor(request),
+            scope=RUN_REDRIVE_PERMISSION,
+            reason="Administrator continued a failed automation run",
+            command_id=command_id,
+            correlation_id=run_id,
+            idempotency_key=f"automation-run-retry:{run_id}:{command_id}",
+        )
+        with db_session_adapter.owner_command_session() as command_db:
+            outcome = automation_runtime.retry_failed_run(
+                command_db,
+                automation_runtime.RetryFailedAutomationRunCommand(
+                    tenant_id=web_automation_center.OPERATOR_TENANT_ID,
+                    run_id=run_id,
+                    event=evidence,
+                    context=retry_context,
+                ),
+            )
+    except DomainError as exc:
+        return RedirectResponse(
+            url=f"{detail_url}?error={quote(exc.message)}",
+            status_code=303,
+        )
+    if outcome.retry_status is automation_runtime.AutomationRunRetryStatus.failed:
+        return RedirectResponse(
+            url=f"{detail_url}?error={quote(outcome.error_message or 'Retry did not complete')}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=f"{detail_url}?notice=Retry%20completed",
+        status_code=303,
     )
 
 

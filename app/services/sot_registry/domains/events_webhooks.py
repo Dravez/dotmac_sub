@@ -11,6 +11,7 @@ from app.services.sot_manifest import (
     EventContract,
     MigrationContract,
     OwnerRole,
+    ProjectionContract,
     ServiceContract,
     SOTService,
     TransactionContract,
@@ -32,6 +33,82 @@ DOMAIN = DomainSOT(
             module="app.services.event_store",
             owns=("event persistence", "handler attempt tracking"),
             depends_on=("events.dispatcher",),
+        ),
+        SOTService(
+            name="events.replay_evidence",
+            module="app.services.event_replay_evidence",
+            owns=("durable event replay envelope",),
+            depends_on=("events.store",),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="durable event replay envelope",
+                        role=OwnerRole.RESOLVER,
+                        input_names=("durable event-store record",),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="durable event-store record",
+                        owner="events.store",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "the exact EventStore row selected by event identity and "
+                            "verified against the expected event type"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary="read one exact event row; never mutate or dispatch it",
+                    locking="no row lock; replay eligibility is rechecked by automation.execution",
+                    idempotency="query by the stable event UUID; no writes occur",
+                    retries="retry the read after a transient database failure",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "events.replay_evidence.not_found",
+                        "events.replay_evidence.event_not_failed",
+                        "events.replay_evidence.event_inactive",
+                        "events.replay_evidence.event_type_invalid",
+                        "events.replay_evidence.event_type_mismatch",
+                        "events.replay_evidence.payload_invalid",
+                    ),
+                    mapping_owner="automation web adapter",
+                    fail_closed_on=(
+                        "missing event row",
+                        "event row is no longer failed",
+                        "event row is inactive",
+                        "event type mismatch",
+                        "invalid stored payload",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="events.replay_evidence",
+                ),
+                steward="platform events",
+                design_refs=(
+                    "docs/designs/AUTOMATION_CENTER_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_event_replay_evidence.py",
+                    "tests/architecture/test_automation_runtime_boundary.py",
+                ),
+                projections=(
+                    ProjectionContract(
+                        name="durable event replay envelope",
+                        input_names=("durable event-store record",),
+                        writer="events.store",
+                        freshness="read directly from the exact durable event row",
+                        stale_behavior="missing or mismatched evidence fails closed",
+                        drift_signal="the expected event row is absent or malformed",
+                        rebuild_operation="read the same stored event identity again",
+                        repair_owner="events.store",
+                    ),
+                ),
+            ),
         ),
         SOTService(
             name="events.owner_outputs",
@@ -190,6 +267,7 @@ DOMAIN = DomainSOT(
         ),
     ),
     entrypoints=(
+        "app.services.event_replay_evidence",
         "app.services.events.handlers.*",
         "app.tasks.integration_delivery",
         "app.web.admin.integrations",

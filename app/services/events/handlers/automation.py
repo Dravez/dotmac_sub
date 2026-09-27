@@ -7,8 +7,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy.orm import Session
 
-from app.services import automation_actions, automation_capabilities, automation_runtime
-from app.services.domain_errors import DomainError
+from app.services import automation_capabilities, automation_runtime
 from app.services.events.handlers.owner_session import owner_session
 from app.services.events.types import Event, EventType
 from app.services.operator_tenant import OPERATOR_TENANT_ID
@@ -107,9 +106,9 @@ class AutomationEventHandler:
                     ),
                 )
             for run in runs:
-                self._execute_run(db, event=event, run=run, tenant_id=tenant_id)
+                self.execute_prepared_run(db, event=event, run=run, tenant_id=tenant_id)
 
-    def _execute_run(
+    def execute_prepared_run(
         self,
         db: Session,
         *,
@@ -117,79 +116,19 @@ class AutomationEventHandler:
         run: automation_runtime.PreparedAutomationRun,
         tenant_id: UUID,
     ) -> None:
-        for step in run.steps:
-            step_key = f"{run.rule_version_id}:{step.step_index}"
-            with owner_session(db) as command_db:
-                claim = automation_runtime.claim_step(
-                    command_db,
-                    automation_runtime.ClaimAutomationStepCommand(
-                        tenant_id=tenant_id,
-                        step_id=step.step_id,
-                        context=_context(event=event, operation=f"claim:{step_key}"),
-                    ),
-                )
-            if (
-                claim.disposition
-                is automation_runtime.StepClaimDisposition.already_succeeded
-            ):
-                continue
-            if claim.disposition is automation_runtime.StepClaimDisposition.busy:
-                raise AutomationEventHandlerError(
-                    f"Automation step {step.step_id} is already executing."
-                )
-            action = automation_capabilities.action_capability(step.action_key)
-            executor = automation_actions.action_executor(step.action_key)
-            idempotency_key = (
-                f"automation:{event.event_id}:{run.rule_version_id}:{step.step_index}"
+        with owner_session(db) as command_db:
+            outcome = automation_runtime.execute_prepared_run(
+                command_db,
+                automation_runtime.ExecutePreparedAutomationRunCommand(
+                    tenant_id=tenant_id,
+                    run=run,
+                    context=_context(event=event, operation=f"execute:{run.run_id}"),
+                ),
             )
-            succeeded = False
-            error_code: str | None = None
-            try:
-                with owner_session(db) as action_db:
-                    executor(
-                        action_db,
-                        automation_actions.ExecuteAutomationActionCommand(
-                            tenant_id=tenant_id,
-                            event_id=event.event_id,
-                            rule_id=run.rule_id,
-                            rule_version_id=run.rule_version_id,
-                            step_index=step.step_index,
-                            target=run.target,
-                            inputs=step.inputs,
-                            context=CommandContext.system(
-                                actor="automation-runtime",
-                                scope=action.runtime_scope,
-                                reason=f"Execute declared action {step.action_key}",
-                                command_id=uuid5(
-                                    NAMESPACE_URL,
-                                    f"dotmac:{idempotency_key}",
-                                ),
-                                correlation_id=event.event_id,
-                                causation_id=event.event_id,
-                                idempotency_key=idempotency_key,
-                            ),
-                        ),
-                    )
-                succeeded = True
-            except DomainError as exc:
-                error_code = exc.code
-            except Exception:
-                error_code = "automation.execution.action_failed"
-            with owner_session(db) as command_db:
-                automation_runtime.finish_step(
-                    command_db,
-                    automation_runtime.FinishAutomationStepCommand(
-                        tenant_id=tenant_id,
-                        step_id=step.step_id,
-                        succeeded=succeeded,
-                        error_code=error_code,
-                        context=_context(event=event, operation=f"finish:{step_key}"),
-                    ),
-                )
-            if not succeeded:
-                raise AutomationEventHandlerError(
-                    f"Automation action {step.action_key!r} failed with {error_code}."
-                )
+        if outcome.error_code:
+            raise AutomationEventHandlerError(
+                f"Automation run {run.run_id} stopped with {outcome.error_code}."
+            )
 
 
 __all__ = [

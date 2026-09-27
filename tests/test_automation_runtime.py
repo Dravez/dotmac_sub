@@ -1,7 +1,16 @@
 from __future__ import annotations
 
-import pytest
+from unittest.mock import Mock
+from uuid import uuid4
 
+import pytest
+from sqlalchemy.orm import Session
+
+from app.models.automation import (
+    AutomationRun,
+    AutomationStepRun,
+    AutomationStepStatus,
+)
 from app.services import automation_capabilities, automation_runtime
 from app.services.automation_contracts import (
     AutomationConditionField,
@@ -90,3 +99,56 @@ def test_undeclared_field_or_operator_fails_closed(declared_trigger: None) -> No
         ],
         payload=payload,
     )
+
+
+def test_retry_preparation_skips_steps_that_already_succeeded() -> None:
+    run_id = uuid4()
+    run = AutomationRun(id=run_id)
+    version = Mock()
+    version.actions = [
+        {"position": index, "inputs": [], "action_key": f"action.{index}"}
+        for index in range(3)
+    ]
+    rows = [
+        AutomationStepRun(
+            id=uuid4(),
+            run_id=run_id,
+            step_index=0,
+            action_key="action.0",
+            status=AutomationStepStatus.succeeded.value,
+        ),
+        AutomationStepRun(
+            id=uuid4(),
+            run_id=run_id,
+            step_index=1,
+            action_key="action.1",
+            status=AutomationStepStatus.failed.value,
+        ),
+        AutomationStepRun(
+            id=uuid4(),
+            run_id=run_id,
+            step_index=2,
+            action_key="action.2",
+            status=AutomationStepStatus.blocked.value,
+        ),
+    ]
+    db = Mock(spec=Session)
+    db.scalars.return_value = rows
+
+    prepared = automation_runtime._prepared_steps(db, run=run, version=version)
+
+    assert [step.step_index for step in prepared] == [1, 2]
+    assert [step.action_key for step in prepared] == ["action.1", "action.2"]
+
+
+def test_run_history_list_contract_preserves_filter_and_page() -> None:
+    query = automation_runtime.RUN_HISTORY_LIST.build_query(
+        search=None,
+        filters={"status": automation_runtime.AutomationRunStatus.failed.value},
+        page=2,
+        per_page=25,
+    )
+
+    assert query.filter_value("status") == "failed"
+    assert query.offset == 25
+    assert "status=failed" in query.url("/admin/automation/runs", page=3)

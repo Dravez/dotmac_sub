@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import operator
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -21,6 +22,8 @@ from app.models.automation import (
     AutomationRuleStatus,
     AutomationRuleVersion,
     AutomationRun,
+    AutomationRunRetry,
+    AutomationRunRetryStatus,
     AutomationRunStatus,
     AutomationStepRun,
     AutomationStepStatus,
@@ -32,6 +35,13 @@ from app.services.automation_contracts import (
     AutomationValueType,
 )
 from app.services.domain_errors import DomainError
+from app.services.event_replay_evidence import DurableEventReplayEvidence
+from app.services.list_query import (
+    ListDefinition,
+    ListFieldDefinition,
+    ListQuery,
+    PageMeta,
+)
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -39,8 +49,20 @@ from app.services.owner_commands import (
 )
 
 OWNER = "automation.execution"
+logger = logging.getLogger(__name__)
 RUN_READ_PERMISSION = "automation:run:read"
 RUN_REDRIVE_PERMISSION = "automation:run:redrive"
+RUN_HISTORY_LIST = ListDefinition(
+    key="automation-runs",
+    fields=(
+        ListFieldDefinition("status", label="Status", filterable=True),
+        ListFieldDefinition("created_at", label="Started", sortable=True),
+    ),
+    default_sort="created_at",
+    default_sort_dir="desc",
+    default_per_page=50,
+    per_page_options=(25, 50, 100),
+)
 _STEP_LEASE = timedelta(minutes=5)
 _PREPARE = OwnerCommandDefinition(
     owner=OWNER,
@@ -56,6 +78,16 @@ _FINISH_STEP = OwnerCommandDefinition(
     owner=OWNER,
     concern="automation execution decisions and run evidence",
     name="finish_automation_step",
+)
+_START_RETRY = OwnerCommandDefinition(
+    owner=OWNER,
+    concern="automation execution decisions and run evidence",
+    name="start_automation_run_retry",
+)
+_FINISH_RETRY = OwnerCommandDefinition(
+    owner=OWNER,
+    concern="automation execution decisions and run evidence",
+    name="finish_automation_run_retry",
 )
 
 
@@ -100,6 +132,7 @@ class PreparedAutomationRun:
     run_id: UUID
     rule_id: UUID
     rule_version_id: UUID
+    event_id: UUID
     target: automation_actions.AutomationTargetReference
     steps: tuple[PreparedAutomationStep, ...]
 
@@ -123,6 +156,7 @@ class FinishAutomationStepCommand:
     step_id: UUID
     succeeded: bool
     error_code: str | None
+    error_message: str | None
     context: CommandContext
 
 
@@ -153,8 +187,127 @@ class AutomationRunSummary:
     status: AutomationRunStatus
     matched: bool | None
     error_code: str | None
+    error_message: str | None
     created_at: datetime
+    started_at: datetime | None
     completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationStepSummary:
+    step_id: UUID
+    step_index: int
+    action_key: str
+    status: AutomationStepStatus
+    attempt_count: int
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRetrySummary:
+    retry_id: UUID
+    attempt_number: int
+    actor: str
+    status: AutomationRunRetryStatus
+    error_code: str | None
+    error_message: str | None
+    resulting_run_status: AutomationRunStatus | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class GetAutomationRunDetailQuery:
+    tenant_id: UUID
+    run_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class GetAutomationRunHistoryQuery:
+    tenant_id: UUID
+    status: AutomationRunStatus | None = None
+    page: int = 1
+    per_page: int = RUN_HISTORY_LIST.default_per_page
+    sort_by: str | None = None
+    sort_dir: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRunHistoryPage:
+    list_query: ListQuery
+    page: PageMeta
+    runs: tuple[AutomationRunSummary, ...]
+    previous_url: str | None
+    next_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRunDetail:
+    summary: AutomationRunSummary
+    rule_name: str
+    trigger_key: str
+    steps: tuple[AutomationStepSummary, ...]
+    retries: tuple[AutomationRetrySummary, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StartAutomationRunRetryCommand:
+    tenant_id: UUID
+    run_id: UUID
+    event: DurableEventReplayEvidence
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class StartedAutomationRunRetry:
+    retry_id: UUID
+    prepared_run: PreparedAutomationRun | None
+
+
+@dataclass(frozen=True, slots=True)
+class FinishAutomationRunRetryCommand:
+    tenant_id: UUID
+    retry_id: UUID
+    succeeded: bool
+    error_code: str | None
+    error_message: str | None
+    preserve_running_run: bool
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutePreparedAutomationRunCommand:
+    tenant_id: UUID
+    run: PreparedAutomationRun
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRunExecutionOutcome:
+    run_id: UUID
+    status: AutomationRunStatus
+    error_code: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RetryFailedAutomationRunCommand:
+    tenant_id: UUID
+    run_id: UUID
+    event: DurableEventReplayEvidence
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class RetryFailedAutomationRunOutcome:
+    retry_id: UUID
+    run_id: UUID
+    run_status: AutomationRunStatus
+    retry_status: AutomationRunRetryStatus
+    error_message: str | None
 
 
 def _error(code: str, message: str, **details: object) -> AutomationExecutionError:
@@ -419,12 +572,14 @@ def prepare_event_runs(
                     continue
                 existing.status = AutomationRunStatus.running.value
                 existing.error_code = None
+                existing.error_message = None
                 existing.completed_at = None
                 prepared.append(
                     PreparedAutomationRun(
                         run_id=existing.id,
                         rule_id=rule.id,
                         rule_version_id=version.id,
+                        event_id=command.event.event_id,
                         target=automation_actions.AutomationTargetReference(
                             entity_type=command.event.target_type,
                             entity_id=command.event.target_id,
@@ -487,6 +642,7 @@ def prepare_event_runs(
                     run_id=run.id,
                     rule_id=rule.id,
                     rule_version_id=version.id,
+                    event_id=command.event.event_id,
                     target=automation_actions.AutomationTargetReference(
                         entity_type=command.event.target_type,
                         entity_id=command.event.target_id,
@@ -533,6 +689,7 @@ def claim_step(db: Session, command: ClaimAutomationStepCommand) -> StepClaimOut
         step.started_at = now
         step.completed_at = None
         step.error_code = None
+        step.error_message = None
         db.flush()
         return StepClaimOutcome(
             disposition=StepClaimDisposition.execute,
@@ -582,10 +739,18 @@ def finish_step(
             else AutomationStepStatus.failed.value
         )
         step.error_code = None if command.succeeded else command.error_code
+        step.error_message = (
+            None
+            if command.succeeded
+            else (command.error_message or "The automation action failed.")[:1000]
+        )
         step.completed_at = now
         if not command.succeeded:
             run.status = AutomationRunStatus.failed.value
             run.error_code = command.error_code or "action_failed"
+            run.error_message = (
+                command.error_message or "The automation action failed."
+            )[:1000]
             run.completed_at = now
             future_steps = tuple(
                 db.scalars(
@@ -599,6 +764,10 @@ def finish_step(
             )
             for future in future_steps:
                 future.status = AutomationStepStatus.blocked.value
+                future.error_code = "automation.execution.blocked_after_failure"
+                future.error_message = (
+                    "This step did not run because an earlier action failed."
+                )
         else:
             remaining = int(
                 db.scalar(
@@ -614,6 +783,7 @@ def finish_step(
             if remaining == 0:
                 run.status = AutomationRunStatus.succeeded.value
                 run.error_code = None
+                run.error_message = None
                 run.completed_at = now
             else:
                 run.status = AutomationRunStatus.running.value
@@ -657,8 +827,632 @@ def list_runs(
             status=AutomationRunStatus(row.status),
             matched=row.matched,
             error_code=row.error_code,
+            error_message=row.error_message,
             created_at=row.created_at,
+            started_at=row.started_at,
             completed_at=row.completed_at,
         )
         for row in rows
+    )
+
+
+def list_run_history(
+    db: Session, query: GetAutomationRunHistoryQuery
+) -> AutomationRunHistoryPage:
+    try:
+        list_query = RUN_HISTORY_LIST.build_query(
+            search=None,
+            filters={"status": query.status.value if query.status else None},
+            sort_by=query.sort_by,
+            sort_dir=query.sort_dir,
+            page=query.page,
+            per_page=query.per_page,
+        )
+    except ValueError as exc:
+        raise _error(
+            "run_history_query_invalid",
+            "The run history filter or page size is invalid.",
+        ) from exc
+    status = query.status
+    count_statement = select(func.count(AutomationRun.id)).where(
+        AutomationRun.tenant_id == query.tenant_id
+    )
+    if status is not None:
+        count_statement = count_statement.where(AutomationRun.status == status.value)
+    total = int(db.scalar(count_statement) or 0)
+    page_meta = PageMeta.from_query(list_query, total)
+    normalized_query = list_query.with_page(page_meta.page)
+    statement = select(AutomationRun).where(AutomationRun.tenant_id == query.tenant_id)
+    if status is not None:
+        statement = statement.where(AutomationRun.status == status.value)
+    ordering = (
+        AutomationRun.created_at.asc()
+        if normalized_query.sort_dir == "asc"
+        else AutomationRun.created_at.desc()
+    )
+    rows = tuple(
+        db.scalars(
+            statement.order_by(ordering, AutomationRun.id.desc())
+            .offset(normalized_query.offset)
+            .limit(normalized_query.per_page)
+        )
+    )
+    return AutomationRunHistoryPage(
+        list_query=normalized_query,
+        page=page_meta,
+        runs=tuple(
+            AutomationRunSummary(
+                run_id=row.id,
+                rule_id=row.rule_id,
+                rule_version_id=row.rule_version_id,
+                event_id=row.event_id,
+                event_type=row.event_type,
+                target_type=row.target_type,
+                target_id=row.target_id,
+                status=AutomationRunStatus(row.status),
+                matched=row.matched,
+                error_code=row.error_code,
+                error_message=row.error_message,
+                created_at=row.created_at,
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+            )
+            for row in rows
+        ),
+        previous_url=(
+            normalized_query.url("/admin/automation/runs", page=page_meta.page - 1)
+            if page_meta.has_previous
+            else None
+        ),
+        next_url=(
+            normalized_query.url("/admin/automation/runs", page=page_meta.page + 1)
+            if page_meta.has_next
+            else None
+        ),
+    )
+
+
+def get_run_detail(
+    db: Session, query: GetAutomationRunDetailQuery
+) -> AutomationRunDetail:
+    run = db.scalar(
+        select(AutomationRun).where(
+            AutomationRun.id == query.run_id,
+            AutomationRun.tenant_id == query.tenant_id,
+        )
+    )
+    if run is None:
+        raise _error("run_not_found", "Automation run not found.")
+    rule = db.scalar(
+        select(AutomationRule).where(
+            AutomationRule.id == run.rule_id,
+            AutomationRule.tenant_id == query.tenant_id,
+        )
+    )
+    if rule is None:
+        raise _error("run_rule_not_found", "The rule for this run is unavailable.")
+    step_rows = tuple(
+        db.scalars(
+            select(AutomationStepRun)
+            .where(
+                AutomationStepRun.run_id == run.id,
+                AutomationStepRun.tenant_id == query.tenant_id,
+            )
+            .order_by(AutomationStepRun.step_index)
+        )
+    )
+    retry_rows = tuple(
+        db.scalars(
+            select(AutomationRunRetry)
+            .where(
+                AutomationRunRetry.run_id == run.id,
+                AutomationRunRetry.tenant_id == query.tenant_id,
+            )
+            .order_by(AutomationRunRetry.attempt_number.desc())
+        )
+    )
+    summary = AutomationRunSummary(
+        run_id=run.id,
+        rule_id=run.rule_id,
+        rule_version_id=run.rule_version_id,
+        event_id=run.event_id,
+        event_type=run.event_type,
+        target_type=run.target_type,
+        target_id=run.target_id,
+        status=AutomationRunStatus(run.status),
+        matched=run.matched,
+        error_code=run.error_code,
+        error_message=run.error_message,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
+    return AutomationRunDetail(
+        summary=summary,
+        rule_name=rule.name,
+        trigger_key=rule.trigger_key,
+        steps=tuple(
+            AutomationStepSummary(
+                step_id=row.id,
+                step_index=row.step_index,
+                action_key=row.action_key,
+                status=AutomationStepStatus(row.status),
+                attempt_count=row.attempt_count,
+                error_code=row.error_code,
+                error_message=row.error_message,
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+            )
+            for row in step_rows
+        ),
+        retries=tuple(
+            AutomationRetrySummary(
+                retry_id=row.id,
+                attempt_number=row.attempt_number,
+                actor=row.actor,
+                status=AutomationRunRetryStatus(row.status),
+                error_code=row.error_code,
+                error_message=row.error_message,
+                resulting_run_status=(
+                    AutomationRunStatus(row.resulting_run_status)
+                    if row.resulting_run_status
+                    else None
+                ),
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+            )
+            for row in retry_rows
+        ),
+    )
+
+
+def start_run_retry(
+    db: Session, command: StartAutomationRunRetryCommand
+) -> StartedAutomationRunRetry:
+    def operation() -> StartedAutomationRunRetry:
+        duplicate = db.scalar(
+            select(AutomationRunRetry).where(
+                AutomationRunRetry.command_id == command.context.command_id
+            )
+        )
+        if duplicate is not None:
+            if (
+                duplicate.run_id != command.run_id
+                or duplicate.tenant_id != command.tenant_id
+            ):
+                raise _error(
+                    "retry_command_conflict",
+                    "This retry request was already used for another run.",
+                )
+            return StartedAutomationRunRetry(retry_id=duplicate.id, prepared_run=None)
+        run = db.scalar(
+            select(AutomationRun)
+            .where(
+                AutomationRun.id == command.run_id,
+                AutomationRun.tenant_id == command.tenant_id,
+            )
+            .with_for_update()
+        )
+        if run is None:
+            raise _error("run_not_found", "Automation run not found.")
+        if run.status != AutomationRunStatus.failed.value:
+            raise _error(
+                "run_not_retryable",
+                "Only a failed automation run can be retried.",
+                status=run.status,
+            )
+        if (
+            command.event.event_id != run.event_id
+            or command.event.event_type.value != run.event_type
+        ):
+            raise _error(
+                "retry_event_mismatch",
+                "The original event does not match this failed run.",
+            )
+        rule = db.scalar(
+            select(AutomationRule).where(
+                AutomationRule.id == run.rule_id,
+                AutomationRule.tenant_id == command.tenant_id,
+            )
+        )
+        if rule is None:
+            raise _error("run_rule_not_found", "The rule for this run is unavailable.")
+        try:
+            trigger = automation_capabilities.trigger_capability(rule.trigger_key)
+        except automation_capabilities.AutomationCapabilityError as exc:
+            raise _error(
+                "retry_trigger_unavailable",
+                "The trigger for this run is no longer available.",
+            ) from exc
+        if (
+            trigger.event_type != command.event.event_type.value
+            or trigger.entity_type != run.target_type
+            or not trigger.runtime_enabled
+        ):
+            raise _error(
+                "retry_trigger_mismatch",
+                "The original event no longer matches this run.",
+            )
+        try:
+            event_tenant = UUID(
+                str(_path_value(command.event.payload, trigger.tenant_id_field))
+            )
+            target_id = UUID(
+                str(_path_value(command.event.payload, trigger.entity_id_field))
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                "retry_event_identity_invalid",
+                "The original event is missing its customer or affected record.",
+            ) from exc
+        if event_tenant != command.tenant_id or target_id != run.target_id:
+            raise _error(
+                "retry_target_mismatch",
+                "The original event no longer matches the affected record.",
+            )
+        version = db.scalar(
+            select(AutomationRuleVersion).where(
+                AutomationRuleVersion.id == run.rule_version_id,
+                AutomationRuleVersion.tenant_id == command.tenant_id,
+            )
+        )
+        if version is None:
+            raise _error(
+                "run_version_unavailable",
+                "The rule version for this run is no longer available.",
+            )
+        try:
+            automation_actions.require_valid_runtime_registry()
+        except automation_actions.AutomationActionExecutorError as exc:
+            raise _error(
+                "retry_runtime_unavailable",
+                "An action needed by this run is no longer available.",
+            ) from exc
+        steps = _prepared_steps(db, run=run, version=version)
+        if not steps:
+            raise _error(
+                "run_has_no_retryable_steps",
+                "This failed run has no unfinished steps to continue.",
+            )
+        try:
+            for step in steps:
+                capability = automation_capabilities.action_capability(step.action_key)
+                if not capability.runtime_enabled:
+                    raise automation_actions.AutomationActionExecutorError(
+                        f"Automation action {step.action_key!r} is disabled."
+                    )
+                automation_actions.action_executor(step.action_key)
+        except (
+            automation_capabilities.AutomationCapabilityError,
+            automation_actions.AutomationActionExecutorError,
+        ) as exc:
+            raise _error(
+                "retry_runtime_unavailable",
+                "An action needed by this run is no longer available.",
+            ) from exc
+        attempt_number = (
+            int(
+                db.scalar(
+                    select(
+                        func.coalesce(func.max(AutomationRunRetry.attempt_number), 0)
+                    ).where(AutomationRunRetry.run_id == run.id)
+                )
+                or 0
+            )
+            + 1
+        )
+        now = datetime.now(UTC)
+        retry = AutomationRunRetry(
+            tenant_id=command.tenant_id,
+            run_id=run.id,
+            attempt_number=attempt_number,
+            command_id=command.context.command_id,
+            actor=command.context.actor[:255],
+            status=AutomationRunRetryStatus.running.value,
+            started_at=now,
+        )
+        run.status = AutomationRunStatus.running.value
+        run.error_code = None
+        run.error_message = None
+        run.completed_at = None
+        db.add(retry)
+        db.flush()
+        return StartedAutomationRunRetry(
+            retry_id=retry.id,
+            prepared_run=PreparedAutomationRun(
+                run_id=run.id,
+                rule_id=run.rule_id,
+                rule_version_id=version.id,
+                event_id=run.event_id,
+                target=automation_actions.AutomationTargetReference(
+                    entity_type=run.target_type,
+                    entity_id=run.target_id,
+                ),
+                steps=steps,
+            ),
+        )
+
+    return execute_owner_command(
+        db,
+        definition=_START_RETRY,
+        context=command.context,
+        operation=operation,
+    )
+
+
+def finish_run_retry(
+    db: Session, command: FinishAutomationRunRetryCommand
+) -> AutomationRunStatus:
+    def operation() -> AutomationRunStatus:
+        retry = db.scalar(
+            select(AutomationRunRetry)
+            .where(
+                AutomationRunRetry.id == command.retry_id,
+                AutomationRunRetry.tenant_id == command.tenant_id,
+            )
+            .with_for_update()
+        )
+        if retry is None:
+            raise _error("retry_not_found", "Automation retry record not found.")
+        run = db.scalar(
+            select(AutomationRun)
+            .where(
+                AutomationRun.id == retry.run_id,
+                AutomationRun.tenant_id == command.tenant_id,
+            )
+            .with_for_update()
+        )
+        if run is None:
+            raise _error("run_not_found", "Automation run not found.")
+        now = datetime.now(UTC)
+        if (
+            not command.succeeded
+            and not command.preserve_running_run
+            and run.status != AutomationRunStatus.failed.value
+        ):
+            run.status = AutomationRunStatus.failed.value
+            run.error_code = command.error_code or "retry_failed"
+            run.error_message = (
+                command.error_message or "The retry could not complete."
+            )[:1000]
+            run.completed_at = now
+        retry.status = (
+            AutomationRunRetryStatus.succeeded.value
+            if command.succeeded
+            else AutomationRunRetryStatus.failed.value
+        )
+        retry.error_code = None if command.succeeded else command.error_code
+        retry.error_message = (
+            None
+            if command.succeeded
+            else (command.error_message or "The retry could not complete.")[:1000]
+        )
+        retry.resulting_run_status = run.status
+        retry.completed_at = now
+        db.flush()
+        return AutomationRunStatus(run.status)
+
+    return execute_owner_command(
+        db,
+        definition=_FINISH_RETRY,
+        context=command.context,
+        operation=operation,
+    )
+
+
+def execute_prepared_run(
+    db: Session, command: ExecutePreparedAutomationRunCommand
+) -> AutomationRunExecutionOutcome:
+    """Execute only prepared unfinished steps through their declared owners."""
+
+    for step in command.run.steps:
+        step_key = f"{command.run.rule_version_id}:{step.step_index}"
+        claim = claim_step(
+            db,
+            ClaimAutomationStepCommand(
+                tenant_id=command.tenant_id,
+                step_id=step.step_id,
+                context=CommandContext.system(
+                    actor="automation-runtime",
+                    scope="automation:runtime",
+                    reason=f"Claim automation action step {step_key}",
+                    command_id=uuid4(),
+                    correlation_id=command.run.event_id,
+                    causation_id=command.context.command_id,
+                    idempotency_key=(
+                        f"automation-claim:{command.run.event_id}:{step_key}"
+                    ),
+                ),
+            ),
+        )
+        if claim.disposition is StepClaimDisposition.already_succeeded:
+            continue
+        if claim.disposition is StepClaimDisposition.busy:
+            return AutomationRunExecutionOutcome(
+                run_id=command.run.run_id,
+                status=AutomationRunStatus.running,
+                error_code="automation.execution.step_busy",
+                error_message=(
+                    "Another worker is already processing this action step."
+                ),
+            )
+        action = automation_capabilities.action_capability(step.action_key)
+        executor = automation_actions.action_executor(step.action_key)
+        idempotency_key = (
+            f"automation:{command.run.event_id}:"
+            f"{command.run.rule_version_id}:{step.step_index}"
+        )
+        succeeded = False
+        error_code: str | None = None
+        error_message: str | None = None
+        try:
+            executor(
+                db,
+                automation_actions.ExecuteAutomationActionCommand(
+                    tenant_id=command.tenant_id,
+                    event_id=command.run.event_id,
+                    rule_id=command.run.rule_id,
+                    rule_version_id=command.run.rule_version_id,
+                    step_index=step.step_index,
+                    target=command.run.target,
+                    inputs=step.inputs,
+                    context=CommandContext.system(
+                        actor="automation-runtime",
+                        scope=action.runtime_scope,
+                        reason=f"Execute declared action {step.action_key}",
+                        command_id=uuid5(NAMESPACE_URL, f"dotmac:{idempotency_key}"),
+                        correlation_id=command.run.event_id,
+                        causation_id=command.context.command_id,
+                        idempotency_key=idempotency_key,
+                    ),
+                ),
+            )
+            succeeded = True
+        except DomainError as exc:
+            error_code = exc.code
+            error_message = exc.message
+        except Exception:
+            error_code = "automation.execution.action_failed"
+            error_message = (
+                "The action failed unexpectedly. Review the step and try again."
+            )
+        outcome = finish_step(
+            db,
+            FinishAutomationStepCommand(
+                tenant_id=command.tenant_id,
+                step_id=step.step_id,
+                succeeded=succeeded,
+                error_code=error_code,
+                error_message=error_message,
+                context=CommandContext.system(
+                    actor="automation-runtime",
+                    scope="automation:runtime",
+                    reason=f"Record automation action step {step_key}",
+                    command_id=uuid4(),
+                    correlation_id=command.run.event_id,
+                    causation_id=command.context.command_id,
+                    idempotency_key=(
+                        f"automation-finish:{command.run.event_id}:{step_key}"
+                    ),
+                ),
+            ),
+        )
+        if not succeeded:
+            return AutomationRunExecutionOutcome(
+                run_id=command.run.run_id,
+                status=outcome.run_status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+    return AutomationRunExecutionOutcome(
+        run_id=command.run.run_id,
+        status=AutomationRunStatus.succeeded,
+        error_code=None,
+        error_message=None,
+    )
+
+
+def retry_failed_run(
+    db: Session, command: RetryFailedAutomationRunCommand
+) -> RetryFailedAutomationRunOutcome:
+    """Start, continue, and durably audit one administrator run retry."""
+
+    started = start_run_retry(
+        db,
+        StartAutomationRunRetryCommand(
+            tenant_id=command.tenant_id,
+            run_id=command.run_id,
+            event=command.event,
+            context=command.context,
+        ),
+    )
+    if started.prepared_run is None:
+        retry = db.scalar(
+            select(AutomationRunRetry).where(
+                AutomationRunRetry.id == started.retry_id,
+                AutomationRunRetry.tenant_id == command.tenant_id,
+            )
+        )
+        run = (
+            db.scalar(
+                select(AutomationRun).where(
+                    AutomationRun.id == command.run_id,
+                    AutomationRun.tenant_id == command.tenant_id,
+                )
+            )
+            if retry is not None
+            else None
+        )
+        if retry is None or run is None:
+            raise _error("retry_not_found", "Automation retry record not found.")
+        return RetryFailedAutomationRunOutcome(
+            retry_id=retry.id,
+            run_id=run.id,
+            run_status=AutomationRunStatus(run.status),
+            retry_status=AutomationRunRetryStatus(retry.status),
+            error_message=retry.error_message,
+        )
+    try:
+        execution = execute_prepared_run(
+            db,
+            ExecutePreparedAutomationRunCommand(
+                tenant_id=command.tenant_id,
+                run=started.prepared_run,
+                context=command.context,
+            ),
+        )
+    except DomainError as exc:
+        execution = AutomationRunExecutionOutcome(
+            run_id=command.run_id,
+            status=AutomationRunStatus.failed,
+            error_code=exc.code,
+            error_message=exc.message,
+        )
+    except Exception:
+        logger.exception(
+            "automation_run_retry_execution_failed",
+            extra={"run_id": str(command.run_id), "retry_id": str(started.retry_id)},
+        )
+        execution = AutomationRunExecutionOutcome(
+            run_id=command.run_id,
+            status=AutomationRunStatus.failed,
+            error_code="automation.execution.retry_failed",
+            error_message=(
+                "The retry stopped before all steps completed. Review the step details."
+            ),
+        )
+    finish_context = CommandContext.system(
+        actor=command.context.actor,
+        scope=command.context.scope,
+        reason="Record the result of an administrator automation retry",
+        command_id=uuid5(
+            NAMESPACE_URL, f"dotmac:automation:retry:{started.retry_id}:finish"
+        ),
+        correlation_id=command.run_id,
+        causation_id=command.context.command_id,
+        idempotency_key=f"automation-run-retry-finish:{started.retry_id}",
+    )
+    resulting_status = finish_run_retry(
+        db,
+        FinishAutomationRunRetryCommand(
+            tenant_id=command.tenant_id,
+            retry_id=started.retry_id,
+            succeeded=execution.error_code is None,
+            error_code=execution.error_code,
+            error_message=execution.error_message,
+            preserve_running_run=execution.status is AutomationRunStatus.running,
+            context=finish_context,
+        ),
+    )
+    retry_status = (
+        AutomationRunRetryStatus.succeeded
+        if execution.error_code is None
+        else AutomationRunRetryStatus.failed
+    )
+    return RetryFailedAutomationRunOutcome(
+        retry_id=started.retry_id,
+        run_id=command.run_id,
+        run_status=resulting_status,
+        retry_status=retry_status,
+        error_message=execution.error_message,
     )

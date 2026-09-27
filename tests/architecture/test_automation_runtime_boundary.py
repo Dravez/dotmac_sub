@@ -20,7 +20,16 @@ def test_execution_coordinator_is_fully_contracted() -> None:
         "automation.capability_registry",
         "automation.rule_definitions",
         "events.store",
+        "events.replay_evidence",
     )
+
+
+def test_replay_evidence_query_is_typed_and_read_only() -> None:
+    service = service_relationship("events.replay_evidence")
+    assert service.module == "app.services.event_replay_evidence"
+    assert service.is_contracted
+    assert service.contract is not None
+    assert service.contract.transaction.mode.value == "read_only"
 
 
 def test_runtime_adapter_registry_is_closed_and_currently_inert() -> None:
@@ -48,6 +57,34 @@ def test_runtime_ledger_is_tenant_isolated_and_permissions_are_granular() -> Non
         "automation:run:redrive",
     ):
         assert permission in migration
+
+
+def test_manual_run_retry_is_audited_and_permission_gated() -> None:
+    migration = _source("alembic/versions/625_automation_run_retry_audit.py")
+    service = _source("app/services/automation_runtime.py")
+    web = _source("app/web/admin/automation_center.py")
+    assert "automation_run_retries" in migration
+    assert "ENABLE ROW LEVEL SECURITY" in migration
+    assert "FORCE ROW LEVEL SECURITY" in migration
+    assert "actor=command.context.actor" in service
+    assert "AutomationRunRetry" in service
+    assert '"/runs/{run_id}/retry"' in web
+    assert "RUN_REDRIVE_PERMISSION" in web
+    assert "execute_prepared_run" in web
+
+
+def test_run_history_exposes_only_tenant_scoped_owner_projections() -> None:
+    web = _source("app/web/admin/automation_center.py")
+    detail = _source("templates/admin/automation/run_detail.html")
+    history = _source("templates/admin/automation/run_history.html")
+    assert '"/runs",' in web
+    assert '"/runs/{run_id}"' in web
+    assert "GetAutomationRunDetailQuery" in web
+    assert "Affected record" in detail
+    assert "Retry history" in detail
+    assert "page_meta" in history
+    assert "previous_url" in history
+    assert "RUN_HISTORY_LIST" in _source("app/services/automation_runtime.py")
 
 
 def test_runtime_does_not_mutate_legacy_rule_models() -> None:
