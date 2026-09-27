@@ -20,5 +20,5 @@ period's dates or fingerprint.
 
 The available prepaid funding includes both the later payment and any existing
 verified opening balance. For this account, reversing the ₦18,812.50 unused
-renewal changes the verified balance from ₦2,187.38 to ₦21,000.00: ₦20,000.00
+renewal changes the verified balance from ₦2,187.38 to ₦20,999.88: ₦20,000.00
 new payment plus ₦999.88 existing opening balance.
