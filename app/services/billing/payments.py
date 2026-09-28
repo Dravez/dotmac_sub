@@ -108,6 +108,7 @@ from app.services.common import (
 )
 from app.services.credential_crypto import decrypt_credential, encrypt_credential
 from app.services.customer_financial_ledger import calculate_customer_balance
+from app.services.domain_errors import DomainError
 from app.services.events import emit_event
 from app.services.events.types import EventType
 from app.services.locking import lock_for_update
@@ -129,6 +130,12 @@ _PAYMENT_CREATION_IDEMPOTENCY_SCOPE = "payment_creation"
 _PAYMENT_ALLOCATION_IDEMPOTENCY_SCOPE = "payment_allocation"
 _PAYMENT_ALLOCATION_CONSUMPTION_MEMO_PREFIX = (
     "Payment allocation account-credit consumption:"
+)
+_REVIEWED_LEGACY_PAYMENT_ENVELOPE_MEMO_PREFIX = (
+    "Reviewed legacy payment account-credit envelope:"
+)
+_REVIEWED_LEGACY_RESIDUAL_RETIREMENT_MEMO_PREFIX = (
+    "Reviewed legacy residual account-credit retirement:"
 )
 
 
@@ -223,6 +230,22 @@ class PaymentCreationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewedLegacyAllocationConsumptionEvidence:
+    """Exact inputs for repairing a missing, non-position allocation link."""
+
+    account_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    allocation_id: UUID
+    invoice_ledger_entry_id: UUID
+    expected_amount: Decimal
+    preview_fingerprint: str
+    ticket_reference: str
+    approver_name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class PaymentProviderFeeObservationCommand:
     """Exact provider fee evidence for an already-recorded payment."""
 
@@ -309,6 +332,32 @@ class PaymentAllocationResult:
                 else "recheck_after_receivable_allocation"
             ),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedHistoricalPaymentAllocationPreview:
+    """Zero-position reclassification of settled credit onto a document.
+
+    The ordinary allocation preview proves currently spendable account credit.
+    A reviewed cutover repair has a different invariant: its coordinating owner
+    proves the complete pre/post-opening conservation equation, while this
+    participant proves that one exact Payment still has settlement-backed,
+    unconsumed credit and that one exact invoice still has the receivable.
+    """
+
+    payment_id: UUID
+    settlement_id: UUID
+    unallocated_ledger_entry_id: UUID
+    invoice_id: UUID
+    invoice_number: str | None
+    amount: Decimal
+    currency: str
+    payment_unallocated_before: Decimal
+    payment_unallocated_after: Decimal
+    receivable_before: Decimal
+    receivable_after: Decimal
+    funding_position_at: datetime
+    fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -2740,6 +2789,25 @@ class Payments(ListResponseMixin):
         }
 
     @staticmethod
+    def reconcile_reviewed_historical_settlement_for_owner(
+        db: Session,
+        payment_id: str,
+        payload: PaymentSettlementReconciliationRequest,
+    ) -> PaymentSettlement:
+        """Translate legacy settlement validation into a domain error for owners."""
+        try:
+            return Payments.reconcile_settlement_evidence(
+                db, payment_id, payload, commit=False
+            )
+        except HTTPException as exc:
+            raise DomainError(
+                code="financial.payments.historical_settlement_evidence_rejected",
+                message="Reviewed historical payment settlement evidence was rejected.",
+                details={"reason": str(exc.detail)},
+                retryable=False,
+            ) from exc
+
+    @staticmethod
     def reconcile_settlement_evidence(
         db: Session,
         payment_id: str,
@@ -4334,6 +4402,115 @@ def _build_payment_allocation_preview(
     )
 
 
+def _build_reviewed_historical_payment_allocation_preview(
+    db: Session,
+    payload: PaymentAllocationPreviewRequest,
+    *,
+    funding_position_at: datetime,
+) -> ReviewedHistoricalPaymentAllocationPreview:
+    """Prove one allocation leg without asserting a new customer position.
+
+    This participant is intentionally narrower than the ordinary allocator. It
+    may only consume exact settlement-backed credit and never decides whether
+    the surrounding cutover equation is valid; that decision belongs to the
+    prepaid sequence-reconstruction owner.
+    """
+
+    payment = get_by_id(db, Payment, payload.payment_id)
+    invoice = get_by_id(db, Invoice, payload.invoice_id)
+    if payment is None or invoice is None:
+        raise HTTPException(status_code=404, detail="Payment or invoice not found")
+    if (
+        not payment.is_active
+        or payment.status is not PaymentStatus.succeeded
+        or payment.account_id is None
+        or payment.account_id != invoice.account_id
+        or payment.refunds
+        or payment.reversal is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Reviewed historical payment is not allocatable",
+        )
+    settlement = payment.settlement
+    if (
+        settlement is None
+        or settlement.unallocated_ledger_entry_id is None
+        or not _payment_has_exact_unallocated_evidence(db, payment)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Reviewed historical payment lacks exact settlement evidence",
+        )
+    if not invoice.is_active or invoice.is_proforma:
+        raise HTTPException(status_code=409, detail="Invoice is not allocatable")
+    _validate_invoice_currency(invoice, payment.currency)
+    _assert_invoice_allocatable(invoice)
+    existing = db.scalar(
+        select(PaymentAllocation.id).where(
+            PaymentAllocation.payment_id == payment.id,
+            PaymentAllocation.invoice_id == invoice.id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Payment already has allocation evidence for this invoice",
+        )
+    amount = round_money(to_decimal(payload.amount))
+    receivable_before = round_money(to_decimal(invoice.balance_due))
+    payment_unallocated_before = _payment_unallocated_credit_remaining(db, payment)
+    if (
+        amount <= Decimal("0.00")
+        or amount > receivable_before
+        or amount > payment_unallocated_before
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Reviewed allocation exceeds exact payment or invoice capacity",
+        )
+    evidence = db.get(LedgerEntry, settlement.unallocated_ledger_entry_id)
+    if evidence is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Reviewed settlement ledger evidence is unavailable",
+        )
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "kind": "reviewed_historical_payment_allocation",
+                "payment_id": str(payment.id),
+                "settlement_id": str(settlement.id),
+                "unallocated_ledger_entry_id": str(evidence.id),
+                "invoice_id": str(invoice.id),
+                "invoice_status": invoice.status.value,
+                "amount": str(amount),
+                "currency": payment.currency,
+                "payment_unallocated_before": str(payment_unallocated_before),
+                "receivable_before": str(receivable_before),
+                "funding_position_at": funding_position_at.isoformat(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return ReviewedHistoricalPaymentAllocationPreview(
+        payment_id=payment.id,
+        settlement_id=settlement.id,
+        unallocated_ledger_entry_id=evidence.id,
+        invoice_id=invoice.id,
+        invoice_number=invoice.invoice_number,
+        amount=amount,
+        currency=payment.currency,
+        payment_unallocated_before=payment_unallocated_before,
+        payment_unallocated_after=round_money(payment_unallocated_before - amount),
+        receivable_before=receivable_before,
+        receivable_after=round_money(receivable_before - amount),
+        funding_position_at=funding_position_at,
+        fingerprint=fingerprint,
+    )
+
+
 def _normalize_payment_allocation_key(value: str) -> str:
     key = value.strip()
     if not _REFUND_KEY_RE.fullmatch(key):
@@ -4354,6 +4531,254 @@ class PaymentAllocations(ListResponseMixin):
             payment_id,
             funding_position_at=None,
         )
+
+    @staticmethod
+    def stage_reviewed_legacy_consumption_evidence(
+        db: Session,
+        evidence: ReviewedLegacyAllocationConsumptionEvidence,
+    ) -> LedgerEntry:
+        """Normalize and attach exact evidence for one legacy allocation.
+
+        This participant is called only by the historical invoice-tax owner after
+        it has reconciled the exact payment settlement evidence in the same owner
+        transaction. Legacy payments can represent their settled value as an
+        invoice credit plus only the residual account credit. The current payment
+        owner instead requires one full account-credit envelope and a consumption
+        debit for each allocation. When that legacy split is present, append an
+        offsetting residual-retirement debit and full envelope credit before
+        attaching the consumption debit. All three rows are non-position evidence,
+        and their net reusable-credit delta is zero while the allocation is active.
+        """
+
+        lock_account(db, str(evidence.account_id))
+        payment = lock_for_update(db, Payment, evidence.payment_id)
+        invoice = lock_for_update(db, Invoice, evidence.invoice_id)
+        allocation = lock_for_update(db, PaymentAllocation, evidence.allocation_id)
+        invoice_entry = lock_for_update(
+            db, LedgerEntry, evidence.invoice_ledger_entry_id
+        )
+        settlement = db.scalar(
+            select(PaymentSettlement)
+            .where(PaymentSettlement.payment_id == evidence.payment_id)
+            .with_for_update()
+        )
+        amount = round_money(evidence.expected_amount)
+        fingerprint = evidence.preview_fingerprint.strip().lower()
+        if (
+            payment is None
+            or invoice is None
+            or allocation is None
+            or invoice_entry is None
+            or payment.account_id != evidence.account_id
+            or settlement is None
+            or payment.status is not PaymentStatus.succeeded
+            or not payment.is_active
+            or payment.refunds
+            or payment.reversal is not None
+            or invoice.account_id != evidence.account_id
+            or not invoice.is_active
+            or allocation.payment_id != payment.id
+            or allocation.invoice_id != invoice.id
+            or not allocation.is_active
+            or round_money(allocation.amount) != amount
+            or allocation.ledger_entry_id != invoice_entry.id
+            or not invoice_entry.is_active
+            or invoice_entry.account_id != evidence.account_id
+            or invoice_entry.payment_id != payment.id
+            or invoice_entry.invoice_id != invoice.id
+            or invoice_entry.entry_type is not LedgerEntryType.credit
+            or invoice_entry.source is not LedgerSource.payment
+            or invoice_entry.currency.upper() != payment.currency.upper()
+            or round_money(invoice_entry.amount) != amount
+            or len(fingerprint) != 64
+            or not evidence.ticket_reference.strip()
+            or not evidence.approver_name.strip()
+            or not evidence.reason.strip()
+        ):
+            raise DomainError(
+                code="financial.payments.legacy_consumption_evidence_rejected",
+                message="Reviewed legacy allocation evidence no longer matches.",
+                retryable=False,
+            )
+
+        settlement_amount = round_money(settlement.amount)
+        settlement_unallocated = round_money(settlement.unallocated_amount)
+        if settlement_unallocated < settlement_amount:
+            active_allocations = tuple(
+                db.scalars(
+                    select(PaymentAllocation)
+                    .where(
+                        PaymentAllocation.payment_id == payment.id,
+                        PaymentAllocation.is_active.is_(True),
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            residual_entry = (
+                lock_for_update(db, LedgerEntry, settlement.unallocated_ledger_entry_id)
+                if settlement.unallocated_ledger_entry_id is not None
+                else None
+            )
+            allocated_total = round_money(
+                sum(
+                    (round_money(item.amount) for item in active_allocations),
+                    Decimal("0.00"),
+                )
+            )
+            if (
+                settlement_amount != round_money(payment.amount)
+                or settlement_unallocated <= Decimal("0.00")
+                or round_money(settlement_unallocated + allocated_total)
+                != settlement_amount
+                or len(active_allocations) != 1
+                or active_allocations[0].id != allocation.id
+                or residual_entry is None
+                or not residual_entry.is_active
+                or residual_entry.account_id != payment.account_id
+                or residual_entry.payment_id != payment.id
+                or residual_entry.invoice_id is not None
+                or residual_entry.entry_type is not LedgerEntryType.credit
+                or residual_entry.source is not LedgerSource.payment
+                or residual_entry.currency.upper() != payment.currency.upper()
+                or round_money(residual_entry.amount) != settlement_unallocated
+            ):
+                raise DomainError(
+                    code="financial.payments.legacy_consumption_evidence_rejected",
+                    message="Legacy payment credit split cannot be normalized exactly.",
+                    retryable=False,
+                )
+
+            envelope = LedgerEntry(
+                account_id=evidence.account_id,
+                invoice_id=None,
+                payment_id=payment.id,
+                entry_type=LedgerEntryType.credit,
+                source=LedgerSource.payment,
+                amount=settlement_amount,
+                currency=payment.currency,
+                memo=(f"{_REVIEWED_LEGACY_PAYMENT_ENVELOPE_MEMO_PREFIX} {payment.id}"),
+                affects_customer_position=False,
+                effective_date=payment.paid_at,
+            )
+            residual_retirement = LedgerEntry(
+                account_id=evidence.account_id,
+                invoice_id=None,
+                payment_id=payment.id,
+                entry_type=LedgerEntryType.debit,
+                source=LedgerSource.other,
+                amount=settlement_unallocated,
+                currency=payment.currency,
+                memo=(
+                    f"{_REVIEWED_LEGACY_RESIDUAL_RETIREMENT_MEMO_PREFIX} "
+                    f"{residual_entry.id}"
+                ),
+                affects_customer_position=False,
+                effective_date=payment.paid_at,
+            )
+            db.add_all((envelope, residual_retirement))
+            db.flush()
+            settlement.unallocated_ledger_entry_id = envelope.id
+            settlement.unallocated_amount = settlement_amount
+            db.flush()
+        else:
+            envelope = None
+            residual_retirement = None
+
+        if allocation.consumption_ledger_entry_id is not None:
+            existing = lock_for_update(
+                db, LedgerEntry, allocation.consumption_ledger_entry_id
+            )
+            if (
+                existing is None
+                or existing.payment_id != payment.id
+                or existing.invoice_id is not None
+                or existing.entry_type is not LedgerEntryType.debit
+                or existing.source is not LedgerSource.other
+                or existing.currency.upper() != payment.currency.upper()
+                or round_money(existing.amount) != amount
+                or existing.affects_customer_position
+            ):
+                raise DomainError(
+                    code="financial.payments.legacy_consumption_evidence_rejected",
+                    message="Existing allocation consumption evidence conflicts.",
+                    retryable=False,
+                )
+            return existing
+
+        candidates = tuple(
+            db.scalars(
+                select(LedgerEntry)
+                .where(
+                    LedgerEntry.payment_id == payment.id,
+                    LedgerEntry.invoice_id.is_(None),
+                    LedgerEntry.entry_type == LedgerEntryType.debit,
+                    LedgerEntry.source == LedgerSource.other,
+                    LedgerEntry.currency == payment.currency,
+                    LedgerEntry.amount == amount,
+                    LedgerEntry.is_active.is_(True),
+                    LedgerEntry.affects_customer_position.is_(False),
+                    LedgerEntry.memo
+                    == f"{_PAYMENT_ALLOCATION_CONSUMPTION_MEMO_PREFIX} {invoice.id}",
+                )
+                .with_for_update()
+            ).all()
+        )
+        if len(candidates) > 1:
+            raise DomainError(
+                code="financial.payments.legacy_consumption_evidence_rejected",
+                message="Multiple historical allocation consumption rows are ambiguous.",
+                retryable=False,
+            )
+        if candidates:
+            consumption = candidates[0]
+        else:
+            consumption = LedgerEntry(
+                account_id=evidence.account_id,
+                invoice_id=None,
+                payment_id=payment.id,
+                entry_type=LedgerEntryType.debit,
+                source=LedgerSource.other,
+                amount=amount,
+                currency=payment.currency,
+                memo=f"{_PAYMENT_ALLOCATION_CONSUMPTION_MEMO_PREFIX} {invoice.id}",
+                affects_customer_position=False,
+            )
+            db.add(consumption)
+            db.flush()
+        allocation.consumption_ledger_entry_id = consumption.id
+        db.flush()
+        AuditEvents.stage(
+            db,
+            AuditEventCreate(
+                actor_type=AuditActorType.system,
+                action="reconcile_legacy_payment_allocation_consumption_evidence",
+                entity_type="payment_allocation",
+                entity_id=str(allocation.id),
+                metadata_={
+                    "payment_id": str(payment.id),
+                    "invoice_id": str(invoice.id),
+                    "invoice_ledger_entry_id": str(invoice_entry.id),
+                    "consumption_ledger_entry_id": str(consumption.id),
+                    "normalized_envelope_ledger_entry_id": (
+                        str(envelope.id) if envelope is not None else None
+                    ),
+                    "retired_residual_ledger_entry_id": (
+                        str(residual_retirement.id)
+                        if residual_retirement is not None
+                        else None
+                    ),
+                    "amount": str(amount),
+                    "currency": payment.currency,
+                    "preview_fingerprint": fingerprint,
+                    "ticket_reference": evidence.ticket_reference.strip(),
+                    "approver_name": evidence.approver_name.strip(),
+                    "reason": evidence.reason.strip(),
+                    "money_effect": "none_structural_evidence_only",
+                },
+            ),
+        )
+        db.flush()
+        return consumption
 
     @staticmethod
     def available_amount_at_reviewed_boundary_for_owner(
@@ -4421,6 +4846,141 @@ class PaymentAllocations(ListResponseMixin):
             payload,
             funding_position_at=funding_position_at,
         )
+
+    @staticmethod
+    def preview_reviewed_historical_reclassification_for_owner(
+        db: Session,
+        payload: PaymentAllocationPreviewRequest,
+        *,
+        funding_position_at: datetime,
+    ) -> ReviewedHistoricalPaymentAllocationPreview:
+        """Preview one leg selected by a reviewed cutover repair owner."""
+
+        return _build_reviewed_historical_payment_allocation_preview(
+            db,
+            payload,
+            funding_position_at=funding_position_at,
+        )
+
+    @staticmethod
+    def stage_confirm_reviewed_historical_reclassification_for_owner(
+        db: Session,
+        payload: PaymentAllocationConfirm,
+        *,
+        funding_position_at: datetime,
+    ) -> PaymentAllocationResult:
+        """Stage an allocation link with no new customer-position effect.
+
+        Both ledger rows are structural. The original payment credit and
+        invoice receivable already crossed the reviewed opening boundary, so a
+        position-affecting invoice credit would count the same money twice.
+        The non-position consumption row still reduces reusable account credit.
+        """
+
+        key = _normalize_payment_allocation_key(payload.idempotency_key)
+        replay = PaymentAllocations._replay(
+            db,
+            key=key,
+            fingerprint=payload.preview_fingerprint,
+        )
+        if replay is not None:
+            return replay
+        payment = get_by_id(db, Payment, payload.payment_id)
+        if payment is None or payment.account_id is None:
+            raise HTTPException(status_code=404, detail="Payment not found")
+        lock_account(db, str(payment.account_id))
+        payment = lock_for_update(db, Payment, payment.id)
+        invoice = lock_for_update(db, Invoice, payload.invoice_id)
+        if payment is None or invoice is None:
+            raise HTTPException(status_code=404, detail="Payment or invoice not found")
+        preview = _build_reviewed_historical_payment_allocation_preview(
+            db,
+            PaymentAllocationPreviewRequest(
+                payment_id=payload.payment_id,
+                invoice_id=payload.invoice_id,
+                amount=payload.amount,
+            ),
+            funding_position_at=funding_position_at,
+        )
+        if preview.fingerprint != payload.preview_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="Financial state changed after preview; preview again",
+            )
+        reservation = IdempotencyKey(
+            scope=_PAYMENT_ALLOCATION_IDEMPOTENCY_SCOPE,
+            key=key,
+            account_id=payment.account_id,
+        )
+        allocation = PaymentAllocation(
+            payment_id=payment.id,
+            invoice_id=invoice.id,
+            amount=preview.amount,
+            memo=(
+                "Reviewed historical payment reclassified to invoice "
+                f"{invoice.invoice_number or invoice.id}"
+            ),
+            preview_fingerprint=preview.fingerprint,
+            idempotency_key=key,
+        )
+        db.add_all((reservation, allocation))
+        invoice_entry = LedgerEntry(
+            account_id=invoice.account_id,
+            invoice_id=invoice.id,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.credit,
+            source=LedgerSource.payment,
+            amount=preview.amount,
+            currency=preview.currency,
+            memo=f"Reviewed historical allocation for payment {payment.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        consumption_entry = LedgerEntry(
+            account_id=payment.account_id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=preview.amount,
+            currency=preview.currency,
+            memo=f"{_PAYMENT_ALLOCATION_CONSUMPTION_MEMO_PREFIX} {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db.add_all((invoice_entry, consumption_entry))
+        db.flush()
+        allocation.ledger_entry_id = invoice_entry.id
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        reservation.ref_id = str(allocation.id)
+        payment.updated_at = datetime.now(UTC)
+        _finalize_reviewed_document_payment_effects(db, invoice)
+        AuditEvents.stage(
+            db,
+            AuditEventCreate(
+                actor_type=AuditActorType.system,
+                action="reclassify_reviewed_historical_payment_credit",
+                entity_type="payment_allocation",
+                entity_id=str(allocation.id),
+                metadata_={
+                    "payment_id": str(payment.id),
+                    "settlement_id": str(preview.settlement_id),
+                    "unallocated_ledger_entry_id": str(
+                        preview.unallocated_ledger_entry_id
+                    ),
+                    "invoice_id": str(invoice.id),
+                    "amount": str(preview.amount),
+                    "currency": preview.currency,
+                    "preview_fingerprint": preview.fingerprint,
+                    "invoice_ledger_entry_id": str(invoice_entry.id),
+                    "consumption_ledger_entry_id": str(consumption_entry.id),
+                    "funding_position_at": funding_position_at.isoformat(),
+                    "customer_position_delta": "0.00",
+                },
+            ),
+        )
+        db.flush()
+        return PaymentAllocationResult(allocation=allocation, preview=None)
 
     @staticmethod
     def _replay(

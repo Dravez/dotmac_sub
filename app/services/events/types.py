@@ -33,6 +33,7 @@ class EventType(enum.Enum):
 
     # Automation Center control-plane events
     automation_rule_changed = "automation.rule_changed"
+    automation_script_changed = "automation.script_changed"
     custom_field_definition_changed = "custom_field.definition_changed"
     custom_field_value_changed = "custom_field.value_changed"
 
@@ -176,6 +177,7 @@ class EventType(enum.Enum):
     prepaid_paid_invoice_coverage_corrected = "prepaid_paid_invoice.coverage_corrected"
     prepaid_draft_reconciled = "prepaid_draft.reconciled"
     prepaid_reviewed_draft_settled = "prepaid_reviewed_draft.settled"
+    prepaid_invoice_sequence_reconstructed = "prepaid_invoice_sequence.reconstructed"
     prepaid_billing_calendar_reconciled = "prepaid_billing_calendar.reconciled"
     ip_assignment_service_ownership_reconciled = (
         "ip_assignment.service_ownership_reconciled"
@@ -318,6 +320,7 @@ class EventType(enum.Enum):
     network_map_asset_change_proposed = "network_map_asset_change.proposed"
     network_map_asset_change_applied = "network_map_asset_change.applied"
     network_map_asset_change_rejected = "network_map_asset_change.rejected"
+    network_map_kmz_import_staged = "network_map.kmz_import_staged"
 
     # OLT events (3)
     olt_created = "olt.created"
