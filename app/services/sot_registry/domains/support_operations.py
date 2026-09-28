@@ -1804,6 +1804,13 @@ DOMAIN = DomainSOT(
                 state=AutomationCatalogState.unavailable,
                 explanation="Project SLA timers are not yet available as configurable Automation Center rules.",
             ),
+            AutomationCatalogItem(
+                key="service_levels.retired_sla_polling",
+                label="Old SLA polling task",
+                group="Service levels",
+                state=AutomationCatalogState.retired,
+                explanation="The task only consumes retired messages and does no business work; developers must restore and review it before use.",
+            ),
         ),
         triggers=(
             AutomationTriggerCapability(

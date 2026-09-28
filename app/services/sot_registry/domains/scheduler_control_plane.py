@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     SOTService,
 )
@@ -74,4 +79,22 @@ DOMAIN = DomainSOT(
     "reconciliation, or canonical projection repair. "
     "Event-driven transports remain requestable but cannot register as "
     "independent periodic repair owners; task bodies remain thin adapters.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="reports.scheduled_exports",
+                label="Scheduled exports",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="The export definition and recurring schedule need a typed Center contract before admins can manage them here.",
+            ),
+            AutomationCatalogItem(
+                key="maintenance.retention_cleanup",
+                label="Application data-retention cleanup",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Retention spans several record owners and legal limits; it remains protected until a scoped maintenance contract is approved.",
+            ),
+        ),
+    ),
 )

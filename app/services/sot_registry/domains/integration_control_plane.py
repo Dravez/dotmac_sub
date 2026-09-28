@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -2398,4 +2403,148 @@ DOMAIN = DomainSOT(
     "capabilities; connectors never become business-state writers. Sub "
     "domain owners depend only on the Sub-local backoffice port and typed "
     "capability contracts, never on a provider database or foreign key.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="field.project_completion_purchase_invoice",
+                label="Project-completion purchase invoice",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="Supplier invoicing requires project completion evidence and remains in the existing ERP integration flow.",
+            ),
+            AutomationCatalogItem(
+                key="field.approved_vendor_invoice_export",
+                label="Approved vendor invoice export",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="ERP payable creation follows approval and existing invoice safeguards; it is not yet a Center action.",
+            ),
+            AutomationCatalogItem(
+                key="integration.erp_outbox_delivery",
+                label="ERP outbox delivery",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Outbox delivery uses connector permissions and durable retry rules; Center rules cannot start it yet.",
+            ),
+            AutomationCatalogItem(
+                key="integration.erp_material_catalogue_refresh",
+                label="ERP material catalogue refresh",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="The integration refresh remains on its existing configured schedule and has no Center schedule trigger.",
+            ),
+            AutomationCatalogItem(
+                key="integration.erp_expense_material_status_refresh",
+                label="ERP expense and material status refresh",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="Status reconciliation remains in the ERP integration owner; no Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="integration.purchase_order_writeback_repair",
+                label="Purchase-order write-back repair",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="This recovery reapplies a saved ERP response and remains under integration idempotency safeguards.",
+            ),
+            AutomationCatalogItem(
+                key="integration.purchase_invoice_repair",
+                label="Purchase-invoice repair",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="Invoice repair may create or attach ERP records and remains in the existing recovery owner.",
+            ),
+            AutomationCatalogItem(
+                key="integration.supplier_invoice_payment_observation",
+                label="Supplier-invoice payment observation",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="Payment state is observed from ERP through the existing integration; the Center cannot yet schedule this read.",
+            ),
+            AutomationCatalogItem(
+                key="integration.erp_operational_context_sync",
+                label="ERP operational context synchronization",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="The configured ERP capability and delivery watermarks remain authoritative; no Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="integration.erp_staff_access_reconciliation",
+                label="ERP staff-access reconciliation",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Staff access changes use verified ERP evidence and existing authorization safeguards; they are not Center rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="integration.crm_ticket_pull",
+                label="CRM ticket pull",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Polling and CRM credentials remain with the integration owner; no Center schedule trigger is registered.",
+            ),
+            AutomationCatalogItem(
+                key="integration.crm_full_reconciliation",
+                label="CRM full reconciliation",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Full reconciliation remains in its existing integration schedule and cannot yet be configured in Center.",
+            ),
+            AutomationCatalogItem(
+                key="integration.crm_customer_quote_webhooks",
+                label="CRM customer and quote webhooks",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Signed webhook admission and identity matching remain in the integration and customer owners.",
+            ),
+            AutomationCatalogItem(
+                key="integration.lead_capture_webhook",
+                label="Lead-capture webhook",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Verified lead capture stays with its webhook and lead owners; no Center trigger/action contract is registered.",
+            ),
+            AutomationCatalogItem(
+                key="integration.meta_lead_generation",
+                label="Meta lead generation",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing verified Meta event path remains the owner; Center rules cannot replace its identity checks.",
+            ),
+            AutomationCatalogItem(
+                key="integration.fiber_inquiry_webhook",
+                label="Fiber inquiry webhook",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Signed inquiry admission and customer matching remain in their current integration owners.",
+            ),
+            AutomationCatalogItem(
+                key="integration.configurable_jobs",
+                label="Configurable integration jobs",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Connector schedules and credentials remain managed by the integration control plane; Center scheduling is not registered.",
+            ),
+            AutomationCatalogItem(
+                key="integration.oauth_token_refresh",
+                label="OAuth token refresh",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Token refresh is security-sensitive and remains managed by the OAuth token owner.",
+            ),
+            AutomationCatalogItem(
+                key="integration.inbox_lease_recovery",
+                label="Integration inbox lease recovery",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Lease recovery is a protected delivery-reliability job and is not a customer-configurable rule.",
+            ),
+            AutomationCatalogItem(
+                key="integration.cross_application_drift_detection",
+                label="Cross-application drift detection",
+                group="Integrations",
+                state=AutomationCatalogState.unavailable,
+                explanation="Drift reports compare owner projections but cannot repair business state; Center scheduling support is not registered.",
+            ),
+        ),
+    ),
 )

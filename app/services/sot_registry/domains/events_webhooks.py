@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -274,4 +279,29 @@ DOMAIN = DomainSOT(
     ),
     rule="Handlers orchestrate; event persistence stays in events.store and "
     "external delivery is requested from integration.delivery.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="maintenance.event_outbox_recovery",
+                label="Event outbox recovery",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Recovery delivers already-accepted events and remains a protected dispatcher job, not an admin-created customer rule.",
+            ),
+            AutomationCatalogItem(
+                key="maintenance.failed_event_retry",
+                label="Failed-event retry",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="The event owner controls retry eligibility and timing; Center rules cannot change those safeguards.",
+            ),
+            AutomationCatalogItem(
+                key="maintenance.stuck_event_recovery",
+                label="Stuck-event recovery",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expired worker leases are recovered by the event owner; no Center action is registered.",
+            ),
+        ),
+    ),
 )
