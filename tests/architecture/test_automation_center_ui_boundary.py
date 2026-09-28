@@ -53,6 +53,19 @@ def test_hub_presents_governance_and_rule_lifecycle_controls() -> None:
     assert "Activation unavailable" in template
 
 
+def test_hub_shows_support_communications_readiness_and_next_step() -> None:
+    template = _source("templates/admin/automation/index.html")
+    projection = _source("app/services/web_automation_center.py")
+    assert "Support and communications automation" in template
+    assert "{{ row.state_label }}" in template
+    assert 'AutomationCatalogState.unavailable: "Unavailable"' in projection
+    assert 'AutomationCatalogState.managed_elsewhere: "Managed elsewhere"' in projection
+    assert 'AutomationCatalogState.retired: "Retired"' in projection
+    assert "{{ row.explanation }}" in template
+    assert "{{ row.item.management_path }}" in template
+    assert "Create rule" in template
+
+
 def test_runtime_health_card_uses_semantic_status_and_safe_responsive_layout() -> None:
     template = _source("templates/admin/automation/index.html")
     design_system = _source("static/css/design-system.css")
