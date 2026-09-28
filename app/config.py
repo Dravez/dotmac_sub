@@ -135,11 +135,12 @@ class Settings:
         "TEAM_INBOX_CHANNEL_FALLBACK_SERVICE_TEAM_ID", ""
     ).strip()
 
-    # Avatar settings
+    # Legacy location is read-only for avatar migration. MIME and size remain
+    # runtime policy inputs while durable S3 storage owns new uploads.
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", "static/avatars")
     avatar_max_size_bytes: int = int(
         os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024))
-    )  # 2MB
+    )
     avatar_allowed_types: str = os.getenv(
         "AVATAR_ALLOWED_TYPES", "image/jpeg,image/png,image/gif,image/webp"
     )

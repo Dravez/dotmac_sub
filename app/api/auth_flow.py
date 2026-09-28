@@ -1,4 +1,5 @@
 from typing import cast
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -304,9 +305,12 @@ async def upload_avatar(
     auth: dict = Depends(require_user_auth),
     db: Session = Depends(get_db),
 ) -> AvatarUploadResponse:
+    if auth.get("principal_type") != "subscriber":
+        raise HTTPException(status_code=403, detail="Subscriber session required")
     return await user_profile_service.upload_avatar(
         db,
-        subscriber_id=auth["subscriber_id"],
+        subscriber_id=UUID(auth["subscriber_id"]),
+        actor_id=UUID(auth["principal_id"]),
         file=file,
     )
 
@@ -322,9 +326,12 @@ def delete_avatar(
     auth: dict = Depends(require_user_auth),
     db: Session = Depends(get_db),
 ) -> None:
+    if auth.get("principal_type") != "subscriber":
+        raise HTTPException(status_code=403, detail="Subscriber session required")
     user_profile_service.delete_avatar(
         db,
-        subscriber_id=auth["subscriber_id"],
+        subscriber_id=UUID(auth["subscriber_id"]),
+        actor_id=UUID(auth["principal_id"]),
     )
 
 

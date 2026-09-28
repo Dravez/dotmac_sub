@@ -30,6 +30,106 @@ DOMAIN = DomainSOT(
     setting_domains=("subscriber",),
     services=(
         SOTService(
+            name="customer.avatar",
+            module="app.services.avatar",
+            owns=("subscriber avatar selection and durable metadata",),
+            depends_on=("customer.accounts",),
+            notes=(
+                "Subscriber.avatar_url selects one public StoredFile. The storage "
+                "participant writes S3 before SQL and stages metadata without commit; "
+                "legacy static URLs remain readable until independently verified migration."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="subscriber avatar selection and durable metadata",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed avatar command",
+                            "canonical subscriber account",
+                        ),
+                        canonical_writer="customer.avatar",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed avatar command",
+                        owner="customer.avatar",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="authenticated subscriber upload or removal request",
+                    ),
+                    AuthorityInput(
+                        name="canonical subscriber account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="locked Subscriber row and selected avatar URL",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "execute_owner_command commits Subscriber selection and "
+                        "StoredFile metadata atomically; S3 upload precedes SQL."
+                    ),
+                    locking="Subscriber row is selected FOR UPDATE before selection changes.",
+                    idempotency=(
+                        "Object keys are content-addressed; deletion is metadata-only. "
+                        "A retry may create another StoredFile row but selects one URL."
+                    ),
+                    retries="Retry the entire owner command after a rolled-back failure.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "customer.avatar.invalid_file",
+                        "customer.avatar.stale_legacy_url",
+                        "customer.avatar.subscriber_missing",
+                        *owner_command_boundary_error_codes("customer.avatar"),
+                    ),
+                    mapping_owner="authenticated avatar API adapter",
+                    fail_closed_on=(
+                        "missing subscriber",
+                        "invalid image",
+                        "missing object",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The existing subscriber.updated envelope names only the "
+                        "subscriber and avatar_url in updated_fields."
+                    ),
+                    replay=(
+                        "The owner command stages a pending event in the same "
+                        "transaction; the durable dispatcher replays delivery."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.CUTOVER_READY,
+                    old_owner="local static avatar writer",
+                    new_owner="customer.avatar",
+                    verification=(
+                        "tests/test_avatar_services.py and "
+                        "tests/test_avatar_migration_tools.py"
+                    ),
+                    cutover_gate=(
+                        "digest-bound dry-run inventory, guarded backfill, and "
+                        "per-object verification in docs/storage_s3.md"
+                    ),
+                    fallback_retirement="remove static compatibility only after all old URLs are migrated",
+                ),
+                steward="customer operations",
+                design_refs=("docs/storage_s3.md", "docs/SOT_RELATIONSHIP_MAP.md"),
+                test_refs=(
+                    "tests/test_avatar_services.py",
+                    "tests/test_avatar_migration_tools.py",
+                    "tests/architecture/test_avatar_storage_boundary.py",
+                    "tests/architecture/test_avatar_ingress_contract.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="customer.accounts",
             module="app.services.subscriber",
             owns=(
