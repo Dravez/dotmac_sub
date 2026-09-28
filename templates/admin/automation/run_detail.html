@@ -1,0 +1,44 @@
+{% extends "layouts/admin.html" %}
+{% from "components/ui/macros.html" import page_header, status_badge %}
+{% block content %}
+<div class="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+    {% set run_status_variant = "success" if detail.summary.status.value == "succeeded" else "error" if detail.summary.status.value == "failed" else "info" if detail.summary.status.value == "running" else "default" %}
+    {% call page_header(
+        title="Automation run",
+        subtitle=detail.rule_name ~ " · " ~ detail.summary.event_type,
+        color="indigo",
+        breadcrumbs=[
+            {"label": "Automation Center", "href": "/admin/automation"},
+            {"label": "Run history", "href": "/admin/automation/runs"},
+            {"label": "Run details"}
+        ]
+    ) %}
+        {{ status_badge(status=detail.summary.status.value|capitalize, variant=run_status_variant) }}
+    {% endcall %}
+
+    {% if page_error %}<div role="alert" class="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{{ page_error }}</div>{% endif %}
+    {% if page_notice %}<div role="status" class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">{{ page_notice }}</div>{% endif %}
+
+    <section aria-labelledby="run-overview-heading" class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+        <h2 id="run-overview-heading" class="text-base font-semibold text-slate-950 dark:text-white">What happened</h2>
+        <dl class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Affected record</dt><dd class="mt-1 break-all text-sm font-medium text-slate-900 dark:text-white">{% if target_href %}<a class="text-indigo-700 underline underline-offset-4 dark:text-indigo-300" href="{{ target_href }}">{{ detail.summary.target_type }} · {{ detail.summary.target_id }}</a>{% else %}{{ detail.summary.target_type }} · {{ detail.summary.target_id }}{% endif %}</dd></div>
+            <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Rule version</dt><dd class="mt-1 break-all text-sm text-slate-900 dark:text-white">{{ detail.summary.rule_version_id }}</dd></div>
+            <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Started</dt><dd class="mt-1 text-sm text-slate-900 dark:text-white">{{ detail.summary.started_at or detail.summary.created_at }}</dd></div>
+            <div><dt class="text-xs font-medium uppercase tracking-wide text-slate-500">Finished</dt><dd class="mt-1 text-sm text-slate-900 dark:text-white">{{ detail.summary.completed_at or "Still in progress" }}</dd></div>
+        </dl>
+        {% if detail.summary.error_message %}<div class="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 dark:border-red-900 dark:bg-red-950/30"><p class="text-sm font-semibold text-red-900 dark:text-red-200">Why it stopped</p><p class="mt-1 text-sm leading-6 text-red-800 dark:text-red-300">{{ detail.summary.error_message }}</p><p class="mt-2 break-all text-xs text-red-700 dark:text-red-400">{{ detail.summary.error_code }}</p></div>{% endif %}
+        {% if can_retry %}<form class="mt-5" method="post" action="/admin/automation/runs/{{ detail.summary.run_id }}/retry"><input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}"><input type="hidden" name="command_token" value="{{ command_token }}"><button type="submit" class="inline-flex min-h-10 items-center rounded-lg bg-indigo-700 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">Continue from failed step</button><p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Steps that already succeeded will be skipped.</p></form>{% endif %}
+    </section>
+
+    <section aria-labelledby="steps-heading" class="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div class="border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 id="steps-heading" class="text-base font-semibold text-slate-950 dark:text-white">Action steps</h2><p class="mt-1 text-sm text-slate-600 dark:text-slate-400">Completed actions are retained when a failed run continues.</p></div>
+        {% if detail.steps %}<ol class="divide-y divide-slate-100 dark:divide-slate-800">{% for step in detail.steps %}<li class="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-start sm:justify-between"><div><p class="font-medium text-slate-900 dark:text-white">{{ loop.index }}. {{ action_labels.get(step.step_id, step.action_key) }}</p><p class="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">{{ step.action_key }} · {{ step.attempt_count }} attempt{{ "s" if step.attempt_count != 1 else "" }}</p>{% if step.error_message %}<p class="mt-2 text-sm text-red-700 dark:text-red-300">{{ step.error_message }}</p><p class="mt-1 break-all text-xs text-red-700 dark:text-red-400">{{ step.error_code }}</p>{% endif %}</div><span class="w-fit rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium capitalize text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ step.status.value }}</span></li>{% endfor %}</ol>{% else %}<p class="px-5 py-8 text-sm text-slate-600 dark:text-slate-400">No action steps were recorded for this run.</p>{% endif %}
+    </section>
+
+    <section aria-labelledby="retry-history-heading" class="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div class="border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 id="retry-history-heading" class="text-base font-semibold text-slate-950 dark:text-white">Retry history</h2><p class="mt-1 text-sm text-slate-600 dark:text-slate-400">Each administrator retry and its final result is recorded.</p></div>
+        {% if detail.retries %}<ol class="divide-y divide-slate-100 dark:divide-slate-800">{% for retry in detail.retries %}<li class="px-5 py-4"><div class="flex flex-wrap items-center justify-between gap-2"><p class="font-medium text-slate-900 dark:text-white">Retry {{ retry.attempt_number }} · {{ retry.actor }}</p><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium capitalize text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ retry.status }}</span></div><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Started {{ retry.started_at }}{% if retry.completed_at %} · Finished {{ retry.completed_at }}{% endif %}{% if retry.resulting_run_status %} · Run {{ retry.resulting_run_status.value }}{% endif %}</p>{% if retry.error_message %}<p class="mt-2 text-sm text-red-700 dark:text-red-300">{{ retry.error_message }}</p>{% endif %}</li>{% endfor %}</ol>{% else %}<p class="px-5 py-8 text-sm text-slate-600 dark:text-slate-400">No manual retries have been recorded.</p>{% endif %}
+    </section>
+</div>
+{% endblock %}

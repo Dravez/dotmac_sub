@@ -1,6 +1,6 @@
 # Automation Center source of truth
 
-Status: reusable rule builder runtime foundation
+Status: reusable rule builder with operator run history and retry
 
 Decision owner: Michael
 
@@ -60,8 +60,9 @@ It never performs generic ORM mutation.
 
 Execution is idempotent by event ID, rule version and step position. A durable
 run and step ledger records matched, skipped, succeeded, failed and blocked
-outcomes. Retry does not repeat completed steps. Sensitive event and action
-values are not copied into the ledger.
+outcomes. Step details retain a safe explanation and stable error code. The
+admin run view shows the affected record, ordered steps, and retry history; it
+does not display event payload values.
 
 Planning, step claim, module action, and step completion are separate committed
 boundaries. The module command receives the stable event/version/step key and
@@ -69,6 +70,14 @@ must implement the idempotency contract in its own source-of-truth service. A
 crash after a side effect therefore retries the same module command identity;
 the Automation Center never attempts to reverse or reconstruct another
 module's mutation.
+
+An administrator with `automation:run:redrive` may continue a failed run from
+its first unfinished step. The command reads the exact durable event evidence,
+pins the run's original immutable rule version, and skips every step already
+recorded as succeeded. Pausing or editing the rule affects future events and
+does not change this run. Each manual retry stores the administrator, start
+time, final result, and any safe error explanation. Automatic event delivery
+retries remain managed by the event dispatcher.
 
 ## Authorization
 
@@ -83,10 +92,12 @@ disabling a registered capability makes affected rules ineligible to execute.
 
 The admin shell is available at `/admin/automation`. Opening the hub requires
 `automation:hub:read`; its rule and execution sections independently require
-`automation:rule:read` and `automation:run:read`. The initial shell is
-read-only. It exposes registry readiness, central definitions, run evidence,
-and legacy ownership links without implying that rule authoring is available
-before a complete module adapter exists.
+`automation:rule:read` and `automation:run:read`. Run details require
+`automation:run:read`; continuing a failed run additionally requires
+`automation:run:redrive`. The run detail shows the affected record, rule
+version, timestamps, each action step and its attempts, safe failure guidance,
+and administrator retry outcomes. A customer record link is shown when the
+target type has a known admin destination.
 
 The reusable builder currently admits the Support Ticket created trigger and
 its declared priority, customer, ticket-type, channel, and region facts.
@@ -132,7 +143,8 @@ writers for the same decision.
 ## Deployment
 
 Schema changes are additive. Permissions are seeded as assignable and are not
-granted broadly. The runtime handler is registered for the reviewed Support
-Ticket trigger; it only acts on rules an authorized administrator has
-explicitly activated. Deployment creates no rules and produces no new business
-side effects by itself.
+granted broadly. Migration 625 adds safe error explanations and
+actor-attributed retry evidence. The runtime handler is registered for the
+reviewed Support Ticket trigger; it only acts on rules an authorized
+administrator has explicitly activated. Deployment creates no rules and
+produces no new business side effects by itself.

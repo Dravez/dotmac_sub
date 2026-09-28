@@ -284,6 +284,7 @@ DOMAIN = DomainSOT(
                 "automation.capability_registry",
                 "automation.rule_definitions",
                 "events.store",
+                "events.replay_evidence",
             ),
             contract=ServiceContract(
                 concerns=(
@@ -292,6 +293,7 @@ DOMAIN = DomainSOT(
                         role=OwnerRole.APPLICATION_COORDINATOR,
                         input_names=(
                             "durable domain event evidence",
+                            "durable event replay evidence",
                             "published automation rule versions",
                             "declared automation runtime adapters",
                             "tenant-scoped automation run evidence",
@@ -306,6 +308,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "EventStore identity, type, payload, actor, and durable "
                             "handler retry evidence"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="durable event replay evidence",
+                        owner="events.replay_evidence",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "the typed replay envelope for the exact EventStore event "
+                            "and expected event type"
                         ),
                     ),
                     AuthorityInput(
@@ -330,7 +341,10 @@ DOMAIN = DomainSOT(
                         name="tenant-scoped automation run evidence",
                         owner="automation.execution",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                        source="AutomationRun and AutomationStepRun rows",
+                        source=(
+                            "AutomationRun, AutomationStepRun, and actor-attributed "
+                            "AutomationRunRetry rows"
+                        ),
                     ),
                 ),
                 transaction=TransactionContract(
@@ -342,15 +356,17 @@ DOMAIN = DomainSOT(
                     ),
                     locking=(
                         "rule-version/event uniqueness converges replay; run and step "
-                        "rows are locked before claim and completion transitions"
+                        "rows are locked before claim and completion transitions; a "
+                        "failed run is locked while one retry attempt is recorded"
                     ),
                     idempotency=(
                         "each action receives the stable event/version/step key and "
                         "module adapters must honor their declared idempotency contract"
                     ),
                     retries=(
-                        "EventStore retries only the failed automation handler; "
-                        "succeeded steps are skipped and expired claims are reclaimed"
+                        "an administrator retry is actor-attributed and pinned to the "
+                        "original rule version; succeeded steps are skipped, failed "
+                        "steps are retried, and expired claims are reclaimed"
                     ),
                 ),
                 errors=ErrorContract(
@@ -359,7 +375,24 @@ DOMAIN = DomainSOT(
                         "automation.execution.trigger_target_mismatch",
                         "automation.execution.step_not_found",
                         "automation.execution.run_not_found",
+                        "automation.execution.run_rule_not_found",
                         "automation.execution.action_failed",
+                        "automation.execution.blocked_after_failure",
+                        "automation.execution.run_not_retryable",
+                        "automation.execution.run_version_unavailable",
+                        "automation.execution.run_has_no_retryable_steps",
+                        "automation.execution.retry_not_found",
+                        "automation.execution.retry_command_conflict",
+                        "automation.execution.retry_trigger_mismatch",
+                        "automation.execution.retry_event_identity_invalid",
+                        "automation.execution.retry_target_mismatch",
+                        "automation.execution.retry_event_mismatch",
+                        "automation.execution.retry_trigger_unavailable",
+                        "automation.execution.retry_runtime_unavailable",
+                        "automation.execution.retry_event_type_invalid",
+                        "automation.execution.step_busy",
+                        "automation.execution.retry_failed",
+                        "automation.execution.run_history_query_invalid",
                         *owner_command_boundary_error_codes("automation.execution"),
                     ),
                     mapping_owner="automation event and web adapters",
@@ -373,8 +406,8 @@ DOMAIN = DomainSOT(
                     state=AuthorityMigrationState.NATIVE,
                     new_owner="automation.execution",
                     verification=(
-                        "automation runtime, handler registration, RLS, replay, and "
-                        "static adapter registry tests"
+                        "automation run detail, actor-attributed retry, handler "
+                        "registration, RLS, replay, and static adapter registry tests"
                     ),
                     cutover_gate=(
                         "a module receives no automation traffic until its trigger, "
@@ -392,6 +425,7 @@ DOMAIN = DomainSOT(
                 ),
                 test_refs=(
                     "tests/test_automation_runtime.py",
+                    "tests/test_event_replay_evidence.py",
                     "tests/architecture/test_automation_runtime_boundary.py",
                 ),
             ),
