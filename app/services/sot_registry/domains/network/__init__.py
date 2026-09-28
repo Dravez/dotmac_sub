@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_registry.domains.network.device_operations import (
     SERVICES as DEVICE_OPERATIONS_SERVICES,
 )
@@ -67,4 +72,155 @@ DOMAIN = DomainSOT(
     rule="Pollers and map collectors write observations; the fiber-topology "
     "owner validates identity and connectivity; network resolvers decide "
     "state; event services decide consequences.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="provisioning.ont_commissioning",
+                label="ONT commissioning",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Commissioning combines device and assignment checks owned by network services; Center steps are not registered.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.ont_commissioning_verification",
+                label="Commissioning verification",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Verification uses device readback evidence and has no approved Center trigger or action.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.commissioned_ont_expiry_cleanup",
+                label="Commissioned-ONT expiry cleanup",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expiry cleanup is a protected network maintenance job, not an editable customer rule.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.ont_intent_reconciliation",
+                label="ONT intent reconciliation",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reconciliation compares network intent with device state and remains in the existing network owner.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.overdue_ont_hold_alert",
+                label="Overdue ONT hold alert",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="The current alert has no registered Center trigger or notification action.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.ont_status_signal_collection",
+                label="ONT status and signal collection",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Device polling is an existing network observation process and is not a customer rule action.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.ont_service_configuration",
+                label="ONT service configuration",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Applying service settings changes a device and requires the existing assignment, authorization, and readback checks.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.ont_firmware_upgrade",
+                label="ONT firmware upgrade",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Firmware changes are privileged device operations and have no approved Center action.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.olt_firmware_upgrade_rollback",
+                label="OLT firmware upgrade or rollback",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Firmware changes are privileged device operations and remain outside customer rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.olt_connection_retry",
+                label="OLT connection retry",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Connection recovery remains in the network retry owner and is not configurable in the Center.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.olt_mac_harvesting",
+                label="OLT MAC harvesting",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="This is a network inventory observation job; Center schedule and device actions are not registered.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.olt_profile_synchronization",
+                label="OLT profile synchronization",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Profile synchronization changes device state and remains controlled by network services.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.device_configuration_backups",
+                label="Device configuration backups",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Backup scheduling and retention are protected operations, not customer-configurable rules.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.nas_backup_retention",
+                label="NAS backup retention",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Retention cleanup remains a protected maintenance job and has no Center rule contract.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.router_configuration_readback",
+                label="Router configuration read-back",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Router read-back is a protected observation process; the Center cannot yet schedule it.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.router_source_of_truth_drift_audit",
+                label="Router configuration drift audit",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Drift detection remains a read-only network audit and has no Center schedule trigger.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.mikrotik_nas_vlan_readback",
+                label="MikroTik NAS VLAN read-back",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="VLAN read-back is a network observation process and is not an editable business rule.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.genieacs_device_synchronization",
+                label="GenieACS device synchronization",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Device synchronization remains managed by the existing integration and has no Center trigger/action contract.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.genieacs_command_reconciliation",
+                label="GenieACS command reconciliation",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Command reconciliation is protected device work and is not a configurable customer rule.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.tr069_health_runtime_refresh",
+                label="TR-069 health and runtime refresh",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Health and runtime refresh remain part of the existing device integration, with no Center schedule trigger.",
+            ),
+            AutomationCatalogItem(
+                key="provisioning.tr069_cleanup_metrics",
+                label="TR-069 cleanup and metrics",
+                group="Network provisioning",
+                state=AutomationCatalogState.unavailable,
+                explanation="Cleanup and metrics are protected maintenance work and have no Center rule contract.",
+            ),
+        ),
+    ),
 )

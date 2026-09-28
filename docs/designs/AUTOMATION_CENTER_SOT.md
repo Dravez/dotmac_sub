@@ -30,12 +30,13 @@ owning domain. The code change must be deployed before the capability becomes
 available for rule activation.
 
 Owner declarations also publish a typed business-automation catalogue. The
-central page shows whether each listed Support or communications item is
-ready for new rules, still managed on its existing page, unavailable because
-it has no safe Center contract yet, or retired. Unavailable and retired items
-include a plain-language reason. An item is ready only when its declared
-trigger and actions have registered runtime support. The catalogue is
-read-only: it does not activate rules or change existing automation.
+central page shows whether each listed Support, communications, billing,
+subscription, usage/access, provisioning, or customer-identity item is ready
+for new rules, still managed on its existing page, unavailable because it has
+no safe Center contract yet, or retired. Unavailable and retired items include
+a plain-language reason. An item is ready only when its declared trigger and
+actions have registered runtime support. The catalogue is read-only: it does
+not activate rules or change existing automation.
 
 Every trigger declares the exact payload fields carrying tenant and target
 identity. Events without both identities cannot be registered for automation;
@@ -141,9 +142,12 @@ The current ticket-assignment and ticket-creation automation pages are listed
 as existing ownership links. Their rules are not moved by this implementation
 slice. The live rule-by-rule check supplies current conflict evidence when an
 Automation Center rule is activated. The first catalogue slice covers Support,
-Team Inbox, Messaging, and service-level automation. Items without a safe
-Center contract remain unavailable with an explanation; retired items require
-a reviewed developer change before becoming available.
+Team Inbox, Messaging, and service-level automation. The second adds billing,
+subscriptions, usage/access, provisioning/activation, and customer-identity
+inventory. Items without a safe Center contract remain unavailable with an
+explanation; retired items require a reviewed developer change before becoming
+available. This inventory change does not move existing schedules or rules or
+alter their behavior.
 
 ## Legacy coexistence
 

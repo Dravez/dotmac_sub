@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -2369,4 +2374,85 @@ DOMAIN = DomainSOT(
     rule="Billing, FUP, and admin actions resolve the desired access outcome "
     "once, map it to RADIUS state once, then let enforcement apply the "
     "network-side change.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="usage.radius_accounting_import",
+                label="RADIUS accounting import",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing importer reads network usage on its configured schedule; no Center schedule trigger or import action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.metering",
+                label="Usage metering",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage totals are written by the existing metering owner; rules cannot yet start or change metering safely.",
+            ),
+            AutomationCatalogItem(
+                key="usage.rating",
+                label="Usage rating",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage rating remains an existing scheduled owner process and has no Center trigger or action contract.",
+            ),
+            AutomationCatalogItem(
+                key="usage.fup_evaluation",
+                label="Fair Usage Policy evaluation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="FUP decisions can change service access and remain under the existing policy and enforcement owners.",
+            ),
+            AutomationCatalogItem(
+                key="usage.expired_fup_removal",
+                label="Expired FUP removal",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expiry and removal continue through the FUP owner; no Automation Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.data_bundle_warning",
+                label="Expiring data-bundle warning",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Warning timing and delivery remain managed by the existing usage and notification owners.",
+            ),
+            AutomationCatalogItem(
+                key="access.stale_session_cleanup",
+                label="Stale session cleanup",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session cleanup is a protected maintenance job and has no business-rule action in the Center.",
+            ),
+            AutomationCatalogItem(
+                key="access.active_session_reconstruction",
+                label="Active-session reconstruction",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session reconstruction repairs access observations through its existing owner; it is not a configurable action.",
+            ),
+            AutomationCatalogItem(
+                key="access.device_login_radius_sync",
+                label="Device-login RADIUS synchronization",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The synchronization process remains in the existing access service and has no Center trigger/action contract.",
+            ),
+            AutomationCatalogItem(
+                key="access.enforcement_reconciliation",
+                label="Access enforcement reconciliation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reconciliation may restrict or restore access and remains protected by the access lifecycle owner.",
+            ),
+            AutomationCatalogItem(
+                key="access.consistency_audits",
+                label="Access consistency audits",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="These audits remain in their existing schedule; the Center does not yet provide approved schedule rules.",
+            ),
+        ),
+    ),
 )

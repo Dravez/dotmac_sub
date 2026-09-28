@@ -15,10 +15,15 @@ settings, capability switches, credentials, or active rules.
   starts it only after a user action, or has retired it.
 
 The Automation Center also has an owner-declared catalogue for Support, Team
-Inbox, Messaging, and service-level entries. Its page status describes whether
+Inbox, Messaging, service-level, billing, subscription, usage/access,
+provisioning, and customer-identity entries. Its page status describes whether
 an item can be used for a new Center rule, remains on its current page, lacks a
 safe Center contract, or has been retired. It does not change whether existing
-automation is enabled in a live environment.
+automation is enabled in a live environment. The billing and customer-service
+catalogue covers recurring billing and collections, subscription changes,
+usage and access, provisioning and activation, and identity-related account
+flows, including network provisioning and device operations. Other identity
+maintenance and unrelated business areas remain for later batches.
 
 ## 1. Billing, invoices, and collections
 
