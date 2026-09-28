@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.custom_field_contracts import (
     CustomFieldDomainCapabilities,
     CustomFieldTargetCapability,
@@ -60,6 +65,66 @@ DOMAIN = DomainSOT(
     "handlers request outcomes from these owners and translate domain "
     "errors at the boundary. CRM and dotmac_mkt have no customer-lifecycle "
     "or attribution authority.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="sales.funding_to_implementation_handoff",
+                label="Funding-to-implementation handoff",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="Funding and sales-order transitions remain in their current owners; no Center trigger/action contract is registered.",
+            ),
+            AutomationCatalogItem(
+                key="sales.verified_implementation_release",
+                label="Verified implementation release",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="Release requires verified project evidence and remains governed by the sales fulfilment owner.",
+            ),
+            AutomationCatalogItem(
+                key="sales.service_order_release",
+                label="Service-order release",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="The release step changes provisioning state and remains in the existing sales-to-provisioning workflow.",
+            ),
+            AutomationCatalogItem(
+                key="sales.customer_experience_handoff",
+                label="Customer-experience handoff",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="Customer acceptance handoff follows the service-order completion owner; Center support is not registered.",
+            ),
+            AutomationCatalogItem(
+                key="sales.customer_acceptance_completion",
+                label="Customer acceptance completion",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="Fulfilment completion requires the canonical handoff evidence and cannot yet be configured as a Center action.",
+            ),
+            AutomationCatalogItem(
+                key="sales.overdue_acceptance_flag",
+                label="Overdue acceptance flag",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="The durable timer remains the owner of overdue acceptance; Center timer triggers are not available.",
+            ),
+            AutomationCatalogItem(
+                key="sales.referral_qualification",
+                label="Referral qualification",
+                group="Sales",
+                state=AutomationCatalogState.unavailable,
+                explanation="Referral eligibility and rewards remain in the referral owner; no Center trigger or reward action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="sales.retired_crm_quote_referral_refresh",
+                label="Legacy quote and referral CRM refresh",
+                group="Sales",
+                state=AutomationCatalogState.retired,
+                explanation="These legacy mirror tasks no longer contact CRM; developers must restore and review the integration before use.",
+            ),
+        ),
+    ),
     custom_fields=CustomFieldDomainCapabilities(
         targets=(
             CustomFieldTargetCapability(

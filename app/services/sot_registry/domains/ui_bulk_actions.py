@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -179,4 +184,22 @@ DOMAIN = DomainSOT(
     "command owners resolve the scope again, require impact preview and "
     "confirmation, reject membership or eligibility drift, and report "
     "structured outcomes.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="reports.manual_export_jobs",
+                label="Manual export jobs",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="Export requests remain user-started background work; the Center has no approved job-start action.",
+            ),
+            AutomationCatalogItem(
+                key="reports.import_jobs",
+                label="Import jobs",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="Import jobs require validated mappings and row-level outcomes; those safeguards are not yet registered as Center actions.",
+            ),
+        ),
+    ),
 )

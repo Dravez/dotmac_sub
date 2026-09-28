@@ -242,6 +242,20 @@ DOMAIN = DomainSOT(
                 state=AutomationCatalogState.unavailable,
                 explanation="Payment and service-order evidence are checked by existing owners; no Center trigger/action is registered.",
             ),
+            AutomationCatalogItem(
+                key="reports.invoice_pdf_generation",
+                label="Invoice PDF generation",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="PDF generation remains a permission-checked invoice export job; the Center has no approved document-generation action.",
+            ),
+            AutomationCatalogItem(
+                key="financial.mrr_snapshot",
+                label="MRR snapshot",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="The monthly recurring revenue snapshot remains an existing reporting job and has no Center schedule trigger.",
+            ),
         ),
     ),
 )

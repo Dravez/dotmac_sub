@@ -31,7 +31,8 @@ available for rule activation.
 
 Owner declarations also publish a typed business-automation catalogue. The
 central page shows whether each listed Support, communications, billing,
-subscription, usage/access, provisioning, or customer-identity item is ready
+subscription, usage/access, provisioning, customer-identity, network, sales,
+field-operations, integration, reporting, export, or maintenance item is ready
 for new rules, still managed on its existing page, unavailable because it has
 no safe Center contract yet, or retired. Unavailable and retired items include
 a plain-language reason. An item is ready only when its declared trigger and
@@ -146,8 +147,10 @@ Team Inbox, Messaging, and service-level automation. The second adds billing,
 subscriptions, usage/access, provisioning/activation, and customer-identity
 inventory. Items without a safe Center contract remain unavailable with an
 explanation; retired items require a reviewed developer change before becoming
-available. This inventory change does not move existing schedules or rules or
-alter their behavior.
+available. The third adds network monitoring, sales fulfilment, field and ERP
+workflows, integrations, reports and exports, and maintenance inventory,
+including retired items with explanations. These inventory changes do not
+move existing schedules or rules or alter their behavior.
 
 ## Legacy coexistence
 

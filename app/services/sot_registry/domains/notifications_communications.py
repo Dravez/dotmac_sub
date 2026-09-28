@@ -5059,6 +5059,13 @@ DOMAIN = DomainSOT(
                 state=AutomationCatalogState.retired,
                 explanation="This automation is retired. Developers must restore and review its code before it can become available.",
             ),
+            AutomationCatalogItem(
+                key="reports.ncc_weekly_report",
+                label="NCC weekly report",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="The report delivery owner controls its local-time schedule and duplicate-send protection; the Center cannot reschedule it yet.",
+            ),
         ),
     ),
 )

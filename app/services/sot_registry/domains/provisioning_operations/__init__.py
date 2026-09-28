@@ -103,6 +103,20 @@ DOMAIN = DomainSOT(
                 state=AutomationCatalogState.unavailable,
                 explanation="Bulk activation is an operator-started process with bounded migration safeguards, not a reusable per-customer rule action.",
             ),
+            AutomationCatalogItem(
+                key="field.approved_material_request_export",
+                label="Approved material request export",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="ERP delivery follows the approved field-request owner and integration outbox; a Center action is not registered.",
+            ),
+            AutomationCatalogItem(
+                key="field.material_request_cancellation_export",
+                label="Material-request cancellation export",
+                group="Field operations and ERP",
+                state=AutomationCatalogState.unavailable,
+                explanation="Cancellation delivery is governed by the field request and ERP integration owners; no Center action is registered.",
+            ),
         ),
     ),
 )

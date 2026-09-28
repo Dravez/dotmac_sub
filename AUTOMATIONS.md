@@ -16,14 +16,13 @@ settings, capability switches, credentials, or active rules.
 
 The Automation Center also has an owner-declared catalogue for Support, Team
 Inbox, Messaging, service-level, billing, subscription, usage/access,
-provisioning, and customer-identity entries. Its page status describes whether
-an item can be used for a new Center rule, remains on its current page, lacks a
-safe Center contract, or has been retired. It does not change whether existing
-automation is enabled in a live environment. The billing and customer-service
-catalogue covers recurring billing and collections, subscription changes,
-usage and access, provisioning and activation, and identity-related account
-flows, including network provisioning and device operations. Other identity
-maintenance and unrelated business areas remain for later batches.
+provisioning, customer-identity, network-monitoring, sales, field operations,
+integrations, reporting, exports, and maintenance entries. Its page status
+describes whether an item can be used for a new Center rule, remains on its
+current page, lacks a safe Center contract, or has been retired. It does not
+change whether existing automation is enabled in a live environment. These
+catalogue batches inventory current processes; they do not move existing rules
+or scheduled jobs into the Center.
 
 ## 1. Billing, invoices, and collections
 

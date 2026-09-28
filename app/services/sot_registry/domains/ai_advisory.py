@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -1028,4 +1033,15 @@ DOMAIN = DomainSOT(
     "owning domain service, which applies its own guards, events, and "
     "audit. ai.intake is the separate bounded customer-message classifier; "
     "it may select a destination service team but never an agent or queue position.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="maintenance.expired_ai_insights",
+                label="Expired AI operational insights",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Insight cleanup is a protected background task; it does not have a customer-rule trigger or action in the Center.",
+            ),
+        ),
+    ),
 )
