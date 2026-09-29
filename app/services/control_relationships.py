@@ -225,6 +225,12 @@ HANDLER_CONTROLS: dict[str, HandlerControl] = {
     "ReferralHandler": HandlerControl(
         "ReferralHandler", HandlerStage.state, 30, ("referral_qualification",)
     ),
+    "LeadIntakeHandler": HandlerControl(
+        "LeadIntakeHandler",
+        HandlerStage.state,
+        35,
+        ("classified_inbox_lead_materialization",),
+    ),
     "PrepaidRenewalHandler": HandlerControl(
         "PrepaidRenewalHandler",
         HandlerStage.state,
@@ -409,6 +415,10 @@ def handler_event_types(handler_name: str) -> frozenset[str] | None:
         from app.services.events.handlers.referral import REFERRAL_QUALIFY_EVENTS
 
         return frozenset(item.value for item in REFERRAL_QUALIFY_EVENTS)
+    if handler_name == "LeadIntakeHandler":
+        from app.services.events.handlers.lead_intake import HANDLED_EVENT_TYPES
+
+        return frozenset(item.value for item in HANDLED_EVENT_TYPES)
     raise ControlRelationshipError(
         f"Event handler {handler_name} has no executable event-scope declaration"
     )

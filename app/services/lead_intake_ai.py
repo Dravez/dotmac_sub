@@ -9,6 +9,7 @@ from app.db import finish_read_transaction
 from app.models.team_inbox import InboxMessage
 from app.schemas.lead_intake import (
     AiLeadIntakeClassification,
+    LeadCandidateAttribution,
     LeadIntakeIntent,
     LeadIntakePartyType,
 )
@@ -63,6 +64,8 @@ def apply_shared_classification(
     classification: AiLeadIntakeClassification,
     provider_label: str | None,
     model_label: str | None,
+    attribution: LeadCandidateAttribution | None = None,
+    allow_invitation: bool = True,
 ) -> lead_intake.InvitationOutcome:
     """Apply the shared CRM classifier's sales-only handoff.
 
@@ -79,6 +82,8 @@ def apply_shared_classification(
             classification=classification,
             provider_label=provider_label,
             model_label=model_label,
+            attribution=attribution or LeadCandidateAttribution(),
+            allow_invitation=allow_invitation,
         ),
     )
     if outcome.replayed:
@@ -125,7 +130,11 @@ def apply_shared_classification(
 
 
 def apply_inbox_intake_handoff(
-    db: Session, *, conversation_id: UUID, message_id: UUID
+    db: Session,
+    *,
+    conversation_id: UUID,
+    message_id: UUID,
+    allow_invitation: bool = True,
 ) -> lead_intake.InvitationOutcome | None:
     """Apply a classified sales result persisted by the shared intake owner.
 
@@ -169,6 +178,13 @@ def apply_inbox_intake_handoff(
         return None
     provider_label = str(metadata.get("ai_intake_provider") or "")[:80] or None
     model_label = str(metadata.get("ai_intake_model") or "")[:160] or None
+    raw_attribution = metadata.get("meta_referral_observation")
+    try:
+        attribution = LeadCandidateAttribution.model_validate(
+            raw_attribution if isinstance(raw_attribution, dict) else {}
+        )
+    except ValueError:
+        attribution = LeadCandidateAttribution()
     finish_read_transaction(db)
     return apply_shared_classification(
         db,
@@ -177,6 +193,8 @@ def apply_inbox_intake_handoff(
         classification=classification,
         provider_label=provider_label,
         model_label=model_label,
+        attribution=attribution,
+        allow_invitation=allow_invitation,
     )
 
 

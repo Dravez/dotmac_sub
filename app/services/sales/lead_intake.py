@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID, uuid5
@@ -25,6 +25,7 @@ from app.models.lead_intake import (
 )
 from app.models.party import (
     PartyContactConsentStatus,
+    PartyContactPoint,
     PartyContactPointType,
     PartyContactVerificationStatus,
     PartyRelationshipType,
@@ -42,11 +43,13 @@ from app.models.service_team import ServiceTeam
 from app.models.system_user import SystemUser
 from app.models.team_inbox import (
     InboxConversation,
+    InboxConversationParticipant,
     InboxMessage,
     InboxParticipantRelationship,
 )
 from app.schemas.lead_intake import (
     AiLeadIntakeClassification,
+    LeadCandidateAttribution,
     LeadIntakeSubmission,
     LeadIntakeTemplateDraft,
     ResolvedLeadIntakeAddress,
@@ -83,17 +86,17 @@ _TEMPLATE = OwnerCommandDefinition(
 )
 _ASSESS = OwnerCommandDefinition(
     owner=OWNER,
-    concern="sales lead eligibility and invitation lifecycle",
+    concern="classified Inbox sales candidate materialization and invitation lifecycle",
     name="assess_inbound_lead_intake",
 )
 _INVITATION = OwnerCommandDefinition(
     owner=OWNER,
-    concern="sales lead eligibility and invitation lifecycle",
+    concern="classified Inbox sales candidate materialization and invitation lifecycle",
     name="mutate_lead_intake_invitation",
 )
 _SUBMISSION = OwnerCommandDefinition(
     owner=OWNER,
-    concern="atomic Inbox form to Party and Lead conversion",
+    concern="optional Inbox form enrichment and legacy form conversion",
     name="submit_lead_intake_form",
 )
 
@@ -147,6 +150,10 @@ class AssessInboundCommand:
     classification: AiLeadIntakeClassification
     provider_label: str | None = None
     model_label: str | None = None
+    attribution: LeadCandidateAttribution = field(
+        default_factory=LeadCandidateAttribution
+    )
+    allow_invitation: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +174,30 @@ class InvitationOutcome:
     invitation_message: str | None = None
     clarification_question: str | None = None
     replayed: bool = False
+    lead_id: UUID | None = None
+    party_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateMaterialization:
+    lead_id: UUID
+    party_id: UUID
+    representative_party_id: UUID | None
+    party_contact_point_id: UUID
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ClassifiedLeadCandidateDrift:
+    """PII-free evidence for a final sales classification missing its Lead link."""
+
+    conversation_id: UUID
+    message_id: UUID
+    classified_at: datetime
+    classification: AiLeadIntakeClassification
+    provider_label: str | None
+    model_label: str | None
+    attribution: LeadCandidateAttribution
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,7 +578,9 @@ def ai_intake_enabled(db: Session, channel_type: str) -> bool:
     )
 
 
-def _unknown_conversation(db: Session, conversation_id: UUID) -> InboxConversation:
+def _unknown_conversation(
+    db: Session, conversation_id: UUID, *, allow_resolved: bool = False
+) -> InboxConversation:
     conversation = db.scalars(
         select(InboxConversation)
         .where(
@@ -562,7 +595,9 @@ def _unknown_conversation(db: Session, conversation_id: UUID) -> InboxConversati
             "Inbox conversation was not found.",
             kind="not_found",
         )
-    eligibility = _manual_invitation_eligibility(db, conversation)
+    eligibility = _manual_invitation_eligibility(
+        db, conversation, allow_resolved=allow_resolved
+    )
     if not eligibility.eligible:
         code = (
             "channel_not_supported"
@@ -594,8 +629,9 @@ def _manual_invitation_eligibility(
     conversation: InboxConversation,
     *,
     verify_customer_identity: bool = True,
+    allow_resolved: bool = False,
 ) -> ManualInvitationEligibility:
-    if conversation.status == "resolved":
+    if conversation.status == "resolved" and not allow_resolved:
         return ManualInvitationEligibility(
             False, "Reopen the conversation before sending a Lead intake form."
         )
@@ -694,6 +730,261 @@ def _message_context(message: InboxMessage) -> tuple[str, str, str]:
     return provider, scope, endpoint
 
 
+def _candidate_display_name(conversation: InboxConversation) -> str:
+    metadata = dict(conversation.metadata_ or {})
+    observed = " ".join(str(metadata.get("contact_name") or "").split())
+    subject = " ".join(str(conversation.subject or "").split())
+    endpoint = " ".join(str(conversation.contact_address or "").split())
+    return (observed or subject or endpoint or "Inbox prospect")[:200]
+
+
+def _candidate_template(
+    db: Session, party_type: LeadIntakePartyType
+) -> LeadIntakeTemplate | None:
+    return db.scalars(
+        select(LeadIntakeTemplate).where(
+            LeadIntakeTemplate.party_type == party_type.value,
+            LeadIntakeTemplate.status == LeadIntakeTemplateStatus.published.value,
+        )
+    ).one_or_none()
+
+
+def _materialize_lead_candidate(
+    db: Session,
+    *,
+    command: AssessInboundCommand,
+    conversation: InboxConversation,
+    message: InboxMessage,
+) -> CandidateMaterialization:
+    existing_link = conversation_lead_relationships.active_link(db, conversation.id)
+    if existing_link is not None:
+        participant = db.scalar(
+            select(InboxConversationParticipant).where(
+                InboxConversationParticipant.conversation_id == conversation.id,
+                InboxConversationParticipant.party_contact_point_id.is_not(None),
+            )
+        )
+        if participant is None or participant.party_contact_point_id is None:
+            raise _error(
+                "lead_endpoint_binding_missing",
+                "The existing Inbox Lead has no exact endpoint binding.",
+            )
+        return CandidateMaterialization(
+            lead_id=existing_link.lead_id,
+            party_id=existing_link.party_id,
+            representative_party_id=None,
+            party_contact_point_id=participant.party_contact_point_id,
+            created=False,
+        )
+
+    party_type = LeadIntakePartyType(command.classification.party_type.value)
+    provider, scope, endpoint = _message_context(message)
+    observed_name = _candidate_display_name(conversation)
+    representative_party_id: UUID | None = None
+    if party_type is LeadIntakePartyType.organization:
+        lead_party = party_service.create_party(
+            db,
+            party_id=uuid5(conversation.id, "classified-organization-party"),
+            party_type=PartyType.organization,
+            display_name=observed_name,
+            metadata={
+                "profile_version": 1,
+                "identity_managed_by": "sub",
+                "profile_completeness": "provisional",
+                "origin_conversation_id": str(conversation.id),
+            },
+        )
+        contact_owner = lead_party
+    else:
+        lead_party = party_service.create_party(
+            db,
+            party_id=uuid5(conversation.id, "classified-person-party"),
+            party_type=PartyType.person,
+            display_name=observed_name,
+            metadata={
+                "profile_version": 1,
+                "identity_managed_by": "sub",
+                "profile_completeness": "provisional",
+                "origin_conversation_id": str(conversation.id),
+            },
+        )
+        contact_owner = lead_party
+    party_service.ensure_role(
+        db,
+        party_id=lead_party.id,
+        role_type=PartyRoleType.prospect,
+        status=PartyRoleStatus.active,
+        source=OWNER,
+    )
+    contact_point = party_service.add_contact_point(
+        db,
+        party_id=contact_owner.id,
+        channel_type=PartyContactPointType(conversation.channel_type),
+        normalized_value=endpoint,
+        display_value=endpoint,
+        scope_key=f"{provider}:{scope}"
+        if conversation.channel_type
+        in {
+            PartyContactPointType.facebook_messenger.value,
+            PartyContactPointType.instagram_dm.value,
+        }
+        else "default",
+        provider=provider
+        if conversation.channel_type
+        in {
+            PartyContactPointType.facebook_messenger.value,
+            PartyContactPointType.instagram_dm.value,
+        }
+        else None,
+        provider_account_id=scope
+        if conversation.channel_type
+        in {
+            PartyContactPointType.facebook_messenger.value,
+            PartyContactPointType.instagram_dm.value,
+        }
+        else None,
+        external_subject_id=endpoint
+        if conversation.channel_type
+        in {
+            PartyContactPointType.facebook_messenger.value,
+            PartyContactPointType.instagram_dm.value,
+        }
+        else None,
+        is_primary=True,
+        verification_status=PartyContactVerificationStatus.unverified,
+        consent_status=PartyContactConsentStatus.unknown,
+        metadata={
+            "captured_by": OWNER,
+            "conversation_id": str(conversation.id),
+            "profile_completeness": "provisional",
+        },
+    )
+    template = _candidate_template(db, party_type)
+    attribution = command.attribution
+    fingerprint = hashlib.sha256(
+        (
+            f"{conversation.id}:{message.id}:{party_type.value}:"
+            f"{command.classification.intent.value}"
+        ).encode()
+    ).hexdigest()
+    lead = lifecycle.create_party_lead(
+        db,
+        lead_id=uuid5(conversation.id, "classified-inbox-lead"),
+        party_id=lead_party.id,
+        title=observed_name,
+        lead_source=_lead_source(conversation.channel_type),
+        binding_source=OWNER,
+        binding_reason=(
+            "Party created atomically from a final Inbox AI sales classification"
+        ),
+        origin_capture={
+            "capture_method": LeadCaptureMethod.inbox_classification.value,
+            "source_platform": LeadSourcePlatform.team_inbox.value,
+            "source_interaction_id": f"inbox-message:{message.id}",
+            "capture_fingerprint": fingerprint,
+            "external_ad_id": attribution.external_ad_id,
+            "external_click_id": attribution.campaign_ref,
+            "capture_source": "ai.intake",
+            "capture_reason": (
+                "Final shared AI intake result classified the Inbox conversation "
+                "as a sales prospect"
+            ),
+        },
+        metadata={
+            "origin_conversation_id": str(conversation.id),
+            "origin_message_id": str(message.id),
+            "channel_type": conversation.channel_type,
+            "profile_completeness": "provisional",
+            "ai_intent": command.classification.intent.value,
+            "ai_intent_confidence": command.classification.intent_confidence,
+            "ai_party_type": party_type.value,
+            "ai_party_type_confidence": (command.classification.party_type_confidence),
+            "meta_referral_source": attribution.referral_source,
+            "meta_referral_type": attribution.referral_type,
+            "representative_party_id": (
+                str(representative_party_id) if representative_party_id else None
+            ),
+        },
+        owner_agent_id=template.owner_system_user_id if template else None,
+        pipeline_id=template.pipeline_id if template else None,
+        stage_id=template.stage_id if template else None,
+    )
+    team_inbox_participants.bind_endpoint_to_contact_point(
+        db,
+        team_inbox_participants.BindEndpointContactPointCommand(
+            conversation_id=conversation.id,
+            channel_type=conversation.channel_type,
+            normalized_endpoint=endpoint,
+            provider_account_scope=scope,
+            party_contact_point_id=contact_point.id,
+            relationship_type=InboxParticipantRelationship.contact,
+            source=OWNER,
+            reason="Final AI sales classification established prospect provenance",
+        ),
+    )
+    link = conversation_lead_relationships.link_conversation_lead_participant(
+        db,
+        conversation_lead_relationships.ConversationLeadLinkCommand(
+            context=command.context,
+            conversation_id=conversation.id,
+            lead_id=lead.id,
+            party_id=lead_party.id,
+            actor_person_id=None,
+            source=(
+                conversation_lead_relationships.ConversationLeadLinkSource.ai_lead_candidate
+            ),
+            reason="Final AI sales classification created this Inbox Lead",
+        ),
+    )
+    if template is not None:
+        team_inbox_operations.route_to_service_team(
+            db,
+            conversation=conversation,
+            service_team_id=template.target_service_team_id,
+            source=OWNER,
+        )
+    team_inbox_operations.create_internal_note(
+        db,
+        conversation=conversation,
+        body=f"Sales Lead {lead.id} was created from the classified Inbox enquiry.",
+        actor_person_id=None,
+    )
+    emit_event(
+        db,
+        EventType.lead_created,
+        {
+            "lead_id": str(lead.id),
+            "party_id": str(lead_party.id),
+            "status": lead.status,
+            "lead_source": lead.lead_source,
+            "origin_conversation_id": str(conversation.id),
+        },
+        actor=command.context.actor,
+    )
+    stage_audit_event(
+        db,
+        action="lead_intake.candidate_materialized",
+        entity_type="lead",
+        entity_id=str(lead.id),
+        actor_id=None,
+        request_id=str(command.context.command_id),
+        metadata={
+            "conversation_id": str(conversation.id),
+            "message_id": str(message.id),
+            "party_id": str(lead_party.id),
+            "link_id": str(link.link_id),
+            "party_type": party_type.value,
+        },
+    )
+    return CandidateMaterialization(
+        lead_id=lead.id,
+        party_id=lead_party.id,
+        representative_party_id=representative_party_id,
+        party_contact_point_id=contact_point.id,
+        created=True,
+    )
+
+
 def _new_invitation(
     db: Session,
     *,
@@ -737,7 +1028,9 @@ def _new_invitation(
 
 def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutcome:
     def operation() -> InvitationOutcome:
-        conversation = _unknown_conversation(db, command.conversation_id)
+        conversation = _unknown_conversation(
+            db, command.conversation_id, allow_resolved=True
+        )
         message = db.scalars(
             select(InboxMessage)
             .where(InboxMessage.id == command.message_id)
@@ -753,22 +1046,56 @@ def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutc
                 "The intake trigger must be an inbound message.",
                 kind="invalid",
             )
+        config = _ai_config(db, conversation.channel_type)
+        item = command.classification
+        threshold = float(config.confidence_threshold) if config else 0.75
+        candidate = (
+            _materialize_lead_candidate(
+                db,
+                command=command,
+                conversation=conversation,
+                message=message,
+            )
+            if item.intent.value in QUALIFYING_INTENTS
+            and item.intent_confidence >= threshold
+            and item.party_type.value != "unknown"
+            and item.party_type_confidence >= threshold
+            else None
+        )
         existing = db.scalars(
             select(LeadIntakeAssessment).where(
                 LeadIntakeAssessment.message_id == message.id
             )
         ).one_or_none()
         if existing:
+            existing_invite = db.scalars(
+                select(LeadIntakeInvitation).where(
+                    LeadIntakeInvitation.assessment_id == existing.id,
+                    LeadIntakeInvitation.auto_issued.is_(True),
+                )
+            ).one_or_none()
+            if candidate is not None and existing_invite is not None:
+                existing_invite.lead_id = candidate.lead_id
+                existing_invite.party_id = candidate.party_id
+                existing_invite.representative_party_id = (
+                    candidate.representative_party_id
+                )
+                existing_invite.party_contact_point_id = (
+                    candidate.party_contact_point_id
+                )
             return InvitationOutcome(
-                action=existing.decision, conversation_id=conversation.id, replayed=True
+                action=("lead_exists" if candidate is not None else existing.decision),
+                conversation_id=conversation.id,
+                replayed=True,
+                lead_id=candidate.lead_id if candidate is not None else None,
+                party_id=candidate.party_id if candidate is not None else None,
             )
-        config = _ai_config(db, conversation.channel_type)
-        item = command.classification
-        threshold = float(config.confidence_threshold) if config else 1.0
         decision = LeadIntakeAssessmentDecision.not_eligible
         question = None
         if (
-            not _bool_setting(db, "lead_intake_auto_send_enabled", False)
+            not command.allow_invitation
+            or conversation.status == "resolved"
+            or not _bool_setting(db, "lead_intake_auto_send_enabled", False)
             or config is None
             or not _published_templates_ready(db)
         ):
@@ -816,6 +1143,14 @@ def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutc
         )
         db.add(assessment)
         db.flush()
+        if candidate is not None and not candidate.created:
+            assessment.decision = LeadIntakeAssessmentDecision.not_eligible.value
+            return InvitationOutcome(
+                action="lead_exists",
+                conversation_id=conversation.id,
+                lead_id=candidate.lead_id,
+                party_id=candidate.party_id,
+            )
         if decision is not LeadIntakeAssessmentDecision.invite_issued:
             if decision is LeadIntakeAssessmentDecision.staff_review:
                 team_inbox_operations.create_internal_note(
@@ -825,9 +1160,15 @@ def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutc
                     actor_person_id=None,
                 )
             return InvitationOutcome(
-                action=decision.value,
+                action=(
+                    "lead_created"
+                    if candidate is not None and candidate.created
+                    else decision.value
+                ),
                 conversation_id=conversation.id,
                 clarification_question=question,
+                lead_id=candidate.lead_id if candidate is not None else None,
+                party_id=candidate.party_id if candidate is not None else None,
             )
         existing_invite = db.scalars(
             select(LeadIntakeInvitation).where(
@@ -837,10 +1178,21 @@ def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutc
         ).one_or_none()
         if existing_invite:
             assessment.decision = "not_eligible"
+            if candidate is not None:
+                existing_invite.lead_id = candidate.lead_id
+                existing_invite.party_id = candidate.party_id
+                existing_invite.representative_party_id = (
+                    candidate.representative_party_id
+                )
+                existing_invite.party_contact_point_id = (
+                    candidate.party_contact_point_id
+                )
             return InvitationOutcome(
                 action="already_invited",
                 conversation_id=conversation.id,
                 invitation_id=existing_invite.id,
+                lead_id=candidate.lead_id if candidate is not None else None,
+                party_id=candidate.party_id if candidate is not None else None,
             )
         party_type = LeadIntakePartyType(item.party_type.value)
         template = _published_template(db, party_type)
@@ -856,12 +1208,19 @@ def assess_inbound(db: Session, command: AssessInboundCommand) -> InvitationOutc
             intent_confidence=item.intent_confidence,
             party_type_confidence=item.party_type_confidence,
         )
+        if candidate is not None:
+            invitation.lead_id = candidate.lead_id
+            invitation.party_id = candidate.party_id
+            invitation.representative_party_id = candidate.representative_party_id
+            invitation.party_contact_point_id = candidate.party_contact_point_id
         return InvitationOutcome(
             action="invite_issued",
             conversation_id=conversation.id,
             invitation_id=invitation.id,
             token=token,
             invitation_message=template.invitation_message,
+            lead_id=candidate.lead_id if candidate is not None else None,
+            party_id=candidate.party_id if candidate is not None else None,
         )
 
     return execute_owner_command(
@@ -1060,6 +1419,74 @@ def latest_inbound_message_id(db: Session, conversation_id: UUID) -> UUID | None
     )
 
 
+def classified_candidate_drift(
+    db: Session, *, since: datetime, limit: int = 500
+) -> tuple[ClassifiedLeadCandidateDrift, ...]:
+    """Report final social sales classifications that lack an active Lead link."""
+
+    bounded_limit = max(1, min(limit, 2_000))
+    rows = db.scalars(
+        select(InboxMessage)
+        .join(
+            InboxConversation,
+            InboxConversation.id == InboxMessage.conversation_id,
+        )
+        .where(
+            InboxMessage.direction == "inbound",
+            InboxMessage.channel_type.in_(META_CHANNELS),
+            InboxMessage.created_at >= since,
+            InboxConversation.is_active.is_(True),
+        )
+        .order_by(InboxMessage.created_at.desc(), InboxMessage.id.desc())
+        .limit(min(bounded_limit * 20, 20_000))
+    ).all()
+    findings: list[ClassifiedLeadCandidateDrift] = []
+    seen_conversations: set[UUID] = set()
+    for message in rows:
+        if message.conversation_id in seen_conversations:
+            continue
+        metadata = dict(message.metadata_ or {})
+        if (
+            metadata.get("ai_intake_status") != "classified"
+            or bool(metadata.get("ai_intake_requires_follow_up"))
+            or metadata.get("ai_intent") not in QUALIFYING_INTENTS
+            or metadata.get("ai_party_type") not in {"individual", "organization"}
+            or conversation_lead_relationships.active_link(db, message.conversation_id)
+            is not None
+        ):
+            continue
+        try:
+            classification = AiLeadIntakeClassification(
+                intent=str(metadata["ai_intent"]),
+                intent_confidence=float(metadata["ai_confidence"]),
+                party_type=str(metadata["ai_party_type"]),
+                party_type_confidence=float(metadata["ai_party_type_confidence"]),
+            )
+            raw_attribution = metadata.get("meta_referral_observation")
+            attribution = LeadCandidateAttribution.model_validate(
+                raw_attribution if isinstance(raw_attribution, dict) else {}
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        findings.append(
+            ClassifiedLeadCandidateDrift(
+                conversation_id=message.conversation_id,
+                message_id=message.id,
+                classified_at=message.created_at,
+                classification=classification,
+                provider_label=(
+                    str(metadata.get("ai_intake_provider") or "")[:80] or None
+                ),
+                model_label=(str(metadata.get("ai_intake_model") or "")[:160] or None),
+                attribution=attribution,
+            )
+        )
+        seen_conversations.add(message.conversation_id)
+        if len(findings) >= bounded_limit:
+            break
+    return tuple(findings)
+
+
 def get_public_form(
     db: Session, token: str, *, now: datetime | None = None
 ) -> PublicLeadIntakeForm:
@@ -1207,7 +1634,11 @@ def submit_form(
             )
         address = _validated_address(command)
         party_type = LeadIntakePartyType(template.party_type)
-        representative_party_id = None
+        representative_party_id = invitation.representative_party_id
+        gender: str | None = None
+        dob: date | None = None
+        representative_name: str | None = None
+        representative_role: str | None = None
         if party_type is LeadIntakePartyType.individual:
             title = _clean(command.submission.full_name, "full_name", 200)
             gender = _clean(command.submission.gender, "gender", 24).lower()
@@ -1226,25 +1657,6 @@ def submit_form(
                     kind="invalid",
                     field="date_of_birth",
                 )
-            lead_party_id = uuid5(invitation.id, "individual-party")
-            lead_party = party_service.create_party(
-                db,
-                party_id=lead_party_id,
-                party_type=PartyType.person,
-                display_name=title,
-                metadata={
-                    "profile_version": 1,
-                    "gender": gender,
-                    "date_of_birth": dob.isoformat(),
-                    "address": address.display_name,
-                    "latitude": address.latitude,
-                    "longitude": address.longitude,
-                    "state": address.state,
-                    "country_code": address.country_code,
-                    "identity_managed_by": "sub",
-                },
-            )
-            contact_owner_id = lead_party.id
         else:
             title = _clean(
                 command.submission.organization_name, "organization_name", 200
@@ -1255,15 +1667,128 @@ def submit_form(
             representative_role = _clean(
                 command.submission.representative_role, "representative_role", 120
             )
-            lead_party_id = uuid5(invitation.id, "organization-party")
+        provisional = invitation.lead_id is not None or invitation.party_id is not None
+        if provisional:
+            if invitation.lead_id is None or invitation.party_id is None:
+                raise _error(
+                    "provisional_lead_incomplete",
+                    "The provisional Lead relationship is incomplete.",
+                )
+            lead_party = party_service.enrich_prospect_profile(
+                db,
+                party_service.ProspectPartyProfileEnrichment(
+                    party_id=invitation.party_id,
+                    party_type=(
+                        PartyType.person
+                        if party_type is LeadIntakePartyType.individual
+                        else PartyType.organization
+                    ),
+                    display_name=title,
+                    address=address.display_name,
+                    latitude=address.latitude,
+                    longitude=address.longitude,
+                    state=address.state,
+                    country_code=address.country_code,
+                    gender=gender,
+                    date_of_birth=dob.isoformat() if dob else None,
+                    source=OWNER,
+                ),
+            )
+            contact_owner_id = lead_party.id
+            if party_type is LeadIntakePartyType.organization:
+                if representative_name is None:
+                    raise _error(
+                        "provisional_representative_missing",
+                        "The organization representative was not supplied.",
+                    )
+                if representative_party_id is None:
+                    representative_party_id = uuid5(
+                        invitation.conversation_id,
+                        "classified-representative-party",
+                    )
+                    representative = party_service.create_party(
+                        db,
+                        party_id=representative_party_id,
+                        party_type=PartyType.person,
+                        display_name=representative_name,
+                        metadata={
+                            "profile_version": 1,
+                            "representative_role": representative_role,
+                            "identity_managed_by": "sub",
+                            "profile_completeness": "form_enriched",
+                        },
+                    )
+                    party_service.relate_parties(
+                        db,
+                        subject_party_id=representative.id,
+                        object_party_id=lead_party.id,
+                        relationship_type=PartyRelationshipType.contact_for,
+                        source=OWNER,
+                        metadata={"representative_role": representative_role},
+                    )
+                else:
+                    party_service.enrich_prospect_profile(
+                        db,
+                        party_service.ProspectPartyProfileEnrichment(
+                            party_id=representative_party_id,
+                            party_type=PartyType.person,
+                            display_name=representative_name,
+                            address=None,
+                            latitude=None,
+                            longitude=None,
+                            state=None,
+                            country_code=None,
+                            representative_role=representative_role,
+                            source=OWNER,
+                        ),
+                    )
+            if invitation.party_contact_point_id is None:
+                raise _error(
+                    "provisional_contact_missing",
+                    "The provisional Lead endpoint binding is unavailable.",
+                )
+            contact_point = db.get(PartyContactPoint, invitation.party_contact_point_id)
+            if contact_point is None or contact_point.party_id != contact_owner_id:
+                raise _error(
+                    "provisional_contact_mismatch",
+                    "The provisional Lead endpoint no longer matches its Party.",
+                )
+            lead = lifecycle.enrich_lead_intake_profile(
+                db,
+                lifecycle.LeadIntakeProfileEnrichment(
+                    lead_id=invitation.lead_id,
+                    party_id=lead_party.id,
+                    invitation_id=invitation.id,
+                    title=title,
+                    region=address.state,
+                    address=address.display_name,
+                    latitude=address.latitude,
+                    longitude=address.longitude,
+                    privacy_acknowledged_at=now,
+                    representative_party_id=representative_party_id,
+                ),
+            )
+        else:
+            lead_party_id = uuid5(
+                invitation.id,
+                "individual-party"
+                if party_type is LeadIntakePartyType.individual
+                else "organization-party",
+            )
             lead_party = party_service.create_party(
                 db,
                 party_id=lead_party_id,
-                party_type=PartyType.organization,
+                party_type=(
+                    PartyType.person
+                    if party_type is LeadIntakePartyType.individual
+                    else PartyType.organization
+                ),
                 display_name=title,
                 metadata={
                     "profile_version": 1,
-                    "business_address": address.display_name,
+                    "gender": gender,
+                    "date_of_birth": dob.isoformat() if dob else None,
+                    "address": address.display_name,
                     "latitude": address.latitude,
                     "longitude": address.longitude,
                     "state": address.state,
@@ -1271,74 +1796,75 @@ def submit_form(
                     "identity_managed_by": "sub",
                 },
             )
-            representative_party_id = uuid5(invitation.id, "representative-party")
-            representative = party_service.create_party(
+            contact_owner_id = lead_party.id
+            if party_type is LeadIntakePartyType.organization:
+                representative_party_id = uuid5(invitation.id, "representative-party")
+                representative = party_service.create_party(
+                    db,
+                    party_id=representative_party_id,
+                    party_type=PartyType.person,
+                    display_name=representative_name or "Organization contact",
+                    metadata={
+                        "profile_version": 1,
+                        "representative_role": representative_role,
+                        "identity_managed_by": "sub",
+                    },
+                )
+                party_service.relate_parties(
+                    db,
+                    subject_party_id=representative.id,
+                    object_party_id=lead_party.id,
+                    relationship_type=PartyRelationshipType.contact_for,
+                    source=OWNER,
+                    metadata={"representative_role": representative_role},
+                )
+                contact_owner_id = representative.id
+            party_service.ensure_role(
                 db,
-                party_id=representative_party_id,
-                party_type=PartyType.person,
-                display_name=representative_name,
-                metadata={
-                    "profile_version": 1,
-                    "representative_role": representative_role,
-                    "identity_managed_by": "sub",
-                },
-            )
-            party_service.relate_parties(
-                db,
-                subject_party_id=representative.id,
-                object_party_id=lead_party.id,
-                relationship_type=PartyRelationshipType.contact_for,
+                party_id=lead_party.id,
+                role_type=PartyRoleType.prospect,
+                status=PartyRoleStatus.active,
                 source=OWNER,
-                metadata={"representative_role": representative_role},
             )
-            contact_owner_id = representative.id
-        party_service.ensure_role(
-            db,
-            party_id=lead_party.id,
-            role_type=PartyRoleType.prospect,
-            status=PartyRoleStatus.active,
-            source=OWNER,
-        )
-        contact_point = _contact_point(db, invitation, contact_owner_id)
-        lead_id = uuid5(invitation.id, "lead")
-        fingerprint = hashlib.sha256(
-            f"{invitation.id}:{party_type.value}:{address.latitude:.7f}:{address.longitude:.7f}".encode()
-        ).hexdigest()
-        lead = lifecycle.create_party_lead(
-            db,
-            lead_id=lead_id,
-            party_id=lead_party.id,
-            title=title,
-            lead_source=_lead_source(invitation.channel_type),
-            binding_source=OWNER,
-            binding_reason="Party created atomically from a completed Inbox lead-intake invitation",
-            origin_capture={
-                "capture_method": LeadCaptureMethod.inbox_form.value,
-                "source_platform": LeadSourcePlatform.team_inbox.value,
-                "source_interaction_id": f"lead-intake:{invitation.id}",
-                "capture_fingerprint": fingerprint,
-                "capture_source": "public_inbox_lead_intake_form",
-                "capture_reason": "Customer saved the single-use form issued from an unknown Meta Inbox conversation",
-            },
-            region=address.state,
-            address=address.display_name,
-            metadata={
-                "lead_intake_invitation_id": str(invitation.id),
-                "origin_conversation_id": str(invitation.conversation_id),
-                "origin_message_id": str(invitation.trigger_message_id),
-                "channel_type": invitation.channel_type,
-                "latitude": address.latitude,
-                "longitude": address.longitude,
-                "privacy_acknowledged_at": now.isoformat(),
-                "marketing_consent_inferred": False,
-                "representative_party_id": str(representative_party_id)
-                if representative_party_id
-                else None,
-            },
-            owner_agent_id=template.owner_system_user_id,
-            pipeline_id=template.pipeline_id,
-            stage_id=template.stage_id,
-        )
+            contact_point = _contact_point(db, invitation, contact_owner_id)
+            fingerprint = hashlib.sha256(
+                f"{invitation.id}:{party_type.value}:{address.latitude:.7f}:{address.longitude:.7f}".encode()
+            ).hexdigest()
+            lead = lifecycle.create_party_lead(
+                db,
+                lead_id=uuid5(invitation.id, "lead"),
+                party_id=lead_party.id,
+                title=title,
+                lead_source=_lead_source(invitation.channel_type),
+                binding_source=OWNER,
+                binding_reason="Party created atomically from a completed Inbox lead-intake invitation",
+                origin_capture={
+                    "capture_method": LeadCaptureMethod.inbox_form.value,
+                    "source_platform": LeadSourcePlatform.team_inbox.value,
+                    "source_interaction_id": f"lead-intake:{invitation.id}",
+                    "capture_fingerprint": fingerprint,
+                    "capture_source": "public_inbox_lead_intake_form",
+                    "capture_reason": "Customer saved the single-use form issued from an unknown Meta Inbox conversation",
+                },
+                region=address.state,
+                address=address.display_name,
+                metadata={
+                    "lead_intake_invitation_id": str(invitation.id),
+                    "origin_conversation_id": str(invitation.conversation_id),
+                    "origin_message_id": str(invitation.trigger_message_id),
+                    "channel_type": invitation.channel_type,
+                    "latitude": address.latitude,
+                    "longitude": address.longitude,
+                    "privacy_acknowledged_at": now.isoformat(),
+                    "marketing_consent_inferred": False,
+                    "representative_party_id": str(representative_party_id)
+                    if representative_party_id
+                    else None,
+                },
+                owner_agent_id=template.owner_system_user_id,
+                pipeline_id=template.pipeline_id,
+                stage_id=template.stage_id,
+            )
         conversation = _unknown_conversation(db, invitation.conversation_id)
         team_inbox_participants.bind_endpoint_to_contact_point(
             db,
@@ -1364,7 +1890,11 @@ def submit_form(
         team_inbox_operations.create_internal_note(
             db,
             conversation=conversation,
-            body=f"Lead intake completed. Lead {lead.id} was created and routed to Sales.",
+            body=(
+                f"Lead intake completed. Lead {lead.id} was enriched and routed to Sales."
+                if provisional
+                else f"Lead intake completed. Lead {lead.id} was created and routed to Sales."
+            ),
             actor_person_id=None,
         )
         invitation.status = "completed"
@@ -1387,7 +1917,7 @@ def submit_form(
         )
         emit_event(
             db,
-            EventType.lead_created,
+            EventType.lead_updated if provisional else EventType.lead_created,
             {
                 "tenant_id": str(OPERATOR_TENANT_ID),
                 "lead_id": str(lead.id),

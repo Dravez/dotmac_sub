@@ -79,6 +79,7 @@ class LeadCaptureMethod(enum.StrEnum):
     referral = "referral"
     reviewed_import = "reviewed_import"
     inbox_form = "inbox_form"
+    inbox_classification = "inbox_classification"
 
 
 class LeadSourcePlatform(enum.StrEnum):
@@ -384,7 +385,7 @@ class LeadOriginCapture(Base):
         CheckConstraint(
             "capture_method IN ('ad_lead_form_webhook', 'landing_page', 'portal', "
             "'agent_declared', 'campaign_response', 'referral', "
-            "'reviewed_import', 'inbox_form')",
+            "'reviewed_import', 'inbox_form', 'inbox_classification')",
             name="ck_lead_origin_captures_method",
         ),
         CheckConstraint(
@@ -416,7 +417,9 @@ class LeadOriginCapture(Base):
             "(capture_method <> 'referral' OR source_platform = 'referral') AND "
             "(capture_method <> 'reviewed_import' OR "
             "source_platform = 'legacy_import') AND "
-            "(capture_method <> 'inbox_form' OR source_platform = 'team_inbox')",
+            "(capture_method <> 'inbox_form' OR source_platform = 'team_inbox') AND "
+            "(capture_method <> 'inbox_classification' OR "
+            "source_platform = 'team_inbox')",
             name="ck_lead_origin_captures_method_platform",
         ),
         CheckConstraint(

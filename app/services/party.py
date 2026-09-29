@@ -135,6 +135,24 @@ class PartyContactPointSet:
     source: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProspectPartyProfileEnrichment:
+    """Explicit profile fields supplied after provisional prospect creation."""
+
+    party_id: UUID
+    party_type: PartyType
+    display_name: str
+    address: str | None
+    latitude: float | None
+    longitude: float | None
+    state: str | None
+    country_code: str | None
+    gender: str | None = None
+    date_of_birth: str | None = None
+    representative_role: str | None = None
+    source: str = "sales.lead_intake"
+
+
 _ROLE_CAPABILITY_DOMAINS: dict[str, tuple[str, ...]] = {
     PartyRoleType.prospect.value: ("sales",),
     PartyRoleType.customer.value: ("sales", "billing", "support"),
@@ -1533,6 +1551,51 @@ def update_person_profile(db: Session, command: PersonPartyProfileUpdate) -> Par
     )
     if command.nin_encrypted is not None:
         metadata["nin_encrypted"] = command.nin_encrypted
+    party.metadata_ = metadata
+    db.flush()
+    return party
+
+
+def enrich_prospect_profile(
+    db: Session, command: ProspectPartyProfileEnrichment
+) -> Party:
+    """Enrich an existing prospect without replacing unrelated Party evidence."""
+
+    party = (
+        db.query(Party)
+        .filter(Party.id == command.party_id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if party is None:
+        raise PartyInvariantError(f"Party '{command.party_id}' was not found")
+    if party.party_type != command.party_type.value:
+        raise PartyInvariantError("Prospect Party type conflicts with intake form")
+    if party.status not in {
+        PartyIdentityStatus.active.value,
+        PartyIdentityStatus.quarantined.value,
+    }:
+        raise PartyInvariantError("The prospect Party is not editable")
+    party.display_name = _required_text(command.display_name, "display_name")
+    metadata = dict(party.metadata_) if isinstance(party.metadata_, dict) else {}
+    metadata.update(
+        {
+            "profile_version": 1,
+            "profile_completeness": "form_enriched",
+            "address": command.address,
+            "latitude": command.latitude,
+            "longitude": command.longitude,
+            "state": command.state,
+            "country_code": command.country_code,
+            "gender": command.gender,
+            "date_of_birth": command.date_of_birth,
+            "representative_role": command.representative_role,
+            "identity_managed_by": "sub",
+            "last_profile_source": _required_text(command.source, "source"),
+        }
+    )
+    if command.party_type is PartyType.organization:
+        metadata["business_address"] = command.address
     party.metadata_ = metadata
     db.flush()
     return party

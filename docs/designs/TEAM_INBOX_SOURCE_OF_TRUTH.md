@@ -52,7 +52,8 @@ combined Inbox/Support workspace.
 | Customer context drawer | `communications.team_inbox_contact_context` | Composes permission-scoped Party, Lead, Ticket, conversation, Project, and Task sections with typed availability |
 | Profile and Lead action resolution | `communications.inbox_lead_actions` | Resolves and coordinates identity-aware actions without owning Party or Lead fields |
 | Customer completion policy | `communications.team_inbox_customer_completion_policy` | Creates immutable Customer-only required-field versions and the active identity-guard decision; required fields are snapshotted by new conversations |
-| Customer resolution readiness and Inbox profile completion | `communications.team_inbox_customer_completion` | Computes the central Customer-only gate and coordinates `customer.canonical_profile_patch` plus `party.registry`; Lead completeness is advisory |
+| Customer/Lead resolution readiness and Inbox profile completion | `communications.team_inbox_customer_completion` | Computes the central Customer completion gate, blocks final classified sales candidates until their Sales-owned Lead link exists, and coordinates `customer.canonical_profile_patch` plus `party.registry`; Lead profile completeness is advisory |
+| Classified Inbox Lead materialization and optional form enrichment | `sales.lead_intake` | Consumes the durable final sales-classification event, atomically creates/links a provisional Party-first Lead independent of form delivery, and optionally enriches that same Lead from the versioned form |
 | Routing, assignment, escalation, and FIFO queue | `communications.team_inbox_routing` | Applies configured team, availability, permission, SLA, durable queue admission, and promotion policy |
 | Inbox automation | `communications.team_inbox_automation` | Matches Inbox-scoped conversation triggers and coordinates ordered assign, auto-assign, and tag actions |
 | Reply reminders | `communications.team_inbox_reply_reminders` | Owns configured first/repeat due times and queues internal agent notifications until a reply settles the schedule |
@@ -269,17 +270,17 @@ reusable contact route or performs historical repair, because one
 representative endpoint may legitimately speak for different subjects in
 different conversations.
 
-Agent resolution uses the Customer-only completion gate defined in
+Agent resolution uses the Customer/Lead readiness gate defined in
 `docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md`. Customer conversations must
 satisfy their immutable snapshotted policy on canonical Customer/Party facts.
-Lead profile gaps never participate in resolution readiness. Direct, bulk, and
-macro resolution all enter the status owner and consume the same verdict.
-AI intent classification and fact collection are observations, not canonical
-identity. A conversational playbook may not resolve `new_connection` or
-`coverage_request` while the conversation is still unidentified; it hands the
-thread to the normal human routing path so the Lead/identity coordinator can
-establish the minimum identity. Existing AI timeout and human-takeover behavior
-is unchanged.
+Lead profile gaps never participate in resolution readiness. A final qualifying
+`new_connection` or `coverage_request` classification is not itself canonical
+identity: `ai.intake` stages the durable candidate event and
+`sales.lead_intake` must create the Party-first Lead and active conversation
+link. Until that consequence exists, direct, bulk, and macro resolution fail
+closed even if the general identity guard is disabled. Form delivery and form
+fields are optional enrichment, not prerequisites for Lead creation or
+resolution. Existing AI timeout and human-takeover behavior is unchanged.
 
 The fiber website uses the same boundary through the signed
 `communications.fiber_inquiry.receive.v1` Integration Platform capability.
@@ -813,8 +814,8 @@ stale. Realtime has no replay authority.
 - Responsive behavior: the queue and conversation actions remain usable at
   narrow widths; desktop-only density must not hide the primary reply/read
   actions.
-- Sales actions: the projection supplies owner-resolved Lead-form eligibility
-  and plan-family catalogue options to the composer. Templates display those
+- Sales actions: the projection supplies owner-resolved Lead materialization,
+  optional Lead-form eligibility, and plan-family catalogue options to the composer. Templates display those
   outcomes without independently deciding customer/contact identity or
   catalogue availability. See
   `docs/designs/INBOX_PLAN_CATALOGUE_SHARING.md`.
