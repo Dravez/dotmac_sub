@@ -180,7 +180,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Administration",
         "Review the Automation Center",
         "Administrators and automation operators",
-        "Review central automation and create rules from code-approved options.",
+        "Review central automation and create workflows from code-approved options.",
         (
             "/admin/automation",
             "/admin/automation/rules/new",
@@ -190,9 +190,9 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Confirm that your role has Automation Center access before opening the hub.",
         "Review the module registry to see which modules and events are eligible for central automation.",
         "Review how registered custom fields are governed when a module exposes them to central automation.",
-        "Review central rules and recent execution evidence only when your role grants those additional permissions.",
-        "Choose whether the automation is a rule, client script, or server script; use only the module targets and events shown by the registry.",
-        "Use the rule builder to choose an approved trigger, conditions, and ordered actions, then save a draft.",
+        "Review workflows and recent execution evidence only when your role grants those additional permissions.",
+        "Choose whether the automation is a workflow, client script, or server script; use only the module targets and events shown by the registry.",
+        "Use the workflow builder to choose an approved trigger, conditions, and ordered actions, then save a draft.",
         "For a script, bind one target and event, review the JavaScript boundary, and save an immutable draft version.",
         "Review runtime readiness before publication: server scripts require the isolated digest-pinned runtime and typed owner-command adapter.",
         "Review run history to find failed runs, then open a run to inspect the affected record, steps, and error details.",
@@ -1051,7 +1051,7 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             2,
         ),
         _action(
-            "review-automation-rules", "Review central rules and execution evidence", 3
+            "review-automation-rules", "Review workflows and execution evidence", 3
         ),
         _action(
             "save-automation-rule-draft",

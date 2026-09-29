@@ -38,14 +38,14 @@ def test_hub_presents_governance_and_rule_lifecycle_controls() -> None:
     template = _source("templates/admin/automation/index.html")
     for heading in (
         "Module registry",
-        "Central rules",
+        "Workflows",
         "Recent execution",
         "Existing automation ownership",
         "Runtime dormant",
     ):
         assert heading in template
     assert "Deployment creates no rules and causes no business side effects" in template
-    assert "New rule" in template
+    assert "New workflow" in template
     assert 'action="/admin/automation/rules/{{ rule.rule_id }}/publish"' in template
     assert 'action="/admin/automation/rules/{{ rule.rule_id }}/pause"' in template
     assert 'action="/admin/automation/rules/{{ rule.rule_id }}/resume"' in template
@@ -63,7 +63,7 @@ def test_hub_shows_support_communications_readiness_and_next_step() -> None:
     assert 'AutomationCatalogState.retired: "Retired"' in projection
     assert "{{ row.explanation }}" in template
     assert "{{ row.item.management_path }}" in template
-    assert "Create rule" in template
+    assert "Create workflow" in template
 
 
 def test_runtime_health_card_uses_semantic_status_and_safe_responsive_layout() -> None:
@@ -91,6 +91,11 @@ def test_rule_builder_uses_registered_options_and_supports_multiple_steps() -> N
     assert "builder_options|tojson" in template
     assert "Add condition" in template
     assert "Add action" in template
+    assert "conditions-availability" in template
+    assert "actions-availability" in template
+    assert "conditionButton.disabled" in template
+    assert "actionButton.disabled" in template
+    assert "This event has no condition fields" in template
     assert "actions-json" in template
     assert 'name="customer_scope" value="company"' in template
     assert 'name="customer_scope" value="selected"' in template

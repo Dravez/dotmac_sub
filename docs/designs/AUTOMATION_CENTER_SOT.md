@@ -1,13 +1,13 @@
 # Automation Center source of truth
 
-Status: reusable rule builder and native script control-plane draft
+Status: reusable workflow builder and native script control-plane draft
 
 Decision owner: Michael
 
 ## Scope
 
 The Automation Center is the central authoring and lifecycle surface for
-rules plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
+workflows (the user-facing name for central rules) plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
 provisioning, SLA, escalation, and routing rules remain managed by their
 existing owners until a later, separately approved migration. That migration
 must hand off each rule without leaving two active writers.
