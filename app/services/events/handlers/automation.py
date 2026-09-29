@@ -73,8 +73,18 @@ HANDLED_EVENT_TYPES = frozenset(
 )
 
 
-class AutomationEventHandlerError(RuntimeError):
-    """Keep the durable event retryable when any automation action fails."""
+class AutomationEventHandlerError(DomainError):
+    """Typed failure preserving the module action's retry classification."""
+
+
+def _handler_error(
+    message: str, *, retryable: bool = True
+) -> AutomationEventHandlerError:
+    return AutomationEventHandlerError(
+        code="automation.execution.event_handler_failed",
+        message=message,
+        retryable=retryable,
+    )
 
 
 def _path_value(payload: Mapping[str, object], path: str) -> object:
@@ -91,8 +101,9 @@ def _required_uuid(payload: Mapping[str, object], path: str) -> UUID:
     try:
         return UUID(str(value))
     except (TypeError, ValueError) as exc:
-        raise AutomationEventHandlerError(
-            f"Automation event identity field {path!r} is missing or invalid."
+        raise _handler_error(
+            f"Automation event identity field {path!r} is missing or invalid.",
+            retryable=False,
         ) from exc
 
 
@@ -218,8 +229,9 @@ class AutomationEventHandler:
         for trigger in triggers:
             tenant_id = _required_uuid(payload, trigger.tenant_id_field)
             if tenant_id != OPERATOR_TENANT_ID:
-                raise AutomationEventHandlerError(
-                    "Automation event tenant does not match the operator tenant."
+                raise _handler_error(
+                    "Automation event tenant does not match the operator tenant.",
+                    retryable=False,
                 )
             target_id = _required_uuid(payload, trigger.entity_id_field)
             self._execute_server_scripts(

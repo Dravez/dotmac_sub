@@ -626,6 +626,7 @@ def _unavailable_service_action(
         EnforcementReason.customer_hold: "customer_hold",
         EnforcementReason.fraud: "fraud_review",
         EnforcementReason.system: "system_hold",
+        EnforcementReason.ticket_sla: "ticket_sla_breach",
     }
     reason = nonfinancial_reasons.get(lock_reason, "suspended")
     return (

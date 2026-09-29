@@ -191,6 +191,56 @@ Focused checks for event delivery, customer scoping, replay, action audit,
 activation, pause behavior, and both legacy and central rule conflicts run with
 the pull request's CI suite before merge.
 
+## Ticket SLA service suspension
+
+Support exposes the runtime-enabled `support.ticket.sla_breached` trigger from
+the durable breach fact owned by `support.ticket_sla_clock`. Its version-1
+payload contains the operator tenant, Ticket, SLA clock, breach time, normalized
+priority, and ticket type. The trigger does not reinterpret an overdue date;
+it is staged only when the owner records the breach.
+
+The only admitted action for this trigger is
+`support.ticket.suspend_unique_active_service`. The Automation Center adapter
+delegates to `support.ticket_sla_service_consequence`, which locks the Ticket,
+uses its canonical customer-account link, and requires exactly one active
+Subscription. Missing customer identity, zero active services, multiple active
+services, or conflicting replay evidence fail closed and are retained in the
+automation step evidence. The coordinator delegates the actual status and
+enforcement-lock writes to `access.subscription_lifecycle`.
+
+The action suspends network access with a dedicated `ticket_sla` enforcement
+lock. It does not
+pause billing and does not restore service automatically. Its stable lock
+source includes event, rule-version, and step identity so a retry after the
+side effect replays the exact success rather than selecting another service.
+
+The admin form requires create, publish, Ticket-read, and subscription-suspend
+permissions plus an explicit customer-impact confirmation. Submission creates
+and publishes the fixed singleton rule shape; its stable key prevents a second
+overlapping rule from being created through this surface. Deployment itself
+still creates no rule.
+
+### SLA suspension form page contract
+
+- Screen: `admin.automation.ticket_sla_suspension`, high-impact control-plane
+  form for administrators with Automation publish and Subscription suspend
+  authority.
+- Decision: whether to activate the fixed SLA-breach suspension rule; the
+  primary entity is the immutable Automation rule/version.
+- Read and eligibility owners: `automation.capability_registry`,
+  `automation.rule_definitions`, and RBAC. The form exposes no derived service
+  eligibility because the consequence owner re-evaluates it at event time.
+- First viewport: exact trigger, exact action, billing/access distinction,
+  fail-closed service-selection cases, restoration requirement, rule name, and
+  explicit impact confirmation.
+- Primary action: create and publish through the typed rule owners. Cancel is
+  the only secondary action. Unauthorized users cannot reach or discover the
+  form.
+- Success returns to the central rule list; validation or owner failures remain
+  on the form. The hub's execution ledger is the drill-down evidence surface.
+- Mobile keeps trigger, impact, confirmation, and action in that order; no
+  business detail is hidden by responsive layout.
+
 The current ticket-assignment and ticket-creation automation pages are listed
 as existing ownership links. Their rules are not moved by this implementation
 slice. The live rule-by-rule check supplies current conflict evidence when an

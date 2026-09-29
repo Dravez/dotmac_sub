@@ -46,6 +46,26 @@ def test_runtime_handler_is_registered_with_explicit_event_scope() -> None:
     assert 'handler_name == "AutomationEventHandler"' in controls
 
 
+def test_runtime_preserves_typed_action_retry_classification() -> None:
+    source = _source("app/services/events/handlers/automation.py")
+    assert "class AutomationEventHandlerError(DomainError)" in source
+    assert "retryable = exc.retryable" in source
+    assert "retryable=retryable" in source
+
+
+def test_ticket_sla_consequence_delegates_to_subscription_owner() -> None:
+    source = _source("app/services/ticket_sla_service_automation.py")
+    assert "account_lifecycle.suspend_subscription(" in source
+    assert ".status =" not in source
+    assert ".commit(" not in source
+    assert ".rollback(" not in source
+
+
+def test_ticket_sla_enforcement_reason_is_migrated() -> None:
+    migration = _source("alembic/versions/621_ticket_sla_enforcement_reason.py")
+    assert "ADD VALUE IF NOT EXISTS 'ticket_sla'" in migration
+
+
 def test_runtime_ledger_is_tenant_isolated_and_permissions_are_granular() -> None:
     migration = _source("alembic/versions/614_automation_runtime_ledger.py")
     assert "ENABLE ROW LEVEL SECURITY" in migration
