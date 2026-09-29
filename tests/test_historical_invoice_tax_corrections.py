@@ -511,7 +511,7 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
     )
 
     preview = preview_existing_replacement_tax_correction(db_session, query)
-    assert preview.actionable
+    assert preview.actionable, preview.reason
     assert preview.source_invoice_id == source.id
     assert preview.replacement_invoice_id == replacement.id
     assert preview.replacement_total == Decimal("215000.00")
