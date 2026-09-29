@@ -20,8 +20,9 @@ DOB, gender, and NIN. The policy stores field keys rather than browser logic. It
 
 `communications.team_inbox_customer_completion` owns the resolution
 `ActionReadiness` verdict and coordinates profile completion from Inbox into the
-canonical Customer account and Party owners. Inbox metadata is observation or
-compatibility context; it never satisfies the completion gate.
+canonical Customer account and Party owners. Final AI classification metadata
+is also an authoritative-input projection for detecting a missing Sales
+consequence; it never substitutes for the required active Lead link.
 
 `customer.canonical_profile_patch` is the typed, flush-only Customer participant
 used by that coordinator. It locks and updates the existing Subscriber and
@@ -67,6 +68,11 @@ status owner asks the completion owner for one authoritative verdict:
 - Customer: every field in the conversation's snapshotted version must be
   complete on the canonical Customer/Party profile.
 - Lead: profile completeness is advisory and never blocks resolution.
+- Final qualifying sales classification without an active Lead link: resolution
+  is blocked with `inbox_lead_materialization_required`, even when the general
+  identity guard is disabled. The retry/repair action belongs to
+  `sales.lead_intake`. The optional intake form, address, DOB, gender, and other
+  enrichment fields are not Lead-resolution requirements.
 - Unresolved or ambiguous: identification must be completed before resolution when the active identity guard is enabled. If an administrator disables the guard, these classifications no longer block resolution; identified Customers still follow their snapshotted required-field policy.
 
 WhatsApp expiry is a controlled channel-state exception, not a new identity
@@ -196,5 +202,6 @@ snapshotted policy plus canonical records. The UI does not persist a readiness
 flag. A missing policy snapshot, missing linked Customer, unsupported historic
 field key, or ambiguous identity fails closed and is its own drift signal.
 Reopening the drawer or retrying the status command deterministically rebuilds
-the verdict; structural Lead-link repair remains with
-`communications.conversation_lead_relationships`.
+the verdict. Missing classified-Lead materialization is repaired by replaying
+the durable consequence through `sales.lead_intake`; structural Lead-link
+repair remains with `communications.conversation_lead_relationships`.

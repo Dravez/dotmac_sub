@@ -14,6 +14,7 @@ from app.models.team_inbox import (
     InboxConversationLeadLink,
     InboxConversationStatus,
     InboxCustomerCompletionPolicyVersion,
+    InboxMessage,
     InboxReplyMacro,
 )
 from app.services import (
@@ -161,6 +162,46 @@ def test_disabled_identity_guard_allows_unresolved_resolution(db_session):
         is team_inbox_customer_completion.InboxIdentityClassification.unresolved
     )
     assert verdict.can_agent_resolve is True
+
+
+def test_classified_sales_candidate_cannot_resolve_until_lead_is_linked(
+    db_session,
+):
+    policy = _policy(db_session, fields=())
+    policy.identity_guard_enabled = False
+    conversation = InboxConversation(
+        customer_completion_policy_version_id=policy.id,
+        channel_type="instagram_dm",
+        status="open",
+        is_active=True,
+    )
+    db_session.add(conversation)
+    db_session.flush()
+    db_session.add(
+        InboxMessage(
+            conversation_id=conversation.id,
+            channel_type="instagram_dm",
+            direction="inbound",
+            body="I need a new business connection",
+            from_address="17841400000000001",
+            external_message_id=f"m_ig_{uuid4().hex}",
+            metadata_={
+                "ai_intake_status": "classified",
+                "ai_intake_requires_follow_up": False,
+                "ai_intent": "new_connection",
+                "ai_party_type": "organization",
+            },
+        )
+    )
+    db_session.flush()
+
+    verdict = team_inbox_customer_completion.resolution_readiness(
+        db_session, conversation
+    )
+
+    assert verdict.can_agent_resolve is False
+    assert verdict.readiness.blockers[0].code == "inbox_lead_materialization_required"
+    assert verdict.readiness.blockers[0].owner == "sales.lead_intake"
 
 
 @pytest.mark.parametrize(

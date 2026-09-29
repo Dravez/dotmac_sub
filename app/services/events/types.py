@@ -222,6 +222,7 @@ class EventType(enum.Enum):
     service_team_party_cutover_adopted = "service_team.party_cutover_adopted"
     workqueue_action_coordinated = "workqueue.action_coordinated"
     ai_intake_config_updated = "ai.intake_config_updated"
+    ai_intake_lead_candidate_classified = "ai.intake_lead_candidate_classified"
     plan_family_catalogue_published = "catalog.plan_family_catalogue_published"
     catalog_offer_reseller_availability_changed = (
         "catalog.offer_reseller_availability_changed"

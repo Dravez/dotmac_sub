@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.ai_intake import AiIntakeConfig
 from app.models.domain_settings import DomainSetting, SettingDomain
@@ -18,16 +18,20 @@ from app.models.subscription_engine import SettingValueType
 from app.models.system_user import SystemUser
 from app.models.team_inbox import (
     InboxConversation,
+    InboxConversationLeadLink,
     InboxConversationParticipant,
     InboxMessage,
 )
 from app.schemas.lead_intake import (
     AiLeadIntakeClassification,
+    LeadCandidateAttribution,
     LeadIntakeSubmission,
     LeadIntakeTemplateDraft,
     ResolvedLeadIntakeAddress,
 )
 from app.services import lead_intake_ai
+from app.services.events.handlers import lead_intake as lead_intake_event_handler
+from app.services.events.types import Event, EventType
 from app.services.owner_commands import CommandContext
 from app.services.sales import lead_intake
 from app.services.settings_cache import SettingsCache
@@ -83,6 +87,50 @@ def _conversation(db_session) -> tuple[InboxConversation, InboxMessage]:
             channel_type="whatsapp",
             normalized_endpoint=endpoint,
             provider_account_scope="phone-1",
+            admission_source="inbound_from",
+            admission_message_id=message.id,
+        )
+    )
+    db_session.commit()
+    return conversation, message
+
+
+def _instagram_conversation(db_session) -> tuple[InboxConversation, InboxMessage]:
+    endpoint = str(17841400000000000 + uuid4().int % 10**10)
+    account_id = f"ig-{uuid4().hex}"
+    conversation = InboxConversation(
+        channel_type="instagram_dm",
+        contact_address=endpoint,
+        external_thread_id=f"instagram_dm:{endpoint}",
+        subject="giftzara_lifestyle",
+        metadata_={
+            "contact_name": "giftzara_lifestyle",
+            "contact_resolution": {"status": "unmatched"},
+        },
+        is_active=True,
+    )
+    db_session.add(conversation)
+    db_session.flush()
+    message = InboxMessage(
+        conversation_id=conversation.id,
+        channel_type="instagram_dm",
+        direction="inbound",
+        body="I need a new internet connection for my business",
+        from_address=endpoint,
+        external_message_id=f"m_ig_{uuid4().hex}",
+        metadata_={
+            "provider": "meta_social",
+            "provider_account_scope": account_id,
+        },
+    )
+    db_session.add(message)
+    db_session.flush()
+    db_session.add(
+        InboxConversationParticipant(
+            conversation_id=conversation.id,
+            channel_type="instagram_dm",
+            normalized_endpoint=endpoint,
+            provider_account_scope=account_id,
             admission_source="inbound_from",
             admission_message_id=message.id,
         )
@@ -255,6 +303,263 @@ def test_high_confidence_unknown_meta_prospect_receives_one_auto_invitation(
         )
     ).all()
     assert len(invitations) == 1
+    assert outcome.lead_id is not None
+
+
+def test_final_instagram_sales_classification_creates_lead_without_form(
+    db_session,
+):
+    conversation, message = _instagram_conversation(db_session)
+
+    outcome = lead_intake.assess_inbound(
+        db_session,
+        lead_intake.AssessInboundCommand(
+            context=_context(f"classified-candidate:{message.id}"),
+            conversation_id=conversation.id,
+            message_id=message.id,
+            classification=AiLeadIntakeClassification(
+                intent="new_connection",
+                intent_confidence=0.96,
+                party_type="organization",
+                party_type_confidence=0.94,
+                clarification_question=None,
+            ),
+            provider_label="pytest",
+            model_label="classifier",
+            attribution=LeadCandidateAttribution(
+                campaign_ref="ig-ref-1",
+                external_ad_id="ig-ad-1",
+                referral_source="ADS",
+                referral_type="OPEN_THREAD",
+            ),
+        ),
+    )
+
+    link = db_session.scalar(
+        select(InboxConversationLeadLink).where(
+            InboxConversationLeadLink.conversation_id == conversation.id,
+            InboxConversationLeadLink.is_active.is_(True),
+        )
+    )
+    lead = db_session.get(Lead, outcome.lead_id)
+    origin = db_session.scalar(
+        select(LeadOriginCapture).where(LeadOriginCapture.lead_id == outcome.lead_id)
+    )
+
+    assert outcome.action == "lead_created"
+    assert lead is not None and lead.party_id == outcome.party_id
+    assert lead.metadata_["profile_completeness"] == "provisional"
+    assert lead.metadata_["meta_referral_source"] == "ADS"
+    assert link is not None and link.lead_id == lead.id
+    assert link.link_source == "ai_lead_candidate"
+    assert origin is not None
+    assert origin.capture_method == "inbox_classification"
+    assert origin.external_ad_id == "ig-ad-1"
+    assert db_session.scalar(select(func.count(LeadIntakeInvitation.id))) == 0
+
+    replay = lead_intake.assess_inbound(
+        db_session,
+        lead_intake.AssessInboundCommand(
+            context=_context(f"classified-candidate-replay:{message.id}"),
+            conversation_id=conversation.id,
+            message_id=message.id,
+            classification=AiLeadIntakeClassification(
+                intent="new_connection",
+                intent_confidence=0.96,
+                party_type="organization",
+                party_type_confidence=0.94,
+                clarification_question=None,
+            ),
+        ),
+    )
+    assert replay.action == "lead_exists"
+    assert replay.replayed is True
+    assert replay.lead_id == outcome.lead_id
+    assert db_session.scalar(select(func.count(Lead.id))) == 1
+
+
+def test_auto_form_enriches_existing_classified_lead_without_duplicate(db_session):
+    staff, team = _staff_and_team(db_session)
+    _published_template(db_session, staff=staff, team=team)
+    _published_template(
+        db_session,
+        staff=staff,
+        team=team,
+        party_type=LeadIntakePartyType.organization,
+    )
+    db_session.add_all(
+        [
+            DomainSetting(
+                domain=SettingDomain.integration,
+                key="lead_intake_auto_send_enabled",
+                value_type=SettingValueType.boolean,
+                value_text="true",
+                is_active=True,
+            ),
+            AiIntakeConfig(
+                scope_key=f"lead-intake-{uuid4().hex}",
+                channel_type="instagram_dm",
+                is_enabled=True,
+                confidence_threshold=0.8,
+                allow_followup_questions=True,
+                max_clarification_turns=1,
+            ),
+        ]
+    )
+    db_session.commit()
+    SettingsCache.invalidate(
+        SettingDomain.integration.value, "lead_intake_auto_send_enabled"
+    )
+    conversation, message = _instagram_conversation(db_session)
+    assessed = lead_intake.assess_inbound(
+        db_session,
+        lead_intake.AssessInboundCommand(
+            context=_context(f"classified-form:{message.id}"),
+            conversation_id=conversation.id,
+            message_id=message.id,
+            classification=AiLeadIntakeClassification(
+                intent="coverage_request",
+                intent_confidence=0.97,
+                party_type="organization",
+                party_type_confidence=0.96,
+                clarification_question=None,
+            ),
+        ),
+    )
+    assert assessed.token and assessed.lead_id
+
+    submitted = lead_intake.submit_form(
+        db_session,
+        lead_intake.SubmitLeadIntakeCommand(
+            context=_context(f"classified-submit:{assessed.invitation_id}"),
+            token=assessed.token,
+            submission=LeadIntakeSubmission(
+                organization_name="Elite Iqraa Academy",
+                representative_name="Amina Bello",
+                representative_role="Administrator",
+                latitude=9.0765,
+                longitude=7.3986,
+                address_confirmation=True,
+                privacy_acknowledged=True,
+            ),
+            resolved_address=ResolvedLeadIntakeAddress(
+                display_name="Wuse 2, Abuja, Nigeria",
+                latitude=9.0765,
+                longitude=7.3986,
+                state="FCT",
+                country_code="ng",
+            ),
+        ),
+    )
+
+    lead = db_session.get(Lead, submitted.lead_id)
+    party = db_session.get(Party, submitted.party_id)
+    origin = db_session.scalar(
+        select(LeadOriginCapture).where(LeadOriginCapture.lead_id == lead.id)
+    )
+    assert submitted.lead_id == assessed.lead_id
+    assert db_session.scalar(select(func.count(Lead.id))) == 1
+    assert lead.metadata_["profile_completeness"] == "form_enriched"
+    assert lead.metadata_["lead_intake_invitation_id"] == str(assessed.invitation_id)
+    assert party.display_name == "Elite Iqraa Academy"
+    assert party.party_type == "organization"
+    assert (
+        submitted.party_id
+        != db_session.get(
+            LeadIntakeInvitation, assessed.invitation_id
+        ).representative_party_id
+    )
+    assert origin.capture_method == "inbox_classification"
+
+
+def test_historical_resolved_classification_can_be_repaired_without_form(
+    db_session,
+):
+    conversation, message = _instagram_conversation(db_session)
+    conversation.status = "resolved"
+    message.metadata_ = {
+        **dict(message.metadata_ or {}),
+        "ai_intake_status": "classified",
+        "ai_intake_requires_follow_up": False,
+        "ai_intent": "coverage_request",
+        "ai_confidence": 0.97,
+        "ai_party_type": "individual",
+        "ai_party_type_confidence": 0.95,
+        "ai_intake_provider": "pytest",
+        "ai_intake_model": "classifier",
+    }
+    db_session.commit()
+
+    findings = lead_intake.classified_candidate_drift(
+        db_session,
+        since=datetime.now(UTC) - timedelta(days=60),
+    )
+    finding = next(item for item in findings if item.conversation_id == conversation.id)
+    outcome = lead_intake.assess_inbound(
+        db_session,
+        lead_intake.AssessInboundCommand(
+            context=_context(f"historical-repair:{message.id}"),
+            conversation_id=finding.conversation_id,
+            message_id=finding.message_id,
+            classification=finding.classification,
+            provider_label=finding.provider_label,
+            model_label=finding.model_label,
+            attribution=finding.attribution,
+            allow_invitation=False,
+        ),
+    )
+
+    assert outcome.action == "lead_created"
+    assert outcome.lead_id is not None
+    assert db_session.scalar(select(func.count(LeadIntakeInvitation.id))) == 0
+    assert not any(
+        item.conversation_id == conversation.id
+        for item in lead_intake.classified_candidate_drift(
+            db_session,
+            since=datetime.now(UTC) - timedelta(days=60),
+        )
+    )
+
+
+def test_classified_candidate_event_invokes_typed_sales_handoff(
+    db_session, monkeypatch
+):
+    conversation_id = uuid4()
+    message_id = uuid4()
+    captured = {}
+    monkeypatch.setattr(
+        lead_intake_event_handler, "finish_read_transaction", lambda _db: None
+    )
+
+    def _apply(_db, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(lead_intake_ai, "apply_shared_classification", _apply)
+    event = Event(
+        event_type=EventType.ai_intake_lead_candidate_classified,
+        payload={
+            "schema_version": 1,
+            "conversation_id": str(conversation_id),
+            "message_id": str(message_id),
+            "classification": {
+                "intent": "new_connection",
+                "intent_confidence": 0.96,
+                "party_type": "individual",
+                "party_type_confidence": 0.94,
+                "clarification_question": None,
+            },
+            "provider_label": "pytest",
+            "model_label": "classifier",
+            "attribution": {"external_ad_id": "ig-ad-1"},
+        },
+    )
+
+    lead_intake_event_handler.LeadIntakeHandler().handle(db_session, event)
+
+    assert captured["conversation_id"] == conversation_id
+    assert captured["message_id"] == message_id
+    assert captured["classification"].intent.value == "new_connection"
+    assert captured["attribution"].external_ad_id == "ig-ad-1"
 
 
 def test_shared_metadata_handoff_runs_only_for_classified_sales(
