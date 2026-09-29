@@ -2779,6 +2779,8 @@ def test_reviewed_single_invoice_records_existing_debit_as_settlement(
     assert preview.post_boundary_credit == Decimal("110.00")
     anchor_before = subscription.next_billing_at
     customer_position_before = calculate_customer_balance(db_session, subscriber.id)
+    invoice_id = invoice.id
+    approver_id = approver.id
     db_session.rollback()
 
     command = ReconstructReviewedPrepaidInvoiceSequenceCommand(
@@ -2786,12 +2788,12 @@ def test_reviewed_single_invoice_records_existing_debit_as_settlement(
             actor="pytest:finance-operator",
             scope=REPAIR_SCOPE,
             reason="Finance-approved existing debit settlement",
-            idempotency_key=f"pytest-existing-debit-{invoice.id}",
+            idempotency_key=f"pytest-existing-debit-{invoice_id}",
         ),
         query=query,
         preview_fingerprint=preview.fingerprint,
         permission_granted=True,
-        actor_system_user_id=approver.id,
+        actor_system_user_id=approver_id,
     )
     result = reconstruct_reviewed_prepaid_invoice_sequence(db_session, command)
 
