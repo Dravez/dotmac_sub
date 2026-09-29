@@ -76,6 +76,8 @@ class ResellerPortalUserView:
     username: str | None
     is_active: bool
     invite_pending: bool
+    can_send_reset: bool
+    can_remove: bool
 
 
 def _roles_for_form(db: Session) -> list[Role]:
@@ -579,6 +581,9 @@ def get_reseller_detail_context(
             )
             email = principal.email
         credential = credential_by_principal.get(principal_id)
+        is_active = bool(
+            link.is_active and credential is not None and credential.is_active
+        )
         portal_user_views.append(
             ResellerPortalUserView(
                 principal_type=principal_type,
@@ -586,15 +591,17 @@ def get_reseller_detail_context(
                 display_name=display_name or "Unnamed reseller user",
                 email=email,
                 username=credential.username if credential is not None else None,
-                is_active=bool(
-                    link.is_active and (credential is None or credential.is_active)
-                ),
+                is_active=is_active,
                 invite_pending=bool(
-                    credential is not None and credential.must_change_password
+                    is_active
+                    and credential is not None
+                    and credential.must_change_password
                 ),
+                can_send_reset=bool(is_active and email),
+                can_remove=bool(link.is_active),
             )
         )
-    reseller_portal_users = len(portal_user_views)
+    reseller_portal_users = sum(1 for view in portal_user_views if view.is_active)
 
     active_services = 0
     pending_services = 0

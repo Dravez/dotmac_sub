@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.audit import AuditActorType
-from app.models.auth import AuthProvider, UserCredential
+from app.models.auth import AuthProvider, SessionStatus, UserCredential
+from app.models.auth import Session as AuthSession
 from app.models.notification import Notification
 from app.models.rbac import Role
 from app.models.subscriber import Reseller, ResellerUser, Subscriber, UserType
@@ -53,6 +54,11 @@ _PROVISION_COMMAND = OwnerCommandDefinition(
     owner="auth.reseller_onboarding",
     concern="reseller portal principal onboarding",
     name="provision_reseller_user",
+)
+_REVOKE_ACCESS_COMMAND = OwnerCommandDefinition(
+    owner="auth.reseller_onboarding",
+    concern="reseller portal access revocation",
+    name="revoke_reseller_portal_access",
 )
 _EMAIL_ADAPTER = TypeAdapter(EmailStr)
 
@@ -110,6 +116,26 @@ class ProvisionResellerUserCommand:
     reseller_id: UUID
     portal_user: ResellerPortalUserSpec
     assignment_context: CommandContext | None = None
+
+
+@dataclass(frozen=True)
+class RevokeResellerPortalAccessCommand:
+    context: CommandContext
+    reseller_id: UUID
+    principal_type: str
+    principal_id: UUID
+
+
+@dataclass(frozen=True)
+class ResellerPortalAccessRevocationOutcome:
+    reseller_id: UUID
+    principal_type: str
+    principal_id: UUID
+    changed: bool
+    credentials_deactivated: int
+    sessions_revoked: int
+    command_id: UUID
+    correlation_id: UUID
 
 
 @dataclass(frozen=True)
@@ -673,6 +699,179 @@ def provision_reseller_user(
             "identity_conflict",
             "Reseller onboarding conflicts with an existing canonical record.",
         ) from exc
+
+
+def _locked_reseller_portal_link(
+    db: Session,
+    *,
+    reseller_id: UUID,
+    principal_type: str,
+    principal_id: UUID,
+) -> ResellerUser:
+    statement = select(ResellerUser).where(ResellerUser.reseller_id == reseller_id)
+    if principal_type == ResellerPortalPrincipalType.RESELLER_USER:
+        statement = statement.where(
+            ResellerUser.id == principal_id,
+            ResellerUser.subscriber_id.is_(None),
+        )
+    elif principal_type == ResellerPortalPrincipalType.SUBSCRIBER:
+        statement = statement.where(ResellerUser.subscriber_id == principal_id)
+    else:
+        raise _error(
+            "invalid_command",
+            "Reseller portal principal type is not supported.",
+            principal_type=principal_type,
+        )
+    link = db.execute(statement.with_for_update()).scalar_one_or_none()
+    if link is None:
+        raise _error(
+            "portal_user_not_found",
+            "Reseller portal user was not found.",
+            reseller_id=str(reseller_id),
+            principal_type=principal_type,
+            principal_id=str(principal_id),
+        )
+    return link
+
+
+def _schedule_access_revocation_projection(
+    db: Session,
+    *,
+    principal_type: str,
+    principal_id: UUID,
+) -> None:
+    def invalidate_auth_cache(_callback_db: Session) -> None:
+        auth_cache.invalidate_principal(principal_type, str(principal_id))
+
+    def revoke_portal_sessions(callback_db: Session) -> None:
+        from app.services import reseller_portal
+
+        reseller_portal.revoke_reseller_sessions_for_principal(
+            principal_id,
+            db=callback_db,
+            require_durable=True,
+        )
+
+    # Keep these as separate callbacks: a cache outage in one projection must
+    # not prevent the other invalidation attempt after the durable DB revocation.
+    run_after_commit(db, invalidate_auth_cache)
+    run_after_commit(db, revoke_portal_sessions)
+
+
+def revoke_reseller_portal_access(
+    db: Session,
+    command: RevokeResellerPortalAccessCommand,
+) -> ResellerPortalAccessRevocationOutcome:
+    """Revoke one reseller membership while preserving identity and audit history."""
+
+    def operation() -> ResellerPortalAccessRevocationOutcome:
+        actor_type, actor_id = _validate_context(command.context)
+        reseller = db.execute(
+            select(Reseller).where(Reseller.id == command.reseller_id).with_for_update()
+        ).scalar_one_or_none()
+        if reseller is None:
+            raise _error(
+                "reseller_not_found",
+                "Reseller was not found.",
+                reseller_id=str(command.reseller_id),
+            )
+        link = _locked_reseller_portal_link(
+            db,
+            reseller_id=command.reseller_id,
+            principal_type=command.principal_type,
+            principal_id=command.principal_id,
+        )
+        changed = bool(link.is_active)
+        link.is_active = False
+
+        credentials_deactivated = 0
+        if command.principal_type == ResellerPortalPrincipalType.RESELLER_USER:
+            credentials = db.scalars(
+                select(UserCredential)
+                .where(
+                    UserCredential.reseller_user_id == command.principal_id,
+                    UserCredential.is_active.is_(True),
+                )
+                .with_for_update()
+            ).all()
+            for credential in credentials:
+                credential.is_active = False
+            credentials_deactivated = len(credentials)
+            session_filter = AuthSession.reseller_user_id == command.principal_id
+        else:
+            # Legacy reseller users are Subscriber identities. Removing the
+            # reseller membership must not disable a potentially shared customer
+            # credential; the inactive link is the reseller authorization gate.
+            session_filter = AuthSession.subscriber_id == command.principal_id
+
+        now = datetime.now(UTC)
+        sessions_revoked = int(
+            db.query(AuthSession)
+            .filter(
+                session_filter,
+                AuthSession.status == SessionStatus.active,
+                AuthSession.revoked_at.is_(None),
+            )
+            .update(
+                {"status": SessionStatus.revoked, "revoked_at": now},
+                synchronize_session=False,
+            )
+            or 0
+        )
+        metadata = {
+            **_command_metadata(command.context),
+            "principal_type": command.principal_type,
+            "principal_id": str(command.principal_id),
+            "credentials_deactivated": credentials_deactivated,
+            "sessions_revoked": sessions_revoked,
+            "changed": changed,
+        }
+        stage_audit_event(
+            db,
+            action="auth.reseller_portal_access_revoked",
+            entity_type="reseller",
+            entity_id=str(command.reseller_id),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            request_id=str(command.context.correlation_id),
+            status_code=200,
+            metadata=metadata,
+        )
+        if changed:
+            emit_event(
+                db,
+                EventType.reseller_user_access_revoked,
+                {
+                    **metadata,
+                    "aggregate_type": "reseller_user",
+                    "aggregate_id": str(link.id),
+                    "aggregate_version": str(command.context.command_id),
+                    "reseller_id": str(command.reseller_id),
+                },
+                actor=command.context.actor,
+            )
+        _schedule_access_revocation_projection(
+            db,
+            principal_type=command.principal_type,
+            principal_id=command.principal_id,
+        )
+        return ResellerPortalAccessRevocationOutcome(
+            reseller_id=command.reseller_id,
+            principal_type=command.principal_type,
+            principal_id=command.principal_id,
+            changed=changed,
+            credentials_deactivated=credentials_deactivated,
+            sessions_revoked=sessions_revoked,
+            command_id=command.context.command_id,
+            correlation_id=command.context.correlation_id,
+        )
+
+    return execute_owner_command(
+        db,
+        definition=_REVOKE_ACCESS_COMMAND,
+        context=command.context,
+        operation=operation,
+    )
 
 
 def materialize_reseller_invite_email(
