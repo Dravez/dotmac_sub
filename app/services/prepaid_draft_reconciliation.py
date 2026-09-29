@@ -7528,9 +7528,7 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         )
     if (
         round_money(
-            selected_payment_total
-            + existing_allocation_total
-            + opening_consumption
+            selected_payment_total + existing_allocation_total + opening_consumption
         )
         != invoice_total
     ):
@@ -7622,10 +7620,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         if historical_single_document
         else legacy_sequence_conserved
     )
-    if (
-        not funding_conserved
-        or authoritative_funding
-        != round_money(query.expected_authoritative_prepaid_funding)
+    if not funding_conserved or authoritative_funding != round_money(
+        query.expected_authoritative_prepaid_funding
     ):
         return _build_reviewed_sequence_preview(
             query=query,
@@ -8111,8 +8107,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 not preserve_forward_anchor
                 and (
                     len(projections) != 1
-                    or _utc(subscription.next_billing_at)
-                    != current.service_period_end
+                    or _utc(subscription.next_billing_at) != current.service_period_end
                 )
             )
         ):
@@ -8173,9 +8168,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
             "service_period_end": current.service_period_end.isoformat(),
             "funding_position_at": current.funding_position_at.isoformat(),
             "opening_credit": str(current.opening_credit),
-            "opening_funding_consumption": str(
-                current.opening_funding_consumption
-            ),
+            "opening_funding_consumption": str(current.opening_funding_consumption),
             "opening_funding_consumption_id": (
                 str(opening_consumption.id) if opening_consumption is not None else None
             ),

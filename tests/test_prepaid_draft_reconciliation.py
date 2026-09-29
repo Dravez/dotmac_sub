@@ -2778,9 +2778,7 @@ def test_reviewed_single_invoice_records_existing_debit_as_settlement(
     assert preview.opening_funding_consumption == Decimal("40.00")
     assert preview.post_boundary_credit == Decimal("110.00")
     anchor_before = subscription.next_billing_at
-    customer_position_before = calculate_customer_balance(
-        db_session, subscriber.id
-    )
+    customer_position_before = calculate_customer_balance(db_session, subscriber.id)
     db_session.rollback()
 
     command = ReconstructReviewedPrepaidInvoiceSequenceCommand(
