@@ -9,7 +9,9 @@ def _source(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_workflow_builder_controls_have_visible_capability_states_and_serialization() -> None:
+def test_workflow_builder_controls_have_visible_capability_states_and_serialization() -> (
+    None
+):
     template = _source("templates/admin/automation/rule_builder.html")
 
     assert "conditionButton.disabled = !conditionsAvailable" in template
@@ -43,7 +45,9 @@ def test_focused_workspaces_and_lifecycle_actions_are_reachable() -> None:
     assert 'href="/admin/automation/server-scripts"' in hub
     assert 'href="/admin/automation/runs"' in hub
     for action in ("publish", "pause", "resume"):
-        assert f"/admin/automation/rules/{{{{ workflow.rule_id }}}}/{action}" in workflows
+        assert (
+            f"/admin/automation/rules/{{{{ workflow.rule_id }}}}/{action}" in workflows
+        )
     assert "/admin/automation/scripts/{{ script.script_id }}/publish" in scripts
     assert "return_to" in route
 

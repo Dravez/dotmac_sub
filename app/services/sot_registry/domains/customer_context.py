@@ -35,7 +35,6 @@ from app.services.sot_manifest import (
 )
 from app.services.sot_registry.model import DomainSOT
 
-
 _CUSTOMER_STATUS_FIELD = AutomationConditionField(
     key="status",
     label="Account status",

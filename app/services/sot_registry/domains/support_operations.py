@@ -37,7 +37,6 @@ from app.services.sot_manifest import (
 )
 from app.services.sot_registry.model import DomainSOT
 
-
 _SUPPORT_WORKFLOW_FIELDS = (
     AutomationConditionField(
         key="status",
