@@ -7646,8 +7646,7 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             or payment.refunds
             or payment.reversal is not None
             or payment.allocations
-            or planned_by_payment.get(payment_id, Decimal("0.00"))
-            > settlement_credit
+            or planned_by_payment.get(payment_id, Decimal("0.00")) > settlement_credit
             or entry is None
             or not entry.is_active
             or entry.account_id != account_id
@@ -7676,24 +7675,18 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             )
         payments[payment.id] = payment
         selected_credit_by_payment[payment.id] = settlement_credit
-        selected_payment_total = round_money(
-            selected_payment_total + settlement_credit
-        )
+        selected_payment_total = round_money(selected_payment_total + settlement_credit)
     selected_payment_allocation_total = round_money(
         sum(planned_by_payment.values(), Decimal("0.00"))
     )
     selected_payment_residual = round_money(
         selected_payment_total - selected_payment_allocation_total
     )
-    if (
-        round_money(
-            selected_payment_allocation_total
-            + existing_allocation_total
-            + opening_consumption
-        )
-        != invoice_total
-        or selected_payment_residual < Decimal("0.00")
-    ):
+    if round_money(
+        selected_payment_allocation_total
+        + existing_allocation_total
+        + opening_consumption
+    ) != invoice_total or selected_payment_residual < Decimal("0.00"):
         return manual("selected payments do not conserve the invoice sequence total")
 
     pre_boundary_ids = {

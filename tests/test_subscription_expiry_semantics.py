@@ -7,7 +7,12 @@ from app.models.catalog import BillingMode, SubscriptionStatus
 from app.schemas.catalog import SubscriptionRead
 
 
-def _subscription_read(*, billing_mode: BillingMode, next_billing_at: datetime, end_at: datetime | None = None) -> SubscriptionRead:
+def _subscription_read(
+    *,
+    billing_mode: BillingMode,
+    next_billing_at: datetime,
+    end_at: datetime | None = None,
+) -> SubscriptionRead:
     now = datetime(2026, 9, 29, tzinfo=UTC)
     return SubscriptionRead(
         id=uuid4(),
