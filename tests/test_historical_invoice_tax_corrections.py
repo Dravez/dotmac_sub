@@ -34,6 +34,7 @@ from app.models.customer_subledger import (
 )
 from app.models.event_store import EventStore
 from app.models.prepaid_funding import PrepaidFundingBaseline
+from app.models.system_user import SystemUser
 from app.schemas.billing import PaymentCreate
 from app.services import billing as billing_service
 from app.services.billing._common import get_spendable_account_credit_balance
@@ -509,6 +510,15 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
         amount=Decimal("17625.00"),
         occurred_at=opening_at,
     )
+    authorized_user = SystemUser(
+        first_name="Test",
+        last_name="Finance Operator",
+        display_name="Test Finance Operator",
+        email=f"historical-tax-{uuid4()}@example.com",
+        is_active=True,
+    )
+    db_session.add(authorized_user)
+    db_session.commit()
 
     preview = preview_existing_replacement_tax_correction(db_session, query)
     assert preview.actionable, preview.reason
@@ -528,7 +538,7 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
         query=query,
         expected_preview_fingerprint=preview.fingerprint,
         permission_granted=True,
-        authorized_system_user_id=uuid4(),
+        authorized_system_user_id=authorized_user.id,
     )
     result = correct_historical_invoice_tax_using_existing_replacement(
         db_session,
