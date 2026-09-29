@@ -233,6 +233,14 @@ def _message_payload(
             str(data["permalink_url"]) if data.get("permalink_url") else None
         ),
         media_url=str(data["media_url"]) if data.get("media_url") else None,
+        meta_referral_observation=(
+            {str(key): str(value) for key, value in referral.items()}
+            if isinstance(
+                referral := data.get("meta_referral_observation"),
+                dict,
+            )
+            else None
+        ),
         contact_profile=(
             {
                 "display_name": (
@@ -448,6 +456,7 @@ def process_provider_observation(
                             "surface": payload.surface,
                             "permalink_url": payload.permalink_url,
                             "media_url": payload.media_url,
+                            "meta_referral_observation": payload.meta_referral_observation,
                             "contact_profile": payload.contact_profile,
                             "observation_id": str(row.id),
                             "campaign_attributed": payload.campaign_attributed,
