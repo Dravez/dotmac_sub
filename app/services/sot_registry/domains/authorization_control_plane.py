@@ -2256,7 +2256,7 @@ DOMAIN = DomainSOT(
                     ),
                     ConcernContract(
                         name="reseller portal access revocation",
-                        role=OwnerRole.COMMAND_WRITER,
+                        role=OwnerRole.APPLICATION_COORDINATOR,
                         input_names=(
                             "authorized reseller onboarding principal",
                             "canonical reseller onboarding state",

@@ -310,6 +310,7 @@ def test_final_instagram_sales_classification_creates_lead_without_form(
     db_session,
 ):
     conversation, message = _instagram_conversation(db_session)
+    db_session.commit()
 
     outcome = lead_intake.assess_inbound(
         db_session,
@@ -357,6 +358,7 @@ def test_final_instagram_sales_classification_creates_lead_without_form(
     assert origin.external_ad_id == "ig-ad-1"
     assert db_session.scalar(select(func.count(LeadIntakeInvitation.id))) == 0
 
+    db_session.commit()
     replay = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
@@ -387,6 +389,7 @@ def test_auto_form_enriches_existing_classified_lead_without_duplicate(db_sessio
         team=team,
         party_type=LeadIntakePartyType.organization,
     )
+    db_session.commit()
     db_session.add_all(
         [
             DomainSetting(
@@ -411,6 +414,7 @@ def test_auto_form_enriches_existing_classified_lead_without_duplicate(db_sessio
         SettingDomain.integration.value, "lead_intake_auto_send_enabled"
     )
     conversation, message = _instagram_conversation(db_session)
+    db_session.commit()
     assessed = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
@@ -427,6 +431,7 @@ def test_auto_form_enriches_existing_classified_lead_without_duplicate(db_sessio
         ),
     )
     assert assessed.token and assessed.lead_id
+    db_session.commit()
 
     submitted = lead_intake.submit_form(
         db_session,

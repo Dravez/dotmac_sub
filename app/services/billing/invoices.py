@@ -2186,6 +2186,9 @@ class Invoices(ListResponseMixin):
             and issuance_funding.reserved_amount > Decimal("0.00")
             and (not require_full_available_credit or issuance_funding.fully_funded)
         ):
+            # Persist the draft -> issued transition before the funding owner
+            # refreshes the locked invoice for its guarded application.
+            db.flush()
             AccountCreditApplications.apply_invoice_issuance_funding(
                 db,
                 invoice,
