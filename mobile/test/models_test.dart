@@ -324,8 +324,8 @@ void main() {
     test(
       'prefers server is_expired/expires_at when the backend provides them',
       () {
-        // Server says: active, no date expiry (prepaid lapses on balance, not
-        // next_billing_at). Client must trust it over local date math.
+        // Server says the prepaid paid-through anchor is the service expiry.
+        // Client must trust the backend projection over local date math.
         final s = Subscription.fromJson({
           'id': 's9',
           'account_id': 'a1',
@@ -333,11 +333,11 @@ void main() {
           'status': 'active',
           'billing_mode': 'prepaid',
           'next_billing_at': '2020-01-01T00:00:00Z',
-          'expires_at': null,
+          'expires_at': '2020-01-01T00:00:00Z',
           'is_expired': false,
         });
         expect(s.hasServerExpiry, isTrue);
-        expect(s.expiresAt, isNull);
+        expect(s.expiresAt, isNotNull);
         expect(s.isExpired, isFalse);
       },
     );

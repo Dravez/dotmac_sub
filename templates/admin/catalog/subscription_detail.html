@@ -594,7 +594,7 @@
                         <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">{{ subscription.start_at | app_datetime('%b %d, %Y %H:%M', '—') }}</p>
                     </div>
                     <div x-data="{ showCommercialTerms: false }">
-                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Next Billing</p>
+                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{% if subscription.billing_mode and subscription.billing_mode.value == 'prepaid' %}Service Expiry{% else %}Next Billing{% endif %}</p>
                         <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">{{ subscription.next_billing_at | app_datetime('%b %d, %Y %H:%M', '—') }}</p>
                         <button type="button"
                                 @click="showCommercialTerms = true"

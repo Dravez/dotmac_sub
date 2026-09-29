@@ -624,15 +624,19 @@ class SubscriptionRead(SubscriptionBase):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def expires_at(self) -> datetime | None:
-        """The date the service genuinely lapses, or null when it has none.
+        """The paid-through/service-expiry boundary exposed to clients.
 
-        This is an explicit contract end only. ``next_billing_at`` is the next
-        *charge* date (prepaid) / next invoice date (postpaid), NOT an expiry —
-        clients must not treat it as one. Prepaid service lapses on balance
-        exhaustion (a consumption-driven event, not a date); the real pending
-        lapse date in that case is exposed by ``GET /me/service-status``.
+        For prepaid service, ``next_billing_at`` is the projected end of the
+        currently paid entitlement and therefore the customer-visible expiry
+        boundary. For postpaid service it remains the next invoice date and must
+        never be presented as expiry; only an explicit contract ``end_at``
+        supplies a date-based expiry there.
         """
-        return self.end_at
+        if self.end_at is not None:
+            return self.end_at
+        if self.billing_mode is BillingMode.prepaid:
+            return self.next_billing_at
+        return None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
