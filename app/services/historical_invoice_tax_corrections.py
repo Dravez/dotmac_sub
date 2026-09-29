@@ -56,6 +56,7 @@ from app.schemas.billing import (
 )
 from app.services.audit import AuditEvents
 from app.services.billing._common import (
+    get_account_credit_balance,
     get_spendable_account_credit_balance,
     lock_account,
 )
@@ -1673,10 +1674,28 @@ def _build_existing_replacement_preview(
     active_allocations = tuple(db.scalars(active_allocations_stmt).all())
     payment_amount = round_money(payment.amount)
     unallocated_amount = round_money(payment_amount - source_subtotal)
-    account_credit = round_money(
-        get_spendable_account_credit_balance(
-            db, str(query.account_id), currency=currency
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == currency,
         )
+    )
+    requires_preopening_release = (
+        opening is not None
+        and allocation.consumption_ledger_entry_id is None
+        and _utc(allocation.created_at) <= _utc(opening.occurred_at)
+    )
+    # The reviewed opening omitted this legacy allocation, so the spendable
+    # reader remains capped until the opening correction is staged. Only this
+    # exact pre-opening path may inspect raw ledger credit during preview; the
+    # opening and account-credit owners revalidate it atomically during apply.
+    credit_reader = (
+        get_account_credit_balance
+        if requires_preopening_release
+        else get_spendable_account_credit_balance
+    )
+    account_credit = round_money(
+        credit_reader(db, str(query.account_id), currency=currency)
     )
     has_return = bool(
         db.scalar(
@@ -1764,17 +1783,7 @@ def _build_existing_replacement_preview(
     opening_amount_before: Decimal | None = None
     opening_amount_after: Decimal | None = None
     preopening_release_fingerprint: str | None = None
-    opening = db.scalar(
-        select(CustomerSubledgerOpeningPosition).where(
-            CustomerSubledgerOpeningPosition.account_id == query.account_id,
-            CustomerSubledgerOpeningPosition.currency == currency,
-        )
-    )
-    if (
-        opening is not None
-        and allocation.consumption_ledger_entry_id is None
-        and _utc(allocation.created_at) <= _utc(opening.occurred_at)
-    ):
+    if requires_preopening_release and opening is not None:
         release_query = ReviewedPreopeningAllocationReleaseQuery(
             account_id=query.account_id,
             allocation_id=allocation.id,
