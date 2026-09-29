@@ -17,6 +17,7 @@ from app.models.subscription_change import (
     SubscriptionChangeRequest,
     SubscriptionChangeStatus,
 )
+from app.models.system_user import SystemUser
 from app.services import catalog as catalog_service
 from app.services import web_catalog_subscriptions as core
 from app.services.subscription_changes import subscription_change_requests
@@ -46,7 +47,37 @@ def _same_family_offers(db_session):
     return current, target
 
 
-def test_instant_change_swaps_offer_now(db_session, subscriber, monkeypatch):
+def test_change_request_preserves_long_admin_confirmation_origin(
+    db_session, subscriber
+):
+    """Admin provenance may include a UUID and bulk action name."""
+    current, target = _same_family_offers(db_session)
+    subscription = _make_subscription(
+        db_session,
+        subscriber,
+        current,
+        next_billing_at=datetime.now(UTC) + timedelta(days=15),
+        start_at=datetime.now(UTC) - timedelta(days=15),
+    )
+    origin = f"admin:catalog_bulk:change_plan:{subscriber.id}"
+
+    request = subscription_change_requests.create(
+        db_session,
+        subscription_id=str(subscription.id),
+        new_offer_id=str(target.id),
+        effective_date=datetime.now(UTC).date(),
+        requested_by_subscriber_id=str(subscriber.id),
+        confirmation_preview_fingerprint="f" * 64,
+        confirmation_idempotency_key="admin-origin-length-regression",
+        confirmation_origin=origin,
+    )
+
+    assert request.confirmation_origin == origin
+
+
+def test_instant_change_keeps_staff_actor_out_of_subscriber_fk(
+    db_session, subscriber, monkeypatch
+):
     """One owner-previewed instant change swaps now with exact evidence."""
     _stub_plan_change_side_effects(monkeypatch)
     current, target = _same_family_offers(db_session)
@@ -67,6 +98,14 @@ def test_instant_change_swaps_offer_now(db_session, subscriber, monkeypatch):
             memo="Wallet top-up for prorated admin plan change",
         )
     )
+    staff = SystemUser(
+        first_name="Admin",
+        last_name="Operator",
+        display_name="Admin Operator",
+        email="admin-plan-change@example.com",
+        is_active=True,
+    )
+    db_session.add(staff)
     db_session.commit()
 
     confirmation = _confirmation_kwargs(db_session, subscription, target)
@@ -75,7 +114,7 @@ def test_instant_change_swaps_offer_now(db_session, subscriber, monkeypatch):
         str(subscription.id),
         str(target.id),
         request=None,
-        actor_id=None,
+        actor_id=str(staff.id),
         preview_fingerprint=confirmation["preview_fingerprint"],
         preview_effective_at=confirmation["preview_effective_at"],
         idempotency_key="admin-instant-test",
@@ -90,6 +129,8 @@ def test_instant_change_swaps_offer_now(db_session, subscriber, monkeypatch):
         .one()
     )
     assert request.status == SubscriptionChangeStatus.applied
+    assert request.requested_by_subscriber_id is None
+    assert request.confirmation_origin == f"admin:catalog_bulk:change_plan:{staff.id}"
     assert request.confirmation_preview_fingerprint
     assert request.account_adjustment_id is not None
     assert request.ledger_entry_id is not None

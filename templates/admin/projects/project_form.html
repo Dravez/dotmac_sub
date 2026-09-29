@@ -24,6 +24,8 @@
     <form method="post"
           action="{% if form_mode == 'edit' and project %}/admin/projects/{{ project.number or project.id }}/edit{% else %}/admin/projects{% endif %}"
           class="space-y-5"
+          data-automation-target="operations.project"
+          data-automation-record-id="{{ project.id if project else '' }}"
           x-data='{ templateMap: {{ project_template_map | tojson }}, planMap: {{ project_template_plan_map | tojson }}, projectType: {{ prefill.project_type | tojson }}, originalTemplate: {{ original_project_template_id | tojson }}, selectedTemplate: {{ prefill.project_template_id | tojson }} }'>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
 
@@ -184,6 +186,8 @@
                 </div>
             </div>
         </div>
+
+        {% include 'admin/custom_fields/_creation_fields.html' %}
 
         <div class="flex items-center justify-between border-t border-slate-200/70 pt-4 dark:border-slate-700/70">
             <label class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">

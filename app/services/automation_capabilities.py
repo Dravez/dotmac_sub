@@ -45,6 +45,7 @@ def all_module_manifests() -> tuple[AutomationModuleManifest, ...]:
                 actions=declaration.actions if declaration else (),
                 legacy_surfaces=(declaration.legacy_surfaces if declaration else ()),
                 catalog_items=(declaration.catalog_items if declaration else ()),
+                script_targets=(declaration.script_targets if declaration else ()),
                 manifest_version=(
                     declaration.manifest_version if declaration else None
                 ),
@@ -156,6 +157,36 @@ def capability_registry_errors() -> tuple[str, ...]:
             f"automation module {manifest.module_key!r} repeats target {key!r}"
             for key in _duplicates(manifest.target_types)
         )
+        errors.extend(
+            f"automation module {manifest.module_key!r} repeats script target {key!r}"
+            for key in _duplicates(
+                tuple(target.key for target in manifest.script_targets)
+            )
+        )
+        for target in manifest.script_targets:
+            if not all(
+                value.strip()
+                for value in (target.key, target.label, target.entity_type)
+            ):
+                errors.append(
+                    f"automation module {manifest.module_key!r} has an incomplete script target"
+                )
+            if not target.client_events and not target.server_events:
+                errors.append(
+                    f"automation script target {target.key!r} has no executable events"
+                )
+            if not target.read_permission.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no read permission"
+                )
+            if not target.tenant_id_field.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no tenant identity field"
+                )
+            if not target.entity_id_field.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no entity identity field"
+                )
         for trigger in manifest.triggers:
             if trigger.entity_type not in manifest.target_types:
                 errors.append(
@@ -206,6 +237,27 @@ def capability_registry_errors() -> tuple[str, ...]:
                 f"action {action.key!r} repeats input {key!r}"
                 for key in _duplicates(tuple(item.key for item in action.inputs))
             )
+            for action_input in action.inputs:
+                if not action_input.key.strip() or not action_input.label.strip():
+                    errors.append(
+                        f"action {action.key!r} has a blank input key or label"
+                    )
+                if (
+                    action_input.value_type is AutomationValueType.enum
+                    and not action_input.enum_values
+                ):
+                    errors.append(
+                        f"action {action.key!r} enum input "
+                        f"{action_input.key!r} has no values"
+                    )
+                if (
+                    action_input.value_type is not AutomationValueType.enum
+                    and action_input.enum_values
+                ):
+                    errors.append(
+                        f"action {action.key!r} non-enum input "
+                        f"{action_input.key!r} declares enum values"
+                    )
         for item in manifest.catalog_items:
             if not all(
                 (
