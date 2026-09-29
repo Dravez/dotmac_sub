@@ -1,9 +1,12 @@
 """Admin customer (person & business) management web routes."""
 
+import csv
+import io
 import json
 import logging
 import uuid
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal
 from urllib.parse import quote_plus
 from uuid import UUID, uuid4
@@ -152,7 +155,7 @@ def _kick_notification_delivery(result: dict[str, object]) -> dict[str, object]:
 
 
 contacts_router = APIRouter(prefix="/contacts", tags=["web-admin-contacts"])
-_ALLOWED_USAGE_PERIODS = {"current", "last"}
+_ALLOWED_USAGE_PERIODS = {"current", "last", "custom"}
 
 
 def _htmx_error_response(
@@ -313,6 +316,43 @@ def _normalize_usage_view(value: object) -> Literal["chart", "table"]:
     if value == "table":
         return "table"
     return "chart"
+
+
+def _usage_page_query(
+    *,
+    customer_id: UUID,
+    period: str,
+    start_date: date | None,
+    end_date: date | None,
+    page: int,
+    per_page: int,
+) -> customer_portal.UsagePageQuery:
+    date_range = None
+    if start_date is not None or end_date is not None:
+        if start_date is None or end_date is None:
+            raise customer_portal.UsageQueryError(
+                code="usage_date_range_incomplete",
+                message="Select both a start date and an end date.",
+                retryable=False,
+            )
+        date_range = customer_portal.UsageDateRange(start_date, end_date)
+        period = customer_portal.UsagePeriod.custom.value
+    normalized_period = _normalize_usage_period(period)
+    return customer_portal.UsagePageQuery(
+        customer_id=customer_id,
+        period=customer_portal.UsagePeriod(normalized_period),
+        date_range=date_range,
+        page=page,
+        per_page=per_page,
+        allow_postgres_fallback=True,
+    )
+
+
+def _csv_safe_cell(value: object) -> str:
+    rendered = str(value or "")
+    if rendered.startswith(("=", "+", "-", "@")):
+        return f"'{rendered}"
+    return rendered
 
 
 def _format_bps(value: float | int | None) -> str:
@@ -875,11 +915,24 @@ def person_detail(
     usage_page: int = Query(1, ge=1),
     usage_per_page: int = Query(25, ge=10, le=100),
     usage_view: str = Query("chart", pattern="^(chart|table)$"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     """View customer details (unified — person and org members)."""
     usage_period = _normalize_usage_period(usage_period)
     usage_view = _normalize_usage_view(usage_view)
+    if usage_start_date is not None or usage_end_date is not None:
+        if usage_start_date is None or usage_end_date is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Select both a start date and an end date.",
+            )
+        try:
+            customer_portal.UsageDateRange(usage_start_date, usage_end_date)
+        except customer_portal.UsageQueryError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
+        usage_period = customer_portal.UsagePeriod.custom.value
     request_auth = getattr(getattr(request, "state", None), "auth", None) or {}
     # Same gate the inbox workspace uses, decided here and honoured by the
     # snapshot builder so unpermitted conversation data is never assembled.
@@ -961,6 +1014,11 @@ def person_detail(
     )
     if usage_view == "table":
         stats_url += "&usage_view=table"
+    if usage_start_date is not None and usage_end_date is not None:
+        stats_url += (
+            f"&usage_start_date={usage_start_date.isoformat()}"
+            f"&usage_end_date={usage_end_date.isoformat()}"
+        )
     detail_config = {
         "statsUrl": stats_url,
         "detailUrl": f"/admin/customers/person/{customer.id}",
@@ -981,6 +1039,8 @@ def person_detail(
             "usage_page": usage_page,
             "usage_per_page": usage_per_page,
             "usage_view": usage_view,
+            "usage_start_date": usage_start_date,
+            "usage_end_date": usage_end_date,
             "customer_type": customer_type,
             "detail_config": detail_config,
             "bulk_notification_channels": notification_channels,
@@ -1407,6 +1467,8 @@ def person_detail_stats(
     usage_page: int = Query(1, ge=1),
     usage_per_page: int = Query(25, ge=10, le=100),
     usage_view: str = Query("chart", pattern="^(chart|table)$"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     usage_period = _normalize_usage_period(usage_period)
@@ -1414,14 +1476,19 @@ def person_detail_stats(
     subscriber = _get_subscriber(db=db, subscriber_id=customer_id)
 
     usage_customer = {"subscriber_id": str(subscriber.id)}
-    usage_portal = customer_portal.get_usage_page(
-        db,
-        usage_customer,
-        period=usage_period,
-        page=usage_page,
-        per_page=usage_per_page,
-        allow_postgres_fallback=True,
-    )
+    try:
+        usage_query = _usage_page_query(
+            customer_id=UUID(str(subscriber.id)),
+            period=usage_period,
+            start_date=usage_start_date,
+            end_date=usage_end_date,
+            page=usage_page,
+            per_page=usage_per_page,
+        )
+        usage_result = customer_portal.query_usage_page(db, usage_query)
+    except customer_portal.UsageQueryError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    usage_portal = usage_result.to_template_context()
     usage_subscription = resolve_customer_subscription(db, usage_customer)
     initial_bandwidth_stats = _load_initial_bandwidth_stats(
         db,
@@ -1440,6 +1507,73 @@ def person_detail_stats(
             ),
             "usage_view": usage_view,
         },
+    )
+
+
+@router.get(
+    "/person/{customer_id}/stats/export.csv",
+    dependencies=[Depends(require_permission("customer:read"))],
+)
+def person_detail_stats_export(
+    customer_id: str,
+    usage_period: str = Query("current"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Export every customer usage record matching the selected date filter."""
+    usage_period = _normalize_usage_period(usage_period)
+    subscriber = _get_subscriber(db=db, subscriber_id=customer_id)
+    try:
+        usage_query = _usage_page_query(
+            customer_id=UUID(str(subscriber.id)),
+            period=usage_period,
+            start_date=usage_start_date,
+            end_date=usage_end_date,
+            page=1,
+            per_page=25,
+        )
+        usage_result = customer_portal.query_usage_export(db, usage_query)
+    except customer_portal.UsageQueryError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Date",
+            "Type",
+            "Total usage",
+            "Download",
+            "Upload",
+            "Unit",
+            "Notes",
+        ]
+    )
+    for record in usage_result.usage_records:
+        writer.writerow(
+            [
+                record.recorded_at.date().isoformat(),
+                _csv_safe_cell(record.usage_type),
+                f"{record.amount:.2f}",
+                f"{record.download_amount:.2f}",
+                f"{record.upload_amount:.2f}",
+                _csv_safe_cell(record.unit),
+                _csv_safe_cell(record.description),
+            ]
+        )
+
+    range_suffix = (
+        f"{usage_result.date_range.start_date.isoformat()}_to_"
+        f"{usage_result.date_range.end_date.isoformat()}"
+        if usage_result.date_range
+        else usage_result.period.value
+    )
+    filename = f"customer-{subscriber.id}-stats-{range_suffix}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

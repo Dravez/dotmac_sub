@@ -24,7 +24,9 @@ octets so the headline is never a misleading zero.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import BigInteger, cast, func, select
@@ -38,11 +40,53 @@ from app.models.usage import (
     RadiusAccountingSession,
     SubscriberDailyUsage,
 )
+from app.services.domain_errors import DomainError
 from app.timezone import APP_TIMEZONE
 
 logger = logging.getLogger(__name__)
 
 PERIODS = ("hour", "today", "week", "cycle", "all")
+
+
+class UsagePeriod(StrEnum):
+    current = "current"
+    last = "last"
+    custom = "custom"
+
+
+class UsageQueryError(DomainError):
+    """Stable validation failure for customer usage reads."""
+
+
+@dataclass(frozen=True, slots=True)
+class UsageDateRange:
+    """Inclusive calendar-day range selected for a customer usage query."""
+
+    start_date: date
+    end_date: date
+
+    def __post_init__(self) -> None:
+        if self.start_date > self.end_date:
+            raise UsageQueryError(
+                code="usage_date_range_reversed",
+                message="Start date must be on or before end date.",
+                retryable=False,
+            )
+        if (self.end_date - self.start_date).days > 3660:
+            raise UsageQueryError(
+                code="usage_date_range_too_large",
+                message="Date range cannot exceed 10 years.",
+                retryable=False,
+            )
+
+    @property
+    def start_at(self) -> datetime:
+        return datetime.combine(self.start_date, time.min, tzinfo=UTC)
+
+    @property
+    def end_at(self) -> datetime:
+        return datetime.combine(self.end_date, time.max, tzinfo=UTC)
+
 
 # A gap between consecutive points beyond this multiple of the series' typical
 # (median) spacing is treated as idle and skipped rather than filled with a flat

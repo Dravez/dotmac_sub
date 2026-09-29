@@ -2513,7 +2513,10 @@ DOMAIN = DomainSOT(
             notes=(
                 "Authoritative zero is a valid total. Customer clients do "
                 "not replace server totals with loaded-session pages or "
-                "retention-limited chart series."
+                "retention-limited chart series. Operator-selected custom "
+                "date ranges are inclusive calendar-day windows; the Stats "
+                "Records CSV uses the same typed window and exports the full "
+                "filtered result rather than the visible page."
             ),
         ),
         SOTService(

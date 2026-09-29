@@ -6,6 +6,11 @@
 {% set usage_page_query_key = usage_page_query_key | default('page') %}
 {% set usage_per_page_query_key = usage_per_page_query_key | default('per_page') %}
 {% set usage_view_query_key = usage_view_query_key | default('view') %}
+{% set usage_start_date_query_key = usage_start_date_query_key | default('start_date') %}
+{% set usage_end_date_query_key = usage_end_date_query_key | default('end_date') %}
+{% set usage_start_date = usage_start_date | default('') %}
+{% set usage_end_date = usage_end_date | default('') %}
+{% set usage_date_query = usage_date_query | default('') %}
 {% set usage_anchor = usage_anchor | default('') %}
 {% set usage_partial_navigation_url = usage_partial_navigation_url | default(none) %}
 {% set bandwidth_chart_api_base = bandwidth_chart_api_base | default('/portal/bandwidth') %}
@@ -22,6 +27,8 @@
 {% set usage_records_panel_id = usage_records_panel_id | default('usage-records-panel') %}
 {% set usage_records_loading_id = usage_records_panel_id ~ '-loading' %}
 {% set usage_records_chart_label = usage_records_chart_label | default('Usage (GB)') %}
+{% set usage_filter_enabled = usage_filter_enabled | default(false) %}
+{% set usage_export_url = usage_export_url | default(none) %}
 {% set show_fup_panel = show_fup_panel if show_fup_panel is defined else usage_theme == 'admin' %}
 {% set bandwidth_chart_initial_stats = bandwidth_chart_initial_stats | default(None) %}
 {% if usage_theme == 'admin' %}
@@ -266,7 +273,7 @@
              chartLabel: "Monthly Usage (GB)"
          }) : { init() {} }'
          x-init="if (typeof init === 'function') init()">
-        <div class="flex items-center justify-between gap-4 border-b border-slate-200/60 px-6 py-4 dark:border-slate-700/60">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/60 px-4 py-4 sm:px-6 dark:border-slate-700/60">
             <h2 class="flex items-center gap-2 text-lg font-semibold {{ usage_primary_text }}" style="font-family: var(--font-display);">
                 <svg class="h-5 w-5 {{ usage_accent_icon }}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z"/></svg>
                 Usage History
@@ -312,8 +319,16 @@
                 <svg class="h-5 w-5 {{ usage_muted_text }}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
                 {{ usage_records_title }}
             </h2>
-            {% if usage_enable_records_chart %}
-            <div class="flex items-center gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-700">
+            <div class="flex flex-wrap items-center justify-end gap-2">
+                {% if usage_export_url %}
+                <a href="{{ usage_export_url }}"
+                   class="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600 dark:focus-visible:ring-offset-slate-800">
+                    <svg aria-hidden="true" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2"/></svg>
+                    Export CSV
+                </a>
+                {% endif %}
+                {% if usage_enable_records_chart %}
+                <div class="flex items-center gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-700" aria-label="Statistics record view">
                 <button type="button"
                         @click="setRecordsView('chart')"
                         :class="recordsView === 'chart' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-600 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'"
@@ -326,9 +341,46 @@
                         class="rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors">
                     Table
                 </button>
+                </div>
+                {% endif %}
             </div>
-            {% endif %}
         </div>
+        {% if usage_filter_enabled %}
+        <form action="{{ usage_navigation_base_url }}#stats" method="get" class="border-b border-slate-200/60 bg-slate-50/60 px-4 py-4 dark:border-slate-700/60 dark:bg-slate-900/20 sm:px-6">
+            <input type="hidden" name="{{ usage_period_query_key }}" value="custom">
+            <input type="hidden" name="{{ usage_page_query_key }}" value="1">
+            <input type="hidden" name="{{ usage_per_page_query_key }}" value="{{ per_page }}">
+            <input type="hidden" name="{{ usage_view_query_key }}" value="table">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
+                <div class="grid flex-1 gap-3 sm:grid-cols-2">
+                    <label class="block text-sm font-semibold text-slate-700 dark:text-slate-200">
+                        Start date
+                        <input type="date" name="{{ usage_start_date_query_key }}" value="{{ usage_start_date }}" required
+                               max="{{ usage_end_date or '' }}"
+                               class="mt-1 h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm font-normal text-slate-900 shadow-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/20 dark:border-slate-600 dark:bg-slate-800 dark:text-white">
+                    </label>
+                    <label class="block text-sm font-semibold text-slate-700 dark:text-slate-200">
+                        End date
+                        <input type="date" name="{{ usage_end_date_query_key }}" value="{{ usage_end_date }}" required
+                               min="{{ usage_start_date or '' }}"
+                               class="mt-1 h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm font-normal text-slate-900 shadow-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/20 dark:border-slate-600 dark:bg-slate-800 dark:text-white">
+                    </label>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 dark:bg-amber-500 dark:text-slate-950 dark:hover:bg-amber-400 dark:focus-visible:ring-offset-slate-800">
+                        Apply date range
+                    </button>
+                    {% if usage_start_date or usage_end_date %}
+                    <a href="{{ usage_navigation_base_url }}?{{ usage_period_query_key }}=current&{{ usage_view_query_key }}=table{{ usage_anchor }}"
+                       class="inline-flex min-h-10 items-center justify-center rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-slate-300 dark:hover:bg-slate-700">
+                        Clear
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+            <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Dates are inclusive. Export uses the same range and includes all matching records.</p>
+        </form>
+        {% endif %}
         {% if usage_enable_records_chart %}
         <div x-show="recordsView === 'chart'" class="p-6" x-cloak>
             {% if usage_chart_records %}
@@ -415,13 +467,13 @@
             </div>
             <div class="flex items-center gap-2">
                 {% if page > 1 %}
-                <a href="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_anchor }}"
+                <a href="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}{{ usage_anchor }}"
                    {% if usage_partial_navigation_url %}
-                   hx-get="{{ usage_partial_navigation_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table"
+                   hx-get="{{ usage_partial_navigation_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}"
                    hx-target="#{{ usage_records_panel_id }}"
                    hx-select="#{{ usage_records_panel_id }}"
                    hx-swap="outerHTML"
-                   hx-push-url="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_anchor }}"
+                   hx-push-url="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page - 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}{{ usage_anchor }}"
                    hx-indicator="#{{ usage_records_loading_id }}"
                    hx-disabled-elt="this"
                    {% endif %}
@@ -431,13 +483,13 @@
                 </a>
                 {% endif %}
                 {% if page < total_pages %}
-                <a href="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_anchor }}"
+                <a href="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}{{ usage_anchor }}"
                    {% if usage_partial_navigation_url %}
-                   hx-get="{{ usage_partial_navigation_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table"
+                   hx-get="{{ usage_partial_navigation_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}"
                    hx-target="#{{ usage_records_panel_id }}"
                    hx-select="#{{ usage_records_panel_id }}"
                    hx-swap="outerHTML"
-                   hx-push-url="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_anchor }}"
+                   hx-push-url="{{ usage_navigation_base_url }}?{{ usage_page_query_key }}={{ page + 1 }}&{{ usage_per_page_query_key }}={{ per_page }}&{{ usage_period_query_key }}={{ period }}&{{ usage_view_query_key }}=table{{ usage_date_query }}{{ usage_anchor }}"
                    hx-indicator="#{{ usage_records_loading_id }}"
                    hx-disabled-elt="this"
                    {% endif %}
