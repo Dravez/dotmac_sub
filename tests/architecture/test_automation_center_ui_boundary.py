@@ -104,6 +104,7 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert "Workflows" in workflows
     assert "updated_from" in client_scripts
     assert "updated_to" in client_scripts
+    assert "target_groups" in route
     assert "Create client script" not in template
     assert "Create server script" not in template
     assert '"/workflows"' in route
@@ -111,6 +112,9 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert '"/server-scripts"' in route
     assert "server_script_runtime_state" in template
     assert "JavaScript source" in script_builder
+    assert "stable lowercase dotted identifier" in script_builder
+    assert "Both mechanisms use JavaScript" in script_builder
+    assert "no free-text event entry" in script_builder
     assert "published_client_scripts" in route
     assert "content_sha256" in client_runtime
     assert "data-automation-target" in client_runtime

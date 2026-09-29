@@ -5,7 +5,7 @@
 
 {% block content %}
 <div class="mx-auto max-w-4xl space-y-7">
-    {% call page_header(title=("Edit workflow draft" if rule_id else "Create a workflow"), subtitle="Choose a module, then combine its approved event triggers, conditions, and actions.", color="indigo") %}
+    {% call page_header(title=("Edit workflow draft" if rule_id else "Create a workflow"), subtitle="Workflow is the operator name for a central rule: choose an owner-produced event, narrow it with declared conditions, and run typed actions.", color="indigo") %}
         <a href="/admin/automation" class="text-sm font-semibold text-indigo-700 underline underline-offset-4 dark:text-indigo-300">Back to Automation Center</a>
     {% endcall %}
     {% if error %}<div role="alert" class="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{{ error }}</div>{% endif %}
@@ -27,8 +27,9 @@
             <select id="module-key" {% if rule_id %}disabled{% endif %} class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
                 {% for module in module_options %}<option value="{{ module.key }}" data-trigger-keys="{{ module.trigger_keys|join(',') }}">{{ module.label }}</option>{% endfor %}
             </select>
-            <p class="text-xs text-slate-500 dark:text-slate-400">The module determines which event triggers and owner actions can be combined.</p>
-            <label for="trigger-key" class="sr-only">Trigger</label>
+            <p class="text-xs text-slate-500 dark:text-slate-400">The module determines which event triggers, condition fields, and owner actions can be combined.</p>
+            <details class="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700"><summary class="cursor-pointer font-semibold text-indigo-700 dark:text-indigo-300">What do module and event mean?</summary><p class="mt-2 leading-6 text-slate-600 dark:text-slate-400">A module is the source-of-truth area that owns the record. An event is a lifecycle fact emitted by that owner, such as “ticket status changed” or “customer account reactivated.” Events are added by a reviewed code declaration and cannot be invented in this form.</p></details>
+            <label for="trigger-key" class="block text-sm font-medium text-slate-800 dark:text-slate-200">Event trigger</label>
             <select id="trigger-key" {% if rule_id %}disabled{% endif %} class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
                 {% for trigger in triggers %}<option value="{{ trigger.key }}" {% if trigger.key == trigger_key %}selected{% endif %}>{{ trigger.label }}</option>{% endfor %}
             </select>

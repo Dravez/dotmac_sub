@@ -290,6 +290,37 @@ def _script_form_context(
     event_name: str = "",
     source_code: str = "",
 ) -> dict[str, object]:
+    target_groups = tuple(
+        {
+            "module_key": manifest.module_key,
+            "module_label": manifest.label,
+            "targets": tuple(
+                {
+                    "key": target.key,
+                    "label": target.label,
+                    "entity_type": target.entity_type,
+                    "events": list(
+                        target.client_events
+                        if kind is AutomationScriptKind.client
+                        else target.server_events
+                    ),
+                }
+                for target in manifest.script_targets
+                if (
+                    target.client_events
+                    if kind is AutomationScriptKind.client
+                    else target.server_events
+                )
+            ),
+        }
+        for manifest in automation_capabilities.registered_module_manifests()
+        if any(
+            target.client_events
+            if kind is AutomationScriptKind.client
+            else target.server_events
+            for target in manifest.script_targets
+        )
+    )
     targets = tuple(
         {
             "key": target.key,
@@ -323,6 +354,7 @@ def _script_form_context(
         if kind is AutomationScriptKind.client
         else "Server script",
         "script_targets": targets,
+        "script_target_groups": target_groups,
         "name": name,
         "key": key,
         "description": description,
@@ -614,22 +646,33 @@ def _script_workspace(
         and (updated_from is None or script.updated_at.date() >= updated_from)
         and (updated_to is None or script.updated_at.date() <= updated_to)
     )
-    target_options = tuple(
+    target_groups = tuple(
         {
-            "key": target.entity_type,
-            "label": target.label,
-            "events": list(
-                target.client_events
-                if kind is AutomationScriptKind.client
-                else target.server_events
+            "module_label": manifest.label,
+            "targets": tuple(
+                {
+                    "key": target.entity_type,
+                    "label": target.label,
+                    "events": list(
+                        target.client_events
+                        if kind is AutomationScriptKind.client
+                        else target.server_events
+                    ),
+                }
+                for target in manifest.script_targets
+                if (
+                    target.client_events
+                    if kind is AutomationScriptKind.client
+                    else target.server_events
+                )
             ),
         }
         for manifest in automation_capabilities.registered_module_manifests()
-        for target in manifest.script_targets
-        if (
+        if any(
             target.client_events
             if kind is AutomationScriptKind.client
             else target.server_events
+            for target in manifest.script_targets
         )
     )
     return templates.TemplateResponse(
@@ -653,7 +696,7 @@ def _script_workspace(
             "updated_from": updated_from.isoformat() if updated_from else "",
             "updated_to": updated_to.isoformat() if updated_to else "",
             "statuses": tuple(automation_scripts.AutomationScriptStatus),
-            "targets": target_options,
+            "target_groups": target_groups,
             "can_create_scripts": has_permission(
                 auth, db, automation_scripts.SCRIPT_CREATE_PERMISSION
             ),
