@@ -47,6 +47,14 @@ Customer-specific rules may also name an explicit set of customer identities.
 Those identities come from the trigger's declared customer field and are
 validated against the customer owner when a draft is saved and published.
 
+Customer account workflows may use the owner-produced account-created,
+account-updated, status-changed, suspended, and reactivated events. Support
+ticket workflows may use ticket-created, assigned, status-changed,
+priority-changed, resolution-requested, resolution-confirmed, and
+resolution-disputed events. These choices are declared by the owning SOT and
+their bounded event producers; operators cannot add arbitrary event names from
+the UI.
+
 ## Rule shape
 
 The first contract is deliberately bounded:

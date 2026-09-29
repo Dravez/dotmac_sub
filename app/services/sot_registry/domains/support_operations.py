@@ -37,6 +37,62 @@ from app.services.sot_manifest import (
 )
 from app.services.sot_registry.model import DomainSOT
 
+
+_SUPPORT_WORKFLOW_FIELDS = (
+    AutomationConditionField(
+        key="status",
+        label="Ticket status",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=(
+            "new",
+            "open",
+            "pending",
+            "waiting_on_customer",
+            "lastmile_rerun",
+            "site_under_construction",
+            "on_hold",
+            "pending_confirmation",
+            "closed",
+            "canceled",
+        ),
+    ),
+    AutomationConditionField(
+        key="priority",
+        label="Priority",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=("lower", "low", "medium", "normal", "high", "urgent"),
+    ),
+    AutomationConditionField(
+        key="channel",
+        label="Channel",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=("web", "email", "phone", "chat", "api"),
+    ),
+    AutomationConditionField(
+        key="customer_id",
+        label="Customer",
+        value_type=AutomationValueType.uuid,
+        operators=(AutomationOperator.equals, AutomationOperator.in_values),
+    ),
+)
+
+_SUPPORT_ASSIGNMENT_FIELDS = (
+    *_SUPPORT_WORKFLOW_FIELDS,
+    AutomationConditionField(
+        key="service_team_id",
+        label="Service team",
+        value_type=AutomationValueType.uuid,
+        operators=(
+            AutomationOperator.equals,
+            AutomationOperator.is_empty,
+            AutomationOperator.is_not_empty,
+        ),
+    ),
+)
+
 DOMAIN = DomainSOT(
     domain="support_operations",
     services=(
@@ -749,6 +805,8 @@ DOMAIN = DomainSOT(
                         "ticket.created",
                         "support.ticket.created",
                         "ticket.assigned",
+                        "ticket.status_changed",
+                        "ticket.priority_changed",
                         "ticket.resolution_requested",
                         "ticket.resolution_confirmed",
                         "ticket.resolution_disputed",
@@ -762,7 +820,9 @@ DOMAIN = DomainSOT(
                         "change evidence, including the explicit creation consequence mode; "
                         "support.ticket.created schema 4 carries tenant and Ticket identity, "
                         "priority, ticket type, channel, region, and canonical customer "
-                        "identity for the declared Automation Center conditions. Private "
+                        "identity for the declared Automation Center conditions. The "
+                        "status, priority, and assignment change events carry the same "
+                        "bounded ticket identity and current routing fields. Private "
                         "comment bodies and attachments are not placed in transport events."
                     ),
                     replay=(
@@ -1739,7 +1799,15 @@ DOMAIN = DomainSOT(
                 label="Support ticket",
                 entity_type="support.ticket",
                 client_events=("form.load", "field.change", "form.validate"),
-                server_events=("support.ticket.created",),
+                server_events=(
+                    "support.ticket.created",
+                    "ticket.assigned",
+                    "ticket.status_changed",
+                    "ticket.priority_changed",
+                    "ticket.resolution_requested",
+                    "ticket.resolution_confirmed",
+                    "ticket.resolution_disputed",
+                ),
                 read_permission="support:ticket:read",
                 write_permission="support:ticket:update",
                 tenant_id_field="tenant_id",
@@ -1768,8 +1836,16 @@ DOMAIN = DomainSOT(
                 label="Automation Center ticket rules",
                 group="Support",
                 state=AutomationCatalogState.available,
-                explanation="Create a draft with the supported ticket trigger and actions, then activate it.",
-                trigger_keys=("support.ticket.created",),
+                explanation="Create a draft from a ticket creation, assignment, status, priority, or resolution trigger and its typed actions, then activate it.",
+                trigger_keys=(
+                    "support.ticket.created",
+                    "support.ticket.assigned",
+                    "support.ticket.status_changed",
+                    "support.ticket.priority_changed",
+                    "support.ticket.resolution_requested",
+                    "support.ticket.resolution_confirmed",
+                    "support.ticket.resolution_disputed",
+                ),
                 action_keys=(
                     "support.ticket.assign_service_team",
                     "support.ticket.set_priority",
@@ -1894,6 +1970,78 @@ DOMAIN = DomainSOT(
                 author_permission="support:ticket:read",
                 runtime_enabled=True,
                 compatible_event_schema_versions=(3,),
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.assigned",
+                label="Support ticket assigned",
+                event_type="ticket.assigned",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_ASSIGNMENT_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.status_changed",
+                label="Support ticket status changed",
+                event_type="ticket.status_changed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_WORKFLOW_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.priority_changed",
+                label="Support ticket priority changed",
+                event_type="ticket.priority_changed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_WORKFLOW_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_requested",
+                label="Ticket resolution requested",
+                event_type="ticket.resolution_requested",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_confirmed",
+                label="Ticket resolution confirmed",
+                event_type="ticket.resolution_confirmed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_disputed",
+                label="Ticket resolution disputed",
+                event_type="ticket.resolution_disputed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
             ),
         ),
         actions=(

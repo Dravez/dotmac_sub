@@ -5,7 +5,9 @@ from __future__ import annotations
 from app.services.automation_contracts import (
     AutomationActionCapability,
     AutomationActionInput,
+    AutomationConditionField,
     AutomationDomainCapabilities,
+    AutomationOperator,
     AutomationScriptTargetCapability,
     AutomationTriggerCapability,
     AutomationValueType,
@@ -32,6 +34,23 @@ from app.services.sot_manifest import (
     owner_command_boundary_error_codes,
 )
 from app.services.sot_registry.model import DomainSOT
+
+
+_CUSTOMER_STATUS_FIELD = AutomationConditionField(
+    key="status",
+    label="Account status",
+    value_type=AutomationValueType.enum,
+    operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+    enum_values=(
+        "new",
+        "active",
+        "blocked",
+        "suspended",
+        "disabled",
+        "canceled",
+        "delinquent",
+    ),
+)
 
 DOMAIN = DomainSOT(
     domain="customer_context",
@@ -1532,7 +1551,7 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("subscriber.updated",),
+                    event_types=("subscriber.updated", "customer.account.status_changed"),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
                     compatibility=(
@@ -3006,6 +3025,54 @@ DOMAIN = DomainSOT(
                 entity_type="customer.account",
                 tenant_id_field="tenant_id",
                 entity_id_field="subscriber_id",
+                fields=(_CUSTOMER_STATUS_FIELD,),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.created",
+                label="Customer account created",
+                event_type="subscriber.created",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.updated",
+                label="Customer account updated",
+                event_type="subscriber.updated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.suspended",
+                label="Customer account suspended",
+                event_type="subscriber.suspended",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.reactivated",
+                label="Customer account reactivated",
+                event_type="subscriber.reactivated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
                 fields=(),
                 author_permission="customer:read",
                 runtime_enabled=True,
@@ -3046,6 +3113,7 @@ DOMAIN = DomainSOT(
                 entity_type="customer.account",
                 client_events=("form.load", "field.change", "form.validate"),
                 server_events=(
+                    "customer.account.status_changed",
                     "subscriber.created",
                     "subscriber.updated",
                     "subscriber.suspended",
