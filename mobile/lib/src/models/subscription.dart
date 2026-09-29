@@ -52,8 +52,9 @@ class Subscription {
   final DateTime? nextBillingAt;
 
   /// Server-computed authoritative expiry (catalog.py `expires_at`/`is_expired`):
-  /// the backend is the source of truth for when a service genuinely lapses, so
-  /// the client doesn't have to guess from billing dates. [hasServerExpiry] is
+  /// prepaid uses the paid-through next_billing_at boundary while postpaid uses
+  /// only an explicit contract end_at. The backend remains the source of truth.
+  /// [hasServerExpiry] is
   /// false against older backends / offline cache, where we fall back to local
   /// mode-aware logic.
   final DateTime? serverExpiresAt;
@@ -105,9 +106,9 @@ class Subscription {
 
   /// When the service lapses, or null when it has none. Prefer the server's
   /// authoritative value; fall back to local mode-aware logic when the backend
-  /// didn't supply it (older API / offline cache). Note: postpaid and healthy
-  /// prepaid have no date expiry — the real prepaid lapse (low balance → grace)
-  /// comes from GET /me/account-health, not from next_billing_at.
+  /// didn't supply it (older API / offline cache). For prepaid service,
+  /// next_billing_at is the paid-through/service-expiry boundary. For postpaid
+  /// it remains an invoice date and is never treated as expiry.
   DateTime? get expiresAt => hasServerExpiry
       ? serverExpiresAt
       : (hasExpiry ? (endAt ?? nextBillingAt) : null);
