@@ -1282,6 +1282,7 @@ class PaymentAllocationFinalizationMode(str, Enum):
     """Bound the consequences requested by a payment-allocation caller."""
 
     standard = "standard"
+    issuance_reserved_credit = "issuance_reserved_credit"
     reviewed_document_correction = "reviewed_document_correction"
 
 
@@ -4886,6 +4887,19 @@ class PaymentAllocations(ListResponseMixin):
         )
 
     @staticmethod
+    def preview_issuance_reserved_credit_for_owner(
+        db: Session,
+        payload: PaymentAllocationPreviewRequest,
+    ) -> PaymentAllocationPreview:
+        """Preview credit reserved immediately before this invoice was issued."""
+
+        return _build_payment_allocation_preview(
+            db,
+            payload,
+            reserve_prepaid_funding=False,
+        )
+
+    @staticmethod
     def preview_at_reviewed_boundary_for_owner(
         db: Session,
         payload: PaymentAllocationPreviewRequest,
@@ -5191,6 +5205,22 @@ class PaymentAllocations(ListResponseMixin):
         )
 
     @staticmethod
+    def stage_confirm_issuance_reserved_credit_for_owner(
+        db: Session,
+        payload: PaymentAllocationConfirm,
+    ) -> PaymentAllocationResult:
+        """Consume a fingerprinted pre-issuance reservation atomically."""
+
+        return PaymentAllocations._confirm(
+            db,
+            payload,
+            complete_transaction=False,
+            finalization_mode=(
+                PaymentAllocationFinalizationMode.issuance_reserved_credit
+            ),
+        )
+
+    @staticmethod
     def confirm(
         db: Session,
         payload: PaymentAllocationConfirm,
@@ -5246,8 +5276,7 @@ class PaymentAllocations(ListResponseMixin):
             preview_request,
             funding_position_at=funding_position_at,
             reserve_prepaid_funding=(
-                finalization_mode
-                is not PaymentAllocationFinalizationMode.reviewed_document_correction
+                finalization_mode is PaymentAllocationFinalizationMode.standard
             ),
         )
         if preview.fingerprint != payload.preview_fingerprint:
@@ -5358,7 +5387,10 @@ class PaymentAllocations(ListResponseMixin):
             # consumes money that was already observed; its owner projects the
             # fingerprint-bound anchor in the same transaction and must not
             # emit a second payment observation.
-            if finalization_mode is PaymentAllocationFinalizationMode.standard:
+            if (
+                finalization_mode
+                is not PaymentAllocationFinalizationMode.reviewed_document_correction
+            ):
                 emit_event(
                     db,
                     EventType.payment_received,

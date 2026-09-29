@@ -2011,7 +2011,7 @@ class Invoices(ListResponseMixin):
                     reason=reason,
                 ),
                 announce=False,
-                apply_available_credit=False,
+                apply_available_credit=True,
                 commit=False,
             )
         AuditEvents.stage(
@@ -2029,7 +2029,8 @@ class Invoices(ListResponseMixin):
                 },
             ),
         )
-        _apply_available_account_credit(db, invoice)
+        if not native_issue:
+            _apply_available_account_credit(db, invoice)
         return invoice
 
     @staticmethod
@@ -2086,6 +2087,10 @@ class Invoices(ListResponseMixin):
         untouched.
         """
         _validate_issuance_input(issuance)
+        observed_invoice = db.get(Invoice, coerce_uuid(invoice_id))
+        if observed_invoice is None:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        lock_account(db, str(observed_invoice.account_id))
         invoice = lock_for_update(db, Invoice, invoice_id)
         if invoice is None:
             raise HTTPException(status_code=404, detail="Invoice not found")
@@ -2113,6 +2118,18 @@ class Invoices(ListResponseMixin):
                 status_code=409,
                 detail="Convert the proforma before issuing an invoice",
             )
+        issuance_funding = None
+        if apply_available_credit:
+            from app.services.billing.account_credit import AccountCreditApplications
+
+            # Reserve against the draft position. Once this document becomes an
+            # issued receivable, its own debit must not make the same funding look
+            # unavailable before the paired allocation is written.
+            issuance_funding = (
+                AccountCreditApplications.preview_invoice_issuance_funding(
+                    db, invoice
+                )
+            )
         invoice.status = InvoiceStatus.issued
         invoice.issued_at = issuance.issued_at
         invoice.due_at = issuance.due_at
@@ -2136,6 +2153,14 @@ class Invoices(ListResponseMixin):
                     "due_date_policy_version": issuance.due_date_policy_version,
                     "ledger_transaction_id": None,
                     "service_access_consequence": "none",
+                    "issuance_funding_fingerprint": (
+                        issuance_funding.fingerprint if issuance_funding else None
+                    ),
+                    "issuance_funding_reserved": (
+                        str(issuance_funding.reserved_amount)
+                        if issuance_funding
+                        else "0.00"
+                    ),
                 },
             ),
         )
@@ -2158,10 +2183,14 @@ class Invoices(ListResponseMixin):
                 account_id=invoice.account_id,
                 invoice_id=invoice.id,
             )
-        if apply_available_credit and require_full_available_credit:
-            _apply_available_account_credit_when_fully_funded(db, invoice)
-        elif apply_available_credit:
-            _apply_available_account_credit(db, invoice)
+        if issuance_funding is not None and (
+            not require_full_available_credit or issuance_funding.fully_funded
+        ):
+            AccountCreditApplications.apply_invoice_issuance_funding(
+                db,
+                invoice,
+                reservation=issuance_funding,
+            )
         if commit:
             db.commit()
             db.refresh(invoice)

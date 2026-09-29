@@ -78,7 +78,10 @@ from app.services.topup_intents import (
     TopupIntentChannel,
     TopupIntentStatus,
 )
-from tests.prepaid_funding_helpers import materialize_test_prepaid_opening_balance
+from tests.prepaid_funding_helpers import (
+    create_test_settled_payment_credit,
+    materialize_test_prepaid_opening_balance,
+)
 
 
 def _provider(db_session) -> PaymentProvider:
@@ -1141,6 +1144,66 @@ def test_draft_invoice_does_not_consume_credit_until_issued(db_session, subscrib
     )
     db_session.refresh(draft)
     assert draft.status == InvoiceStatus.paid
+
+
+def test_prepaid_issuance_reserves_funding_before_its_own_receivable_debit(
+    db_session, subscriber
+):
+    subscriber.billing_mode = BillingMode.prepaid
+    db_session.commit()
+    boundary = datetime(2026, 6, 30, tzinfo=UTC)
+    materialize_test_prepaid_opening_balance(
+        db_session,
+        subscriber.id,
+        Decimal("0.00"),
+        position_at=boundary,
+    )
+    payment = create_test_settled_payment_credit(
+        db_session,
+        subscriber.id,
+        Decimal("18812.50"),
+        paid_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    draft = Invoice(
+        account_id=subscriber.id,
+        invoice_number="INV-PREPAID-ISSUANCE-RESERVATION",
+        status=InvoiceStatus.draft,
+        currency="NGN",
+        subtotal=Decimal("17500.00"),
+        total=Decimal("18812.50"),
+        balance_due=Decimal("18812.50"),
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    result = Invoices.issue_draft_system(
+        db_session,
+        str(draft.id),
+        issuance=InvoiceIssuanceInput(
+            issued_at=datetime(2026, 8, 1, tzinfo=UTC),
+            due_at=datetime(2026, 8, 1, tzinfo=UTC),
+            due_date_basis=InvoiceDueDateBasis.contract_terms,
+            due_date_basis_ref="pytest:prepaid-issuance-reservation",
+            due_date_policy_version="pytest-v1",
+            reason="regression_prepaid_invoice_consumed_without_settlement",
+        ),
+        require_full_available_credit=True,
+        commit=True,
+    )
+
+    assert result.invoice.status is InvoiceStatus.paid
+    assert result.invoice.balance_due == Decimal("0.00")
+    allocation = (
+        db_session.query(PaymentAllocation)
+        .filter_by(payment_id=payment.id, invoice_id=draft.id)
+        .one()
+    )
+    assert allocation.amount == Decimal("18812.50")
+    assert allocation.ledger_entry_id is not None
+    assert allocation.consumption_ledger_entry_id is not None
+    assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal(
+        "0.00"
+    )
 
 
 def test_ineligible_invoice_states_and_currency_consume_nothing(db_session, subscriber):
