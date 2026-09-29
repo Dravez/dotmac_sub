@@ -77,6 +77,7 @@ class RequestExactPasswordRecoveryCommand:
     principal_type: str
     principal_id: UUID
     next_login_path: str | None = None
+    expected_reseller_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -329,6 +330,31 @@ def _active_local_credential(
     if lock:
         statement = statement.with_for_update()
     return db.execute(statement).scalars().first()
+
+
+def _principal_belongs_to_reseller(
+    db: Session,
+    *,
+    principal_type: str,
+    principal_id: UUID,
+    reseller_id: UUID,
+) -> bool:
+    """Validate an admin-scoped recovery target against its reseller link."""
+
+    statement = select(ResellerUser.id).where(
+        ResellerUser.reseller_id == reseller_id,
+        ResellerUser.is_active.is_(True),
+    )
+    if principal_type == "reseller_user":
+        statement = statement.where(
+            ResellerUser.id == principal_id,
+            ResellerUser.subscriber_id.is_(None),
+        )
+    elif principal_type == "subscriber":
+        statement = statement.where(ResellerUser.subscriber_id == principal_id)
+    else:
+        return False
+    return db.execute(statement.with_for_update()).scalar_one_or_none() is not None
 
 
 def _principal_for_email(db: Session, email: str) -> _PrincipalContext | None:
@@ -627,10 +653,27 @@ def request_exact_password_recovery(
     def operation() -> PasswordRecoveryRequestOutcome:
         actor_type, actor_id = _validate_context(command.context)
         next_login_path = _safe_next_login_path(command.next_login_path)
+        if (
+            command.expected_reseller_id is not None
+            and not _principal_belongs_to_reseller(
+                db,
+                principal_type=command.principal_type,
+                principal_id=command.principal_id,
+                reseller_id=command.expected_reseller_id,
+            )
+        ):
+            raise _error(
+                "credential_not_found",
+                "Active local credential was not found for this reseller user.",
+                principal_type=command.principal_type,
+                principal_id=str(command.principal_id),
+                reseller_id=str(command.expected_reseller_id),
+            )
         principal = _principal_context(
             db,
             principal_type=command.principal_type,
             principal_id=command.principal_id,
+            lock=True,
         )
         if (
             principal is None
@@ -638,6 +681,7 @@ def request_exact_password_recovery(
                 db,
                 principal_type=command.principal_type,
                 principal_id=command.principal_id,
+                lock=True,
             )
             is None
         ):

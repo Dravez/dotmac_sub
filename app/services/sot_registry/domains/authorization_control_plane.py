@@ -1101,7 +1101,8 @@ DOMAIN = DomainSOT(
                         source=(
                             "active Subscriber, SystemUser, or ResellerUser "
                             "identity and its active local user_credential, "
-                            "password marker, and auth_sessions"
+                            "password marker, auth_sessions, and any explicitly "
+                            "required active reseller membership"
                         ),
                     ),
                     AuthorityInput(
@@ -1179,6 +1180,7 @@ DOMAIN = DomainSOT(
                     fail_closed_on=(
                         "invalid, expired, or spent capability",
                         "principal or recipient drift",
+                        "principal outside an adapter-declared reseller membership",
                         "inactive or missing local credential",
                         "active caller transaction or manifest mismatch",
                     ),
@@ -2211,7 +2213,10 @@ DOMAIN = DomainSOT(
         SOTService(
             name="auth.reseller_onboarding",
             module="app.services.reseller_onboarding",
-            owns=("reseller portal principal onboarding",),
+            owns=(
+                "reseller portal principal onboarding",
+                "reseller portal access revocation",
+            ),
             depends_on=(
                 "customer.accounts",
                 "auth.subscriber_assignments",
@@ -2231,7 +2236,10 @@ DOMAIN = DomainSOT(
                 "only the local credential username is globally unique. "
                 "Invitations are deduplicated event consequences; "
                 "reset capabilities are minted only at transport time for the "
-                "exact principal and never persisted in the outbox."
+                "exact principal and never persisted in the outbox. Access "
+                "revocation preserves identity history while atomically "
+                "deactivating the reseller link, first-class credential, and "
+                "active authentication sessions."
             ),
             contract=ServiceContract(
                 concerns=(
@@ -2245,6 +2253,15 @@ DOMAIN = DomainSOT(
                             "reseller principal cutover gate",
                             "canonical reseller onboarding state",
                         ),
+                    ),
+                    ConcernContract(
+                        name="reseller portal access revocation",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "authorized reseller onboarding principal",
+                            "canonical reseller onboarding state",
+                        ),
+                        canonical_writer="auth.reseller_onboarding",
                     ),
                 ),
                 authoritative_inputs=(
@@ -2290,7 +2307,7 @@ DOMAIN = DomainSOT(
                 transaction=TransactionContract(
                     mode=TransactionMode.COORDINATOR_MANAGED,
                     boundary=(
-                        "Each public onboarding command enters "
+                        "Each public onboarding or access-revocation command enters "
                         "execute_owner_command on a transaction-free adapter "
                         "session; every record, grant, audit event, and outbox "
                         "event commits or rolls back together."
@@ -2299,7 +2316,9 @@ DOMAIN = DomainSOT(
                         "Existing resellers and active role references are "
                         "selected FOR UPDATE. PostgreSQL advisory transaction "
                         "locks serialize normalized email and username keys, "
-                        "with database constraints arbitrating remaining races."
+                        "with database constraints arbitrating remaining races. "
+                        "Revocation locks the exact reseller and membership before "
+                        "credential and session changes."
                     ),
                     idempotency=(
                         "Adapters carry stable intent keys as hashed evidence. "
@@ -2319,6 +2338,7 @@ DOMAIN = DomainSOT(
                         "auth.reseller_onboarding.identity_conflict",
                         "auth.reseller_onboarding.reseller_not_found",
                         "auth.reseller_onboarding.inactive_reseller",
+                        "auth.reseller_onboarding.portal_user_not_found",
                         "auth.reseller_onboarding.role_not_found",
                         "auth.reseller_onboarding.unsupported_role_target",
                         ("auth.reseller_onboarding.invalid_command_context"),
@@ -2332,6 +2352,7 @@ DOMAIN = DomainSOT(
                         "missing or mismatched authorization evidence",
                         "inactive reseller or role",
                         "identity collision",
+                        "portal principal outside the requested reseller",
                         "unsupported first-class principal role assignment",
                         "active caller transaction or manifest mismatch",
                     ),
@@ -2340,6 +2361,7 @@ DOMAIN = DomainSOT(
                     event_types=(
                         "reseller.created",
                         "reseller_user.provisioned",
+                        "reseller_user.access_revoked",
                         "subscriber.created",
                     ),
                     schema_version=1,
@@ -2367,8 +2389,8 @@ DOMAIN = DomainSOT(
                         "and architecture-boundary tests."
                     ),
                     cutover_gate=(
-                        "Admin reseller creation and add-user routes call only "
-                        "typed coordinator commands."
+                        "Admin reseller creation, add-user, and remove-access routes "
+                        "call only typed owner commands."
                     ),
                     fallback_retirement=(
                         "Compensating deletion, direct onboarding commits, and "
