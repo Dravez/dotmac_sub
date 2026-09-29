@@ -41,6 +41,11 @@ from app.services.customer_portal_flow_payments import (
     verify_and_record_topup,
 )
 from app.services.customer_portal_flow_services import (
+    UsageDateRange,
+    UsagePageQuery,
+    UsagePageResult,
+    UsagePeriod,
+    UsageQueryError,
     get_installation_detail,
     get_service_detail,
     get_service_order_detail,
@@ -48,6 +53,8 @@ from app.services.customer_portal_flow_services import (
     get_services_page,
     get_usage_history,
     get_usage_page,
+    query_usage_export,
+    query_usage_page,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +65,13 @@ __all__ = [
     "get_billing_page",
     "get_payment_methods_page",
     "get_usage_page",
+    "query_usage_page",
+    "query_usage_export",
+    "UsageDateRange",
+    "UsagePageQuery",
+    "UsagePageResult",
+    "UsagePeriod",
+    "UsageQueryError",
     "get_usage_history",
     "get_services_page",
     "get_service_detail",
