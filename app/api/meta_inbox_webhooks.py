@@ -362,6 +362,8 @@ def _iter_meta_social_messages(payload: dict[str, Any]):
                 "reply_window_qualifying": True,
             }
             referral = _meta_referral_observation(event)
+            if referral is None:
+                referral = _meta_referral_observation(message)
             if referral is not None:
                 metadata["meta_referral_observation"] = referral
             if channel_type == InboxChannelType.facebook_messenger.value:
