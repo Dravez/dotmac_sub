@@ -310,14 +310,16 @@ def test_final_instagram_sales_classification_creates_lead_without_form(
     db_session,
 ):
     conversation, message = _instagram_conversation(db_session)
+    conversation_id = conversation.id
+    message_id = message.id
     db_session.commit()
 
     outcome = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
-            context=_context(f"classified-candidate:{message.id}"),
-            conversation_id=conversation.id,
-            message_id=message.id,
+            context=_context(f"classified-candidate:{message_id}"),
+            conversation_id=conversation_id,
+            message_id=message_id,
             classification=AiLeadIntakeClassification(
                 intent="new_connection",
                 intent_confidence=0.96,
@@ -362,9 +364,9 @@ def test_final_instagram_sales_classification_creates_lead_without_form(
     replay = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
-            context=_context(f"classified-candidate-replay:{message.id}"),
-            conversation_id=conversation.id,
-            message_id=message.id,
+            context=_context(f"classified-candidate-replay:{message_id}"),
+            conversation_id=conversation_id,
+            message_id=message_id,
             classification=AiLeadIntakeClassification(
                 intent="new_connection",
                 intent_confidence=0.96,
@@ -414,13 +416,15 @@ def test_auto_form_enriches_existing_classified_lead_without_duplicate(db_sessio
         SettingDomain.integration.value, "lead_intake_auto_send_enabled"
     )
     conversation, message = _instagram_conversation(db_session)
+    conversation_id = conversation.id
+    message_id = message.id
     db_session.commit()
     assessed = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
-            context=_context(f"classified-form:{message.id}"),
-            conversation_id=conversation.id,
-            message_id=message.id,
+            context=_context(f"classified-form:{message_id}"),
+            conversation_id=conversation_id,
+            message_id=message_id,
             classification=AiLeadIntakeClassification(
                 intent="coverage_request",
                 intent_confidence=0.97,
@@ -500,12 +504,15 @@ def test_historical_resolved_classification_can_be_repaired_without_form(
         since=datetime.now(UTC) - timedelta(days=60),
     )
     finding = next(item for item in findings if item.conversation_id == conversation.id)
+    finding_conversation_id = finding.conversation_id
+    finding_message_id = finding.message_id
+    db_session.commit()
     outcome = lead_intake.assess_inbound(
         db_session,
         lead_intake.AssessInboundCommand(
-            context=_context(f"historical-repair:{message.id}"),
-            conversation_id=finding.conversation_id,
-            message_id=finding.message_id,
+            context=_context(f"historical-repair:{finding_message_id}"),
+            conversation_id=finding_conversation_id,
+            message_id=finding_message_id,
             classification=finding.classification,
             provider_label=finding.provider_label,
             model_label=finding.model_label,

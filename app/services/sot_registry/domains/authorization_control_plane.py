@@ -2261,7 +2261,6 @@ DOMAIN = DomainSOT(
                             "authorized reseller onboarding principal",
                             "canonical reseller onboarding state",
                         ),
-                        canonical_writer="auth.reseller_onboarding",
                     ),
                 ),
                 authoritative_inputs=(
