@@ -205,22 +205,6 @@ def build_automation_center_data(
         )
         and not automation_capabilities.capability_registry_errors()
     )
-    ticket_sla_suspension_authoring_available = (
-        can_create_rules
-        and can_publish_rules
-        and can_read_support_tickets
-        and can_suspend_subscriptions
-        and any(
-            item.key == "support.ticket.sla_breached" and item.runtime_enabled
-            for item in support_manifest.triggers
-        )
-        and any(
-            item.key == "support.ticket.suspend_unique_active_service"
-            and item.runtime_enabled
-            for item in support_manifest.actions
-        )
-        and not registry_errors
-    )
     return {
         "modules": modules,
         "catalog_items": catalog_items,

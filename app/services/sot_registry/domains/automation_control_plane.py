@@ -435,6 +435,7 @@ DOMAIN = DomainSOT(
                         "automation.execution.run_not_found",
                         "automation.execution.run_rule_not_found",
                         "automation.execution.action_failed",
+                        "automation.execution.event_handler_failed",
                         "automation.execution.blocked_after_failure",
                         "automation.execution.run_not_retryable",
                         "automation.execution.run_version_unavailable",

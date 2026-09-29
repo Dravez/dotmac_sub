@@ -2273,7 +2273,10 @@ DOMAIN = DomainSOT(
             ),
             AutomationActionCapability(
                 key="support.ticket.suspend_unique_active_service",
-                label="Suspend the linked customer's only active service",
+                label=(
+                    "Suspend the linked customer's only active service "
+                    "(billing unchanged; ambiguous links fail closed)"
+                ),
                 entity_type="support.ticket",
                 command_owner="support.ticket_sla_service_consequence",
                 command_name=("suspend_unique_active_service_for_ticket_sla_breach"),

@@ -120,6 +120,7 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert "data-automation-target" in client_runtime
     assert "database/write client" in client_runtime
     assert '_DEFAULT_TRIGGER = ""' in route
+    assert "ticket-sla-suspension" not in route
 
 
 def test_server_scripts_dispatch_from_declared_target_events_without_native_rules() -> (
@@ -143,11 +144,3 @@ def test_custom_field_surface_is_not_introduced() -> None:
         )
     ).casefold()
     assert "custom field" not in combined
-
-
-def test_ticket_sla_suspension_form_requires_explicit_impact_confirmation() -> None:
-    template = _source("templates/admin/automation/ticket_sla_suspension.html")
-    assert "billing is not paused" in template
-    assert "multiple active services" in template
-    assert 'name="confirm_impact"' in template
-    assert "Create and activate rule" in template

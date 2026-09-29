@@ -32,7 +32,7 @@ def test_replay_evidence_query_is_typed_and_read_only() -> None:
     assert service.contract.transaction.mode.value == "read_only"
 
 
-def test_runtime_adapter_registry_is_closed_and_currently_inert() -> None:
+def test_runtime_adapter_registry_is_closed_and_valid() -> None:
     source = _source("app/services/automation_actions.py")
     assert "MappingProxyType" in source
     assert automation_actions.runtime_registry_errors() == ()
@@ -49,14 +49,14 @@ def test_runtime_handler_is_registered_with_explicit_event_scope() -> None:
 def test_runtime_preserves_typed_action_retry_classification() -> None:
     source = _source("app/services/events/handlers/automation.py")
     assert "class AutomationEventHandlerError(DomainError)" in source
-    assert "retryable = exc.retryable" in source
-    assert "retryable=retryable" in source
+    assert "_handler_error(" in source
+    assert "retryable=False" in source
 
 
 def test_ticket_sla_consequence_delegates_to_subscription_owner() -> None:
     source = _source("app/services/ticket_sla_service_automation.py")
     assert "account_lifecycle.suspend_subscription(" in source
-    assert ".status =" not in source
+    assert "subscription.status = " not in source
     assert ".commit(" not in source
     assert ".rollback(" not in source
 

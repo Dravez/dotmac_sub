@@ -28,6 +28,7 @@ from app.services.automation_script_runner import (
     ExecuteAutomationServerScriptCommand,
     parse_script_action_requests,
 )
+from app.services.domain_errors import DomainError
 from app.services.events.handlers.owner_session import owner_session
 from app.services.events.types import Event, EventType
 from app.services.operator_tenant import OPERATOR_TENANT_ID
@@ -468,7 +469,7 @@ class AutomationEventHandler:
                 ),
             )
         if outcome.error_code:
-            raise AutomationEventHandlerError(
+            raise _handler_error(
                 f"Automation run {run.run_id} stopped with {outcome.error_code}."
             )
 
