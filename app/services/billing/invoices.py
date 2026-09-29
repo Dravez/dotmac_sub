@@ -2181,8 +2181,10 @@ class Invoices(ListResponseMixin):
                 account_id=invoice.account_id,
                 invoice_id=invoice.id,
             )
-        if issuance_funding is not None and (
-            not require_full_available_credit or issuance_funding.fully_funded
+        if (
+            issuance_funding is not None
+            and issuance_funding.reserved_amount > Decimal("0.00")
+            and (not require_full_available_credit or issuance_funding.fully_funded)
         ):
             AccountCreditApplications.apply_invoice_issuance_funding(
                 db,
