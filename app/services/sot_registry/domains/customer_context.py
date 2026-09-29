@@ -1550,7 +1550,10 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("subscriber.updated", "customer.account.status_changed"),
+                    event_types=(
+                        "subscriber.updated",
+                        "customer.account.status_changed",
+                    ),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
                     compatibility=(

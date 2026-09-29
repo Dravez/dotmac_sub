@@ -34,7 +34,9 @@ def test_hub_is_registered_and_visible_only_with_hub_permission() -> None:
     assert '"/admin/automation"' in navigation
 
 
-def test_hub_is_a_directory_and_keeps_diagnostics_out_of_the_default_workspace() -> None:
+def test_hub_is_a_directory_and_keeps_diagnostics_out_of_the_default_workspace() -> (
+    None
+):
     template = _source("templates/admin/automation/index.html")
     for heading in (
         "Workflows",
@@ -58,7 +60,10 @@ def test_hub_shows_support_communications_readiness_and_next_step() -> None:
     assert 'AutomationCatalogState.unavailable: "Unavailable"' in projection
     assert 'AutomationCatalogState.managed_elsewhere: "Managed elsewhere"' in projection
     assert 'AutomationCatalogState.retired: "Retired"' in projection
-    assert "registry diagnostics are intentionally kept out of the operator workspace" in template
+    assert (
+        "registry diagnostics are intentionally kept out of the operator workspace"
+        in template
+    )
 
 
 def test_runtime_health_card_uses_semantic_status_and_safe_responsive_layout() -> None:

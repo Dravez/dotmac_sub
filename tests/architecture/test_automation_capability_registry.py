@@ -164,9 +164,7 @@ def test_support_and_communications_catalogue_shows_readiness_and_existing_owner
 def test_customer_and_support_workflows_expose_owner_produced_events() -> None:
     manifests = automation_capabilities.all_module_manifests()
     triggers = {
-        trigger.key: trigger
-        for manifest in manifests
-        for trigger in manifest.triggers
+        trigger.key: trigger for manifest in manifests for trigger in manifest.triggers
     }
 
     assert {

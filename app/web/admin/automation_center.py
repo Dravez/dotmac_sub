@@ -590,7 +590,11 @@ def automation_workflow_list(
     filtered_rules = tuple(
         rule
         for rule in rules
-        if (not search or search in rule.name.casefold() or search in rule.trigger_key.casefold())
+        if (
+            not search
+            or search in rule.name.casefold()
+            or search in rule.trigger_key.casefold()
+        )
         and (not status or rule.status.value == status)
         and (not module or trigger_modules.get(rule.trigger_key) == module)
     )
@@ -1181,7 +1185,7 @@ def publish_automation_script(
         return _automation_redirect(path=return_to, error=str(exc))
     return _automation_redirect(
         path=return_to,
-        notice=f"Script {outcome.script_id} published at version {outcome.version}"
+        notice=f"Script {outcome.script_id} published at version {outcome.version}",
     )
 
 

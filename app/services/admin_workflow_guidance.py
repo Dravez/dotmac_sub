@@ -197,7 +197,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "In Client scripts, bind browser JavaScript to one registered module target and form event; use the restricted form API.",
         "In Server scripts, bind JavaScript to one registered target and server event; request typed owner actions instead of direct database writes.",
         "Review runtime readiness before publication: server scripts require the isolated digest-pinned runtime and typed owner-command adapter.",
-        "Review run history to find failed runs, then open a run to inspect the affected record, steps, and error details.",
+        "Review recent execution evidence in run history to find failed runs, then open a run to inspect the affected record, steps, and error details.",
         "If you have retry permission, continue a failed run; successful steps are skipped, and the retry result is recorded.",
         notes=(
             "Workflow and rule refer to the same central event-to-action mechanism; the technical /rules routes remain for compatibility.",
