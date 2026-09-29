@@ -669,7 +669,7 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.radius.reap_radacct_ghosts": _c("radius", SWEEP, IDEMP, HEALTH),
     "app.tasks.radius.reconcile_active_sessions": _c(
         "radius",
-        SWEEP,
+        AUTORETRY,
         IDEMP,
         HEALTH,
         "Permanent rebuild of the live-session projection from external accounting.",

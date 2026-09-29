@@ -1,5 +1,7 @@
 import logging
 
+from sqlalchemy.exc import OperationalError
+
 from app.celery_app import celery_app
 from app.services import radius as radius_service
 from app.services.db_session_adapter import db_session_adapter
@@ -24,7 +26,14 @@ def reap_radacct_ghosts() -> dict:
         session.close()
 
 
-@celery_app.task(name="app.tasks.radius.reconcile_active_sessions")
+@celery_app.task(
+    name="app.tasks.radius.reconcile_active_sessions",
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
 def reconcile_active_sessions(window_seconds: int | None = None) -> dict:
     """Rebuild the live ``radius_active_sessions`` view from OPEN external
     radacct sessions (username->login->subscriber, nasip->nas_device), upserting
