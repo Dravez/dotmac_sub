@@ -618,6 +618,15 @@ idempotency reservation, invoice metadata on every target, audit event, and
 cent, missing row, extra allocation, overlap, non-zero customer-position delta,
 or unexpected remaining credit rolls back the complete command.
 
+The same reviewed command accepts a one-document sequence for an expired issued
+or overdue prepaid invoice whose receivable debit already reduced the customer
+position. That manifest must select the exact unallocated native payment and
+the complete remaining reviewed opening source. Confirmation records the
+payment allocation and opening-funding consumption as settlement evidence,
+adopts the service identity, and requires the customer-position delta to remain
+zero. If a later funded period has already advanced the billing anchor, the
+command preserves that anchor rather than moving it backwards.
+
 ## Rollout
 
 1. Deploy the funding-change draft-first guard and funded-renewal invoice path.

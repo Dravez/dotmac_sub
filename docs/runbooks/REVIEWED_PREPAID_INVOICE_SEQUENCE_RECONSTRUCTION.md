@@ -4,6 +4,9 @@ Use this procedure only for a Finance-approved historical sequence whose
 payments, opening position, invoice periods, and allocation split must be
 reconstructed together. It is dry-run first and requires
 `billing:prepaid_reconciliation:repair` on the named operator principal.
+The reviewed cohort may be one expired invoice when its existing receivable
+debit must be reclassified into exact payment and opening-funding settlement
+evidence without changing the customer position.
 
 Do not use it for a current or future period, a single ordinary draft, an
 estimated payment split, an unreviewed opening balance, or a request to restore
@@ -48,6 +51,7 @@ shape, preserving chronological document and allocation order:
     }
   ],
   "expected_opening_credit": "14811.50",
+  "expected_opening_funding_consumption": "0.00",
   "expected_post_repair_credit": "0.00",
   "expected_authoritative_prepaid_funding": "0.00",
   "approval": {
@@ -62,7 +66,9 @@ shape, preserving chronological document and allocation order:
 
 Every selected payment must be fully distributed by `allocations`. Every target
 invoice must be exactly settled by its selected allocations plus the explicitly
-listed pre-existing allocations. Include one settlement ledger selection for
+listed pre-existing allocations and opening-funding consumption. Opening funding
+may be selected only for a single expired document and must equal the full
+remaining reviewed opening source. Include one settlement ledger selection for
 every selected payment, including payments whose settlement row already exists.
 
 ## Preview
@@ -111,14 +117,16 @@ After an authorized apply, confirm:
    no gap or overlap.
 5. `Subscription.next_billing_at` equals the final entitlement end, while an
    expired final period leaves access unchanged.
-6. Post-boundary reusable credit and authoritative prepaid funding equal the
+6. A later billing anchor remains unchanged when the repaired expired period is
+   behind already-funded coverage.
+7. Post-boundary reusable credit and authoritative prepaid funding equal the
    manifest expectations.
-7. The customer financial position delta is exactly zero.
-8. Each invoice carries the same ticket, Finance approval, evidence digest,
+8. The customer financial position delta is exactly zero.
+9. Each invoice carries the same ticket, Finance approval, evidence digest,
    fingerprint, command id, and idempotency metadata.
-9. One sequence audit record and one
+10. One sequence audit record and one
    `prepaid_invoice_sequence.reconstructed` durable event exist.
-10. Repeating the same command returns `replayed: true` and creates no rows.
+11. Repeating the same command returns `replayed: true` and creates no rows.
 
 Stop and escalate to Finance if any value differs. Never compensate with direct
 invoice status, allocation, ledger, entitlement, anchor, or access updates.

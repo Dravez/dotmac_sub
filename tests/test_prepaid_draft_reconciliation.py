@@ -2677,6 +2677,160 @@ def test_reviewed_prepaid_invoice_sequence_reconstructs_cutover_evidence_atomica
     )
 
 
+def test_reviewed_single_invoice_records_existing_debit_as_settlement(
+    db_session,
+    subscriber,
+    subscription,
+):
+    subscription.billing_mode = BillingMode.prepaid
+    subscription.status = SubscriptionStatus.suspended
+    ensure_test_prepaid_contract(db_session, subscription, Decimal("100.00"))
+    invoice = _draft(
+        db_session,
+        subscriber,
+        subscription,
+        total=Decimal("100.00"),
+    )
+    line = db_session.query(InvoiceLine).filter_by(invoice_id=invoice.id).one()
+    line.subscription_id = None
+    invoice.status = InvoiceStatus.overdue
+    invoice.issued_at = datetime(2026, 8, 1, tzinfo=UTC)
+    invoice.due_at = datetime(2026, 8, 1, tzinfo=UTC)
+    invoice.billing_period_start = None
+    invoice.billing_period_end = None
+    subscription.next_billing_at = datetime(2026, 9, 30, 23, tzinfo=UTC)
+    selected_payment = _payment(
+        db_session,
+        subscriber,
+        amount=Decimal("60.00"),
+        paid_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    selected_payment.created_at = datetime(2026, 9, 29, 8, 55, tzinfo=UTC)
+    selected_entry = db_session.get(
+        LedgerEntry,
+        selected_payment.settlement.unallocated_ledger_entry_id,
+    )
+    assert selected_entry is not None
+    selected_entry.created_at = selected_payment.created_at
+    _payment(
+        db_session,
+        subscriber,
+        amount=Decimal("50.00"),
+        paid_at=datetime(2026, 9, 28, tzinfo=UTC),
+    )
+    db_session.commit()
+    materialize_test_prepaid_opening_balance(
+        db_session,
+        subscriber.id,
+        Decimal("40.00"),
+        position_at=datetime(2026, 7, 20, 7, 58, 22, tzinfo=UTC),
+    )
+    approver = SystemUser(
+        first_name="Finance",
+        last_name="Approver",
+        email=f"finance-existing-debit-{uuid4().hex}@example.com",
+    )
+    db_session.add(approver)
+    db_session.commit()
+
+    query = ReviewedPrepaidInvoiceSequenceQuery(
+        subscription_id=subscription.id,
+        documents=(
+            ReviewedPrepaidInvoiceSequenceDocumentSelection(
+                invoice_id=invoice.id,
+                line_id=line.id,
+                service_start_on=date(2026, 8, 1),
+                next_billing_on=date(2026, 9, 1),
+                expected_total=Decimal("100.00"),
+            ),
+        ),
+        allocations=(
+            ReviewedPrepaidInvoiceSequenceAllocationSelection(
+                payment_id=selected_payment.id,
+                invoice_id=invoice.id,
+                amount=Decimal("60.00"),
+            ),
+        ),
+        settlement_evidence=(
+            ReviewedPrepaidSettlementEvidenceSelection(
+                payment_id=selected_payment.id,
+                unallocated_ledger_entry_id=selected_entry.id,
+            ),
+        ),
+        existing_allocation_evidence=(),
+        expected_opening_credit=Decimal("40.00"),
+        expected_post_repair_credit=Decimal("50.00"),
+        expected_authoritative_prepaid_funding=Decimal("50.00"),
+        expected_opening_funding_consumption=Decimal("40.00"),
+        approval=ReviewedExistingDraftSettlementApproval(
+            approver_system_user_id=approver.id,
+            approver_name="Finance Approver",
+            approved_at=datetime.now(UTC) - timedelta(minutes=1),
+            ticket_reference="existing-debit-settlement",
+            evidence_sha256="e" * 64,
+        ),
+    )
+    preview = preview_reviewed_prepaid_invoice_sequence_reconstruction(
+        db_session, query
+    )
+
+    assert preview.actionable, preview.reason
+    assert preview.opening_funding_consumption == Decimal("40.00")
+    assert preview.post_boundary_credit == Decimal("110.00")
+    anchor_before = subscription.next_billing_at
+    customer_position_before = calculate_customer_balance(
+        db_session, subscriber.id
+    )
+    db_session.rollback()
+
+    command = ReconstructReviewedPrepaidInvoiceSequenceCommand(
+        context=CommandContext.system(
+            actor="pytest:finance-operator",
+            scope=REPAIR_SCOPE,
+            reason="Finance-approved existing debit settlement",
+            idempotency_key=f"pytest-existing-debit-{invoice.id}",
+        ),
+        query=query,
+        preview_fingerprint=preview.fingerprint,
+        permission_granted=True,
+        actor_system_user_id=approver.id,
+    )
+    result = reconstruct_reviewed_prepaid_invoice_sequence(db_session, command)
+
+    db_session.refresh(invoice)
+    db_session.refresh(subscription)
+    assert result.customer_position_delta == Decimal("0.00")
+    assert result.remaining_credit == Decimal("50.00")
+    assert result.authoritative_prepaid_funding == Decimal("50.00")
+    assert invoice.status is InvoiceStatus.paid
+    assert invoice.balance_due == Decimal("0.00")
+    assert subscription.next_billing_at == anchor_before
+    assert calculate_customer_balance(db_session, subscriber.id) == (
+        customer_position_before
+    )
+    allocation = (
+        db_session.query(PaymentAllocation)
+        .filter_by(invoice_id=invoice.id, payment_id=selected_payment.id)
+        .one()
+    )
+    assert allocation.amount == Decimal("60.00")
+    consumption = (
+        db_session.query(PrepaidOpeningFundingConsumption)
+        .filter_by(invoice_id=invoice.id)
+        .one()
+    )
+    assert consumption.amount == Decimal("40.00")
+    assert (
+        db_session.query(ServiceEntitlement)
+        .filter_by(
+            source_invoice_id=invoice.id,
+            subscription_id=subscription.id,
+        )
+        .count()
+        == 1
+    )
+
+
 def test_fifty_kobo_shortfall_stays_draft(
     db_session,
     subscriber,

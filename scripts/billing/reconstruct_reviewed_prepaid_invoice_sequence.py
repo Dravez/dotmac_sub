@@ -153,6 +153,10 @@ def _manifest(path: Path) -> ReviewedPrepaidInvoiceSequenceQuery:
             data.get("expected_authoritative_prepaid_funding"),
             "expected_authoritative_prepaid_funding",
         ),
+        expected_opening_funding_consumption=_money(
+            data.get("expected_opening_funding_consumption", "0.00"),
+            "expected_opening_funding_consumption",
+        ),
         approval=ReviewedExistingDraftSettlementApproval(
             approver_system_user_id=_uuid(
                 approval.get("approver_system_user_id"),
@@ -218,6 +222,9 @@ def main() -> int:
                     "existing_allocation_total": str(preview.existing_allocation_total),
                     "selected_payment_total": str(preview.selected_payment_total),
                     "opening_credit": str(preview.opening_credit),
+                    "opening_funding_consumption": str(
+                        preview.opening_funding_consumption
+                    ),
                     "post_boundary_credit": str(preview.post_boundary_credit),
                     "authoritative_prepaid_funding": str(
                         preview.authoritative_prepaid_funding
