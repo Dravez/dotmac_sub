@@ -204,6 +204,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
             "The hub is a directory. Module ownership diagnostics are not part of the operator workspace.",
             "Run history is read-only, while continuing a failed run requires the separate retry permission.",
             "A target may be scriptable before it is workflow-executable; each mechanism has its own declared capability list.",
+            "Custom fields are managed in the Custom Fields center rather than by automation scripts.",
             "Server scripts use JavaScript but never run in the application process and cannot bypass module owners.",
         ),
     ),
