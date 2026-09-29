@@ -142,6 +142,12 @@ def test_support_and_communications_catalogue_shows_readiness_and_existing_owner
     )
     assert items["support.ticket.center_rules"].trigger_keys == (
         "support.ticket.created",
+        "support.ticket.assigned",
+        "support.ticket.status_changed",
+        "support.ticket.priority_changed",
+        "support.ticket.resolution_requested",
+        "support.ticket.resolution_confirmed",
+        "support.ticket.resolution_disputed",
     )
     assert items["support.ticket.assignment_rules"].state is (
         AutomationCatalogState.managed_elsewhere
@@ -153,6 +159,48 @@ def test_support_and_communications_catalogue_shows_readiness_and_existing_owner
         AutomationCatalogState.retired
     )
     assert all(item.explanation.strip() for item in items.values())
+
+
+def test_customer_and_support_workflows_expose_owner_produced_events() -> None:
+    manifests = automation_capabilities.all_module_manifests()
+    triggers = {
+        trigger.key: trigger for manifest in manifests for trigger in manifest.triggers
+    }
+
+    assert {
+        "customer.account.created",
+        "customer.account.updated",
+        "customer.account.status_changed",
+        "customer.account.suspended",
+        "customer.account.reactivated",
+        "support.ticket.created",
+        "support.ticket.assigned",
+        "support.ticket.status_changed",
+        "support.ticket.priority_changed",
+        "support.ticket.resolution_requested",
+        "support.ticket.resolution_confirmed",
+        "support.ticket.resolution_disputed",
+    } <= triggers.keys()
+    assert any(
+        field.key == "status"
+        for field in triggers["customer.account.status_changed"].fields
+    )
+    assert any(
+        field.key == "status"
+        for field in triggers["support.ticket.status_changed"].fields
+    )
+    assert any(
+        field.key == "service_team_id"
+        for field in triggers["support.ticket.assigned"].fields
+    )
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    support_source = (root / "app/services/support.py").read_text(encoding="utf-8")
+    assert '"ticket.status_changed"' in support_source
+    assert '"ticket.priority_changed"' in support_source
+    assert '"customer_id"' in support_source
 
 
 def test_available_catalogue_item_must_name_declared_runtime_capabilities(

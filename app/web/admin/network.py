@@ -672,6 +672,18 @@ def comprehensive_network_map_v2(
         base_projection=base_projection,
     )
     context.update(base_projection.to_template_context())
+    context["network_map_transfer"] = {
+        "can_import": has_permission(auth, db, network_map_transfer.IMPORT_PERMISSION),
+        "can_export": has_permission(auth, db, network_map_transfer.EXPORT_PERMISSION),
+        "can_export_customers": has_permission(
+            auth, db, network_map_transfer.CUSTOMER_PERMISSION
+        ),
+        "max_upload_bytes": network_map_transfer.MAX_UPLOAD_BYTES,
+        "profiles": [
+            {"value": profile.value, "label": profile.label}
+            for profile in NetworkMapImportProfile
+        ],
+    }
     context["network_map_v2"] = v2_projection.to_transport()
     proposals = network_map_asset_changes.list_proposals(db, limit=100)
     context["network_map_v2_governance"] = {

@@ -1,13 +1,13 @@
 # Automation Center source of truth
 
-Status: reusable rule builder and native script control-plane draft
+Status: reusable workflow builder and native script control-plane draft
 
 Decision owner: Michael
 
 ## Scope
 
 The Automation Center is the central authoring and lifecycle surface for
-rules plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
+workflows (the user-facing name for central rules) plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
 provisioning, SLA, escalation, and routing rules remain managed by their
 existing owners until a later, separately approved migration. That migration
 must hand off each rule without leaving two active writers.
@@ -46,6 +46,14 @@ the runtime never guesses tenancy from an unrelated record or a UI session.
 Customer-specific rules may also name an explicit set of customer identities.
 Those identities come from the trigger's declared customer field and are
 validated against the customer owner when a draft is saved and published.
+
+Customer account workflows may use the owner-produced account-created,
+account-updated, status-changed, suspended, and reactivated events. Support
+ticket workflows may use ticket-created, assigned, status-changed,
+priority-changed, resolution-requested, resolution-confirmed, and
+resolution-disputed events. These choices are declared by the owning SOT and
+their bounded event producers; operators cannot add arbitrary event names from
+the UI.
 
 ## Rule shape
 
@@ -141,9 +149,11 @@ Script publication repeats target permissions and runtime readiness checks.
 The Center never grants a script arbitrary ORM access, imports, process access,
 network access, dynamic code evaluation, or a generic database writer.
 
-The admin shell is available at `/admin/automation`. Opening the hub requires
-`automation:hub:read`; its rule and execution sections independently require
-`automation:rule:read` and `automation:run:read`. Run details require
+The admin shell is available at `/admin/automation`. The hub is a directory
+that links to focused `/workflows`, `/client-scripts/manage`,
+`/server-scripts`, and `/runs` workspaces. Opening the hub requires
+`automation:hub:read`; each workflow, script, and execution workspace keeps
+its own read permission. Run details require
 `automation:run:read`; continuing a failed run additionally requires
 `automation:run:redrive`. The run detail shows the affected record, rule
 version, timestamps, each action step and its attempts, safe failure guidance,

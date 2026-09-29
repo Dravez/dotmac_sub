@@ -134,6 +134,7 @@ class AutomationRuleSummary:
     draft_version: int | None
     customer_ids: tuple[UUID, ...]
     runtime_ready: bool
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1323,6 +1324,7 @@ def list_rules(
                     trigger_key=rule.trigger_key,
                     version=displayed,
                 ),
+                updated_at=rule.updated_at,
             )
         )
     return tuple(summaries)
