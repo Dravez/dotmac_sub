@@ -201,6 +201,7 @@ class InboundMessageObservation:
     permalink_url: str | None = None
     media_url: str | None = None
     contact_profile: dict[str, str | None] | None = None
+    meta_referral_observation: dict[str, str] | None = None
     attachments: tuple[InboundAttachmentObservation, ...] = ()
     body_text: str | None = None
     html_body: str | None = None
@@ -344,6 +345,7 @@ _INBOUND_OPTIONAL_FIELDS = (
     "permalink_url",
     "media_url",
     "contact_profile",
+    "meta_referral_observation",
 )
 
 

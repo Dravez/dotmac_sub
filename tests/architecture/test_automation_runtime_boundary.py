@@ -32,7 +32,7 @@ def test_replay_evidence_query_is_typed_and_read_only() -> None:
     assert service.contract.transaction.mode.value == "read_only"
 
 
-def test_runtime_adapter_registry_is_closed_and_currently_inert() -> None:
+def test_runtime_adapter_registry_is_closed_and_valid() -> None:
     source = _source("app/services/automation_actions.py")
     assert "MappingProxyType" in source
     assert automation_actions.runtime_registry_errors() == ()
@@ -44,6 +44,26 @@ def test_runtime_handler_is_registered_with_explicit_event_scope() -> None:
     assert "dispatcher.register_handler(AutomationEventHandler())" in dispatcher
     assert '"AutomationEventHandler": HandlerControl(' in controls
     assert 'handler_name == "AutomationEventHandler"' in controls
+
+
+def test_runtime_preserves_typed_action_retry_classification() -> None:
+    source = _source("app/services/events/handlers/automation.py")
+    assert "class AutomationEventHandlerError(DomainError)" in source
+    assert "_handler_error(" in source
+    assert "retryable=False" in source
+
+
+def test_ticket_sla_consequence_delegates_to_subscription_owner() -> None:
+    source = _source("app/services/ticket_sla_service_automation.py")
+    assert "account_lifecycle.suspend_subscription(" in source
+    assert "subscription.status = " not in source
+    assert ".commit(" not in source
+    assert ".rollback(" not in source
+
+
+def test_ticket_sla_enforcement_reason_is_migrated() -> None:
+    migration = _source("alembic/versions/630_ticket_sla_enforcement_reason.py")
+    assert "ADD VALUE IF NOT EXISTS 'ticket_sla'" in migration
 
 
 def test_runtime_ledger_is_tenant_isolated_and_permissions_are_granular() -> None:

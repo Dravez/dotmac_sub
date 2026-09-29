@@ -39,6 +39,7 @@ class EnforcementReason(enum.Enum):
     customer_hold = "customer_hold"  # Customer-initiated vacation hold
     fraud = "fraud"  # Fraud / abuse investigation
     system = "system"  # System-level (migration, maintenance)
+    ticket_sla = "ticket_sla"  # Automation after a support Ticket SLA breach
 
 
 class AccessRestrictionMode(enum.Enum):

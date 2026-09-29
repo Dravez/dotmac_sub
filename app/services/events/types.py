@@ -39,6 +39,7 @@ class EventType(enum.Enum):
 
     # Support ticket lifecycle events
     support_ticket_created = "support.ticket.created"
+    support_ticket_sla_breached = "support.ticket.sla_breached"
 
     # Subscriber events
     subscriber_created = "subscriber.created"
@@ -224,6 +225,7 @@ class EventType(enum.Enum):
     service_team_party_cutover_adopted = "service_team.party_cutover_adopted"
     workqueue_action_coordinated = "workqueue.action_coordinated"
     ai_intake_config_updated = "ai.intake_config_updated"
+    ai_intake_lead_candidate_classified = "ai.intake_lead_candidate_classified"
     plan_family_catalogue_published = "catalog.plan_family_catalogue_published"
     catalog_offer_reseller_availability_changed = (
         "catalog.offer_reseller_availability_changed"
@@ -419,9 +421,10 @@ class EventType(enum.Enum):
     work_order_field_outcome_recorded = "work_order.field_outcome_recorded"
     customer_password_changed = "customer.password_changed"  # noqa: S105
 
-    # Reseller events (5)
+    # Reseller events (6)
     reseller_created = "reseller.created"
     reseller_user_provisioned = "reseller_user.provisioned"
+    reseller_user_access_revoked = "reseller_user.access_revoked"
     reseller_login = "reseller.login"
     reseller_logout = "reseller.logout"
     reseller_impersonated = "reseller.impersonated"

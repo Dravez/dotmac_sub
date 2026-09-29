@@ -121,6 +121,7 @@ REVIEWED_FOREIGN_RECEIVERS: Final[frozenset[str]] = frozenset(
         "duplicate",
         "quote",
         "edit_party",
+        "lead",
         # Identity and audit
         "party",
         "event",

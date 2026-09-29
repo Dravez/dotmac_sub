@@ -591,6 +591,29 @@ def test_manual_suspension_never_claims_payment_will_restore_service(
     assert resp.primary_action == action
 
 
+def test_ticket_sla_suspension_is_a_nonfinancial_support_hold(
+    db_session, subscriber_account, subscription
+):
+    subscriber_account.billing_mode = BillingMode.postpaid
+    subscriber_account.status = SubscriberStatus.active
+    subscription.status = SubscriptionStatus.suspended
+    subscription.billing_mode = BillingMode.postpaid
+    _add_lock(
+        db_session,
+        subscriber_account,
+        subscription,
+        EnforcementReason.ticket_sla,
+    )
+
+    resp = build_service_status(db_session, str(subscriber_account.id))
+
+    action = resp.services[0].action
+    assert resp.services[0].reason == "ticket_sla_breach"
+    assert action is not None
+    assert action.kind == ServiceStatusActionKind.contact_support
+    assert action.restores_service is False
+
+
 def test_fup_lock_keeps_usage_action(db_session, subscriber_account, subscription):
     subscriber_account.billing_mode = BillingMode.postpaid
     subscriber_account.status = SubscriberStatus.active

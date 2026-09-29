@@ -4,6 +4,9 @@ Use this procedure only for a Finance-approved historical sequence whose
 payments, opening position, invoice periods, and allocation split must be
 reconstructed together. It is dry-run first and requires
 `billing:prepaid_reconciliation:repair` on the named operator principal.
+The reviewed cohort may be one expired invoice when its existing receivable
+debit must be reclassified into exact payment and opening-funding settlement
+evidence without changing the customer position.
 
 Do not use it for a current or future period, a single ordinary draft, an
 estimated payment split, an unreviewed opening balance, or a request to restore
@@ -48,6 +51,7 @@ shape, preserving chronological document and allocation order:
     }
   ],
   "expected_opening_credit": "14811.50",
+  "expected_opening_funding_consumption": "0.00",
   "expected_post_repair_credit": "0.00",
   "expected_authoritative_prepaid_funding": "0.00",
   "approval": {
@@ -60,10 +64,51 @@ shape, preserving chronological document and allocation order:
 }
 ```
 
-Every selected payment must be fully distributed by `allocations`. Every target
-invoice must be exactly settled by its selected allocations plus the explicitly
-listed pre-existing allocations. Include one settlement ledger selection for
-every selected payment, including payments whose settlement row already exists.
+Every selected payment in a multi-document sequence must be fully distributed by
+`allocations`. A late-recorded, single-document repair may use only the amount
+needed to settle the invoice and retain the previewed residual as reusable
+account credit. Every target invoice must be exactly settled by its selected
+allocations plus the explicitly listed pre-existing allocations and
+opening-funding consumption. Opening funding may be selected only for a single
+expired document and must equal the full remaining reviewed opening source.
+Include one settlement ledger selection for every selected payment, including
+payments whose settlement row already exists. The preview's
+`selected_payment_allocation_total`, `selected_payment_residual`, and
+`post_boundary_credit` must match the reviewed evidence before apply.
+For a provider payment, `selected_payment_total` is the exact settlement-backed
+customer credit. It may be lower than the captured payment amount when the
+difference is an evidenced gateway fee.
+
+### Select the reviewed calendar basis
+
+Without a `calendar` object, dates retain the existing `business_midnight`
+meaning: midnight in Africa/Lagos, persisted as UTC. Never assume that a stored
+UTC midnight is Lagos midnight; it is 01:00 in Lagos.
+
+For continuation of a documented historical anniversary, include:
+
+```json
+"calendar": {
+  "basis": "documented_anniversary",
+  "expected_initial_anchor_at": "<exact observed first invoice end, ISO-8601 with offset>"
+}
+```
+
+This mode preserves the first invoice's exact stored interval and derives later
+reviewed dates using its Lagos anniversary clock. The first invoice must already
+have the selected subscription line and both period bounds. Its dates must equal
+the reviewed Lagos dates and its end must exactly equal both the observed
+subscription anchor and the manifest expectation. Missing/partial identity,
+different endpoint clocks, changed bounds, or a stale anchor blocks preview.
+There is no arbitrary clock-time or timezone override and no automatic fallback.
+
+For example, a documented 00:00 UTC boundary displays as 01:00 Africa/Lagos on
+the same date. Continuing that anniversary does not move a preceding paid
+invoice or manufacture a one-hour overlap. Actual instant overlaps still block.
+Changing an existing paid period to Lagos midnight is a different repair owned
+by `financial.prepaid_billing_calendar_reconciliation`, with its own exact paid
+invoice/allocation/settlement/entitlement evidence and authorization. Do not
+shift that invoice merely to force this sequence to pass.
 
 ## Preview
 
@@ -76,6 +121,11 @@ Proceed only when `disposition` is `exact_sequence` and `actionable` is true.
 Finance must verify the returned invoice/payment identifiers, service bounds,
 opening credit, post-boundary credit, authoritative prepaid funding, totals,
 and fingerprint against the evidence package.
+Verify `calendar_basis`, `timezone_name`, `initial_anchor_at`, every returned
+`service_periods` UTC and Lagos timestamp, `reviewed_allocation_plan`, and
+`expected_post_repair_credit`. Unresolved calendar evidence returns null bounds
+and no periods; that is never actionable. A calendar change requires a new
+preview and separate authorization of its exact fingerprint.
 
 ## Apply
 
@@ -111,14 +161,16 @@ After an authorized apply, confirm:
    no gap or overlap.
 5. `Subscription.next_billing_at` equals the final entitlement end, while an
    expired final period leaves access unchanged.
-6. Post-boundary reusable credit and authoritative prepaid funding equal the
+6. A later billing anchor remains unchanged when the repaired expired period is
+   behind already-funded coverage.
+7. Post-boundary reusable credit and authoritative prepaid funding equal the
    manifest expectations.
-7. The customer financial position delta is exactly zero.
-8. Each invoice carries the same ticket, Finance approval, evidence digest,
+8. The customer financial position delta is exactly zero.
+9. Each invoice carries the same ticket, Finance approval, evidence digest,
    fingerprint, command id, and idempotency metadata.
-9. One sequence audit record and one
+10. One sequence audit record and one
    `prepaid_invoice_sequence.reconstructed` durable event exist.
-10. Repeating the same command returns `replayed: true` and creates no rows.
+11. Repeating the same command returns `replayed: true` and creates no rows.
 
 Stop and escalate to Finance if any value differs. Never compensate with direct
 invoice status, allocation, ledger, entitlement, anchor, or access updates.

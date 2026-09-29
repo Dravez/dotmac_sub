@@ -20,26 +20,52 @@
             .map((element) => [element.name, element.value])
     ));
 
+    const validationControlFor = (form) => [...form.elements].find((element) => (
+        typeof element.setCustomValidity === "function"
+        && !element.disabled
+        && element.type !== "hidden"
+    ));
+
+    const clearValidationError = (form) => {
+        const control = validationControlFor(form);
+        if (control?.dataset?.automationValidationError !== "1") return;
+        control.setCustomValidity("");
+        delete control.dataset.automationValidationError;
+    };
+
+    const setValidationError = (form, message) => {
+        const control = validationControlFor(form);
+        if (control) {
+            control.setCustomValidity(message);
+            control.dataset.automationValidationError = "1";
+        }
+        return control;
+    };
+
     const loadBundle = async (target, eventName) => {
         const key = `${target}:${eventName}`;
         if (!bundles.has(key)) {
-            bundles.set(key, fetch(`/admin/automation/client-scripts?target_type=${encodeURIComponent(target)}&event_name=${encodeURIComponent(eventName)}`, {
+            const request = fetch(`/admin/automation/client-scripts?target_type=${encodeURIComponent(target)}&event_name=${encodeURIComponent(eventName)}`, {
                 credentials: "same-origin",
                 headers: {Accept: "application/json"},
             }).then((response) => {
                 if (response.status === 404 || response.status === 403) return [];
                 if (!response.ok) throw new Error("Client script bundle unavailable");
                 return response.json().then((body) => body.scripts || []);
-            }));
+            }).catch((error) => {
+                bundles.delete(key);
+                throw error;
+            });
+            bundles.set(key, request);
         }
         return bundles.get(key);
     };
 
     const run = async (form, eventName, domEvent, fieldName) => {
         const scripts = await loadBundle(form.dataset.automationTarget, eventName);
+        clearValidationError(form);
         if (!scripts.length) return true;
         const errors = [];
-        form.setCustomValidity("");
         const values = fieldsFor(form);
         const currentValues = {...values};
         const context = Object.freeze({
@@ -61,9 +87,9 @@
             error: (message) => {
                 const text = String(message || "Client validation failed");
                 errors.push(text);
-                form.setCustomValidity(text);
+                setValidationError(form, text);
             },
-            clearError: () => form.setCustomValidity(""),
+            clearError: () => clearValidationError(form),
             preventDefault: () => domEvent?.preventDefault(),
         });
         for (const script of scripts) {
@@ -84,10 +110,16 @@
     const attach = (form) => {
         if (forms.has(form) || !form.dataset.automationTarget) return;
         forms.add(form);
-        void run(form, "form.load", null, null);
+        void run(form, "form.load", null, null).catch((error) => {
+            console.error("Automation client form-load validation failed", error);
+        });
         form.addEventListener("change", (event) => {
             const target = event.target;
-            if (target instanceof HTMLElement && target.name) void run(form, "field.change", event, target.name);
+            if (target instanceof HTMLElement && target.name) {
+                void run(form, "field.change", event, target.name).catch((error) => {
+                    console.error("Automation client field-change validation failed", error);
+                });
+            }
         });
         form.addEventListener("submit", (event) => {
             if (form.dataset.automationBypass === "1") {
@@ -96,6 +128,7 @@
             }
             if (event.defaultPrevented) return;
             event.preventDefault();
+            event.stopImmediatePropagation();
             void run(form, "form.validate", event, null).then((valid) => {
                 const nativeValid = form.noValidate || form.checkValidity();
                 if (valid && nativeValid) {
@@ -104,8 +137,12 @@
                 } else if (!form.noValidate) {
                     form.reportValidity();
                 }
+            }).catch((error) => {
+                console.error("Automation client form validation failed", error);
+                setValidationError(form, "Client automation could not validate this form. Try again.");
+                if (!form.noValidate) form.reportValidity();
             });
-        });
+        }, true);
     };
 
     const scan = () => document.querySelectorAll("form[data-automation-target]").forEach(attach);

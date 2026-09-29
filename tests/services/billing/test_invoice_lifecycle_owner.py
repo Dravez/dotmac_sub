@@ -102,16 +102,20 @@ def test_invoice_owner_skips_underfunded_credit_when_full_credit_required(
     applied: list[str] = []
 
     monkeypatch.setattr(
-        "app.services.billing.account_credit.AccountCreditApplications.preview_invoice_funding",
+        "app.services.billing.account_credit.AccountCreditApplications.preview_invoice_issuance_funding",
         lambda db, invoice: type(
             "Preview",
             (),
-            {"fully_funded": False, "fingerprint": "underfunded-preview"},
+            {
+                "fully_funded": False,
+                "fingerprint": "underfunded-preview",
+                "reserved_amount": Decimal("40.00"),
+            },
         )(),
     )
     monkeypatch.setattr(
-        "app.services.billing.account_credit.AccountCreditApplications.apply_invoice_fully",
-        lambda db, invoice, *, preview_fingerprint: applied.append(preview_fingerprint),
+        "app.services.billing.account_credit.AccountCreditApplications.apply_invoice_issuance_funding",
+        lambda db, invoice, *, reservation: applied.append(reservation.fingerprint),
     )
 
     result = Invoices.issue_draft_system(
@@ -134,21 +138,25 @@ def test_invoice_owner_applies_credit_when_full_credit_required_and_funded(
     applied: list[str] = []
 
     monkeypatch.setattr(
-        "app.services.billing.account_credit.AccountCreditApplications.preview_invoice_funding",
+        "app.services.billing.account_credit.AccountCreditApplications.preview_invoice_issuance_funding",
         lambda db, invoice: type(
             "Preview",
             (),
-            {"fully_funded": True, "fingerprint": "fully-funded-preview"},
+            {
+                "fully_funded": True,
+                "fingerprint": "fully-funded-preview",
+                "reserved_amount": Decimal("100.00"),
+            },
         )(),
     )
 
-    def _fake_apply(db, invoice, *, preview_fingerprint):
-        applied.append(preview_fingerprint)
+    def _fake_apply(db, invoice, *, reservation):
+        applied.append(reservation.fingerprint)
         invoice.balance_due = Decimal("0.00")
         invoice.status = InvoiceStatus.paid
 
     monkeypatch.setattr(
-        "app.services.billing.account_credit.AccountCreditApplications.apply_invoice_fully",
+        "app.services.billing.account_credit.AccountCreditApplications.apply_invoice_issuance_funding",
         _fake_apply,
     )
 

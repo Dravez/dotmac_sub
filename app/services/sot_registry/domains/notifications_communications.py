@@ -2536,22 +2536,27 @@ DOMAIN = DomainSOT(
             name="communications.team_inbox_customer_completion",
             module="app.services.team_inbox_customer_completion",
             owns=(
-                "Customer-only Inbox resolution readiness",
+                "Inbox Customer completion and classified-Lead resolution readiness",
                 "canonical Inbox Customer profile completion coordination",
             ),
             depends_on=(
                 "communications.team_inbox_customer_completion_policy",
                 "communications.team_inbox_threads",
                 "communications.conversation_lead_relationships",
+                "ai.intake",
                 "customer.accounts",
                 "customer.canonical_profile_patch",
                 "party.registry",
+                "sales.lead_intake",
                 "observability.audit_log",
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_customer_completion",
                 concerns=(
-                    ("Customer-only Inbox resolution readiness", OwnerRole.RESOLVER),
+                    (
+                        "Inbox Customer completion and classified-Lead resolution readiness",
+                        OwnerRole.RESOLVER,
+                    ),
                     (
                         "canonical Inbox Customer profile completion coordination",
                         OwnerRole.APPLICATION_COORDINATOR,
@@ -2575,6 +2580,15 @@ DOMAIN = DomainSOT(
                         owner="communications.conversation_lead_relationships",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source="Active reviewed conversation-to-Lead link.",
+                    ),
+                    AuthorityInput(
+                        name="final Inbox sales classification",
+                        owner="ai.intake",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Final classified inbound message metadata for a "
+                            "new-connection or coverage request with known party type."
+                        ),
                     ),
                     AuthorityInput(
                         name="canonical Customer profile",

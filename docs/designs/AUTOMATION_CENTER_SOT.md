@@ -1,13 +1,13 @@
 # Automation Center source of truth
 
-Status: reusable rule builder and native script control-plane draft
+Status: reusable workflow builder and native script control-plane draft
 
 Decision owner: Michael
 
 ## Scope
 
 The Automation Center is the central authoring and lifecycle surface for
-rules plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
+workflows (the user-facing name for central rules) plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
 provisioning, SLA, escalation, and routing rules remain managed by their
 existing owners until a later, separately approved migration. That migration
 must hand off each rule without leaving two active writers.
@@ -30,14 +30,12 @@ from the UI. Adding or restoring a capability is a reviewed code change in its
 owning domain. The code change must be deployed before the capability becomes
 available for rule activation.
 
-Owner declarations also publish a typed business-automation catalogue. The
-central page shows whether each listed Support, communications, billing,
-subscription, usage/access, provisioning, customer-identity, network, sales,
-field-operations, integration, reporting, export, or maintenance item is ready
-for new rules, still managed on its existing page, unavailable because it has
-no safe Center contract yet, or retired. Unavailable and retired items include
-a plain-language reason. An item is ready only when its declared trigger and
-actions have registered runtime support. The catalogue is read-only: it does
+Owner declarations also publish a typed business-automation catalogue for
+diagnostics and developer guidance. It is not rendered as an operator table on
+the Automation Center landing page. Focused Workflows, Client scripts, and
+Server scripts workspaces expose only the registered targets and actions that
+are relevant to the mechanism being authored. Unavailable and retired items
+retain a plain-language reason for implementation guidance; the catalogue does
 not activate rules or change existing automation.
 
 Every trigger declares the exact payload fields carrying tenant and target
@@ -46,6 +44,14 @@ the runtime never guesses tenancy from an unrelated record or a UI session.
 Customer-specific rules may also name an explicit set of customer identities.
 Those identities come from the trigger's declared customer field and are
 validated against the customer owner when a draft is saved and published.
+
+Customer account workflows may use the owner-produced account-created,
+account-updated, status-changed, suspended, and reactivated events. Support
+ticket workflows may use ticket-created, assigned, status-changed,
+priority-changed, resolution-requested, resolution-confirmed, and
+resolution-disputed events. These choices are declared by the owning SOT and
+their bounded event producers; operators cannot add arbitrary event names from
+the UI.
 
 ## Rule shape
 
@@ -141,9 +147,11 @@ Script publication repeats target permissions and runtime readiness checks.
 The Center never grants a script arbitrary ORM access, imports, process access,
 network access, dynamic code evaluation, or a generic database writer.
 
-The admin shell is available at `/admin/automation`. Opening the hub requires
-`automation:hub:read`; its rule and execution sections independently require
-`automation:rule:read` and `automation:run:read`. Run details require
+The admin shell is available at `/admin/automation`. The hub is a directory
+that links to focused `/workflows`, `/client-scripts/manage`,
+`/server-scripts`, and `/runs` workspaces. Opening the hub requires
+`automation:hub:read`; each workflow, script, and execution workspace keeps
+its own read permission. Run details require
 `automation:run:read`; continuing a failed run additionally requires
 `automation:run:redrive`. The run detail shows the affected record, rule
 version, timestamps, each action step and its attempts, safe failure guidance,
@@ -180,6 +188,39 @@ this reviewed code contract.
 Focused checks for event delivery, customer scoping, replay, action audit,
 activation, pause behavior, and both legacy and central rule conflicts run with
 the pull request's CI suite before merge.
+
+## Ticket SLA service suspension
+
+Support exposes the runtime-enabled `support.ticket.sla_breached` trigger from
+the durable breach fact owned by `support.ticket_sla_clock`. Its version-1
+payload contains the operator tenant, Ticket, SLA clock, breach time, normalized
+priority, and ticket type. The trigger does not reinterpret an overdue date;
+it is staged only when the owner records the breach.
+
+The only admitted action for this trigger is
+`support.ticket.suspend_unique_active_service`. The Automation Center adapter
+delegates to `support.ticket_sla_service_consequence`, which locks the Ticket,
+uses its canonical customer-account link, and requires exactly one active
+Subscription. Missing customer identity, zero active services, multiple active
+services, or conflicting replay evidence fail closed and are retained in the
+automation step evidence. The coordinator delegates the actual status and
+enforcement-lock writes to `access.subscription_lifecycle`.
+
+The action suspends network access with a dedicated `ticket_sla` enforcement
+lock. It does not
+pause billing and does not restore service automatically. Its stable lock
+source includes event, rule-version, and step identity so a retry after the
+side effect replays the exact success rather than selecting another service.
+
+The workflow builder exposes this trigger and action alongside the other
+registered Support capabilities. It requires the trigger's Ticket-read
+permission and the action's subscription-suspend permission at draft and
+publication time. The action description and authoring guidance explain that
+billing is unchanged, service selection fails closed when there is no unique
+active service, and restoration requires an authorized follow-up. Any
+high-impact confirmation belongs in the generic workflow publication step;
+there is no separate SLA-specific button or rule-creation route on the hub.
+Deployment itself still creates no rule.
 
 The current ticket-assignment and ticket-creation automation pages are listed
 as existing ownership links. Their rules are not moved by this implementation

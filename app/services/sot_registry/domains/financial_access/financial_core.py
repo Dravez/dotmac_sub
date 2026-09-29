@@ -341,6 +341,7 @@ SERVICES: tuple[SOTService, ...] = (
             "deterministic payment-credit source selection",
             "oldest-payable-debt application orchestration",
             "exact invoice payment-backed funding preview",
+            "pre-issuance payment-credit reservation and atomic application",
             "all-or-nothing exact invoice credit application",
             "invoice-void release of exact account-credit allocations",
             "account-credit application invariant monitoring",
@@ -361,6 +362,10 @@ SERVICES: tuple[SOTService, ...] = (
             "separate commands because credit is spendable only once its "
             "settlement evidence exists; the settlement path calls "
             "offer_available_credit once it does."
+            " Invoice issuance reserves eligible payment credit while the document "
+            "is still a draft, then consumes that exact reservation after the "
+            "receivable is issued in the same transaction. The new invoice's own "
+            "debit therefore cannot hide the funding that must settle it."
         ),
     ),
 )

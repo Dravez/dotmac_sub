@@ -544,6 +544,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     from app.services.events.handlers.ip_assignment_projection import (
         IPAssignmentProjectionHandler,
     )
+    from app.services.events.handlers.lead_intake import LeadIntakeHandler
     from app.services.events.handlers.lifecycle import LifecycleHandler
     from app.services.events.handlers.materials_lifecycle_projection import (
         MaterialsLifecycleProjectionHandler,
@@ -589,6 +590,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
 
     dispatcher.register_handler(SubscriptionChangeExecutionHandler())
     dispatcher.register_handler(ReferralHandler())
+    dispatcher.register_handler(LeadIntakeHandler())
     dispatcher.register_handler(PrepaidRenewalHandler())
     dispatcher.register_handler(StaffInviteHandler())
     dispatcher.register_handler(ResellerInviteHandler())

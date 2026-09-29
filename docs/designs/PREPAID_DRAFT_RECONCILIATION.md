@@ -577,13 +577,33 @@ command. It is not an extension of automatic draft discovery.
 
 The typed query names every invoice and line, half-open service interval,
 expected contract total, payment-to-invoice split, settlement ledger row, and
-legacy allocation ledger pair. Preview requires all of these invariants:
+legacy allocation ledger pair. `financial.prepaid_service_renewals` owns the
+typed reviewed calendar reader; the reconciler and CLI never independently
+round these periods. Date-only manifests default to Africa/Lagos midnight.
+An explicit `documented_anniversary` selection also names the expected initial
+anchor. It requires the first invoice's exact existing linked period, equal
+reviewed Lagos dates, equal endpoint clocks, and an anchor exactly equal to its
+end. Later intervals preserve that documentary clock. A UTC-midnight historical
+boundary therefore remains 01:00 Lagos rather than being silently shifted an
+hour. The preceding paid invoice is unchanged; real overlap still fails closed.
+This continuation mode is not the paid-period calendar correction workflow.
+
+The preview fingerprints the calendar selection, resolved intervals and initial
+anchor, and reports each UTC/local interval and expected final reusable credit.
+Apply consumes those same typed intervals after locking and re-previewing; it
+does not recalculate dates in a participant. Missing or inconsistent calendar
+evidence remains manual review without guessed bounds. New lapsed renewals still
+use the canonical settlement-day Lagos-midnight policy, while uninterrupted
+funded coverage preserves its exact anniversary as before.
+
+Preview requires all of these invariants:
 
 - periods are positive, contiguous, and already expired;
 - each invoice has one exact recurring line and matches canonical contract and
   tax terms;
 - the allocation plan plus reviewed legacy allocations settles every invoice
-  and consumes every selected payment exactly;
+  and consumes every selected payment exactly, except that a late-recorded
+  one-document repair may retain an explicitly previewed payment residual;
 - selected pre-opening payment value minus allocations to invoices ending at
   the opening boundary equals the unconsumed approved opening position;
 - the remainder of those pre-opening payments allocated to later invoices is
@@ -617,6 +637,21 @@ idempotency reservation, invoice metadata on every target, audit event, and
 `prepaid_invoice_sequence.reconstructed` event record the result. Any changed
 cent, missing row, extra allocation, overlap, non-zero customer-position delta,
 or unexpected remaining credit rolls back the complete command.
+
+The same reviewed command accepts a one-document sequence for an expired issued
+or overdue prepaid invoice whose receivable debit already reduced the customer
+position. That manifest must select the exact unallocated native payment and
+the complete remaining reviewed opening source. Confirmation records the
+payment allocation and opening-funding consumption as settlement evidence,
+adopts the service identity, and requires the customer-position delta to remain
+zero. The selected payment may exceed the invoice balance only when the preview
+proves the exact allocation and residual; the residual remains reusable account
+credit and must equal the manifest's post-repair expectation. When a provider
+payment's captured amount includes a gateway fee, the selected funding total is
+the exact settlement-backed customer credit rather than the captured gross; the
+preview fingerprints both values. If a later funded period has already advanced
+the billing anchor, the command preserves that anchor rather than moving it
+backwards.
 
 ## Rollout
 

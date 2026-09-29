@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from app.config import settings
 from app.models.audit import AuditEvent
-from app.models.auth import AuthProvider, UserCredential
+from app.models.auth import AuthProvider, SessionStatus, UserCredential
+from app.models.auth import Session as AuthSession
 from app.models.event_store import EventStore
 from app.models.notification import CommunicationIntentRecord, Notification
 from app.models.rbac import Role, SubscriberRole
@@ -425,7 +427,84 @@ def test_reseller_detail_projects_first_class_portal_user(db_session) -> None:
             username="portal-owner",
             is_active=True,
             invite_pending=True,
+            can_send_reset=True,
+            can_remove=True,
         ),
+    )
+
+
+def test_revoke_first_class_reseller_access_preserves_identity_and_ends_sessions(
+    db_session,
+    monkeypatch,
+    first_class_principal_mode,
+) -> None:
+    owner, assignment = _contexts("revoke-create")
+    created = reseller_onboarding.create_reseller(
+        db_session,
+        reseller_onboarding.CreateResellerCommand(
+            context=owner,
+            reseller=ResellerCreate(name="Revoke Reseller", code="REVOKE-RSL"),
+            portal_user=_user(email="revoke.reseller@example.com", send_invite=False),
+            assignment_context=assignment,
+        ),
+    )
+    session = AuthSession(
+        reseller_user_id=created.principal_id,
+        status=SessionStatus.active,
+        token_hash="revoke-reseller-session",
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(session)
+    db_session.commit()
+    monkeypatch.setattr(
+        reseller_onboarding.auth_cache, "invalidate_principal", lambda *_: 1
+    )
+    from app.services import reseller_portal
+
+    monkeypatch.setattr(
+        reseller_portal,
+        "revoke_reseller_sessions_for_principal",
+        lambda *_args, **_kwargs: None,
+    )
+    revoke_context, _ = _contexts("revoke-access")
+
+    outcome = reseller_onboarding.revoke_reseller_portal_access(
+        db_session,
+        reseller_onboarding.RevokeResellerPortalAccessCommand(
+            context=revoke_context,
+            reseller_id=created.reseller_id,
+            principal_type="reseller_user",
+            principal_id=created.principal_id,
+        ),
+    )
+
+    principal = db_session.get(ResellerUser, created.principal_id)
+    credential = (
+        db_session.query(UserCredential)
+        .filter(UserCredential.reseller_user_id == created.principal_id)
+        .one()
+    )
+    revoked_session = db_session.get(AuthSession, session.id)
+    assert outcome.changed is True
+    assert outcome.credentials_deactivated == 1
+    assert outcome.sessions_revoked == 1
+    assert principal is not None
+    assert principal.is_active is False
+    assert credential.is_active is False
+    assert revoked_session.status == SessionStatus.revoked
+    assert revoked_session.revoked_at is not None
+    assert (
+        db_session.query(AuditEvent)
+        .filter(AuditEvent.action == "auth.reseller_portal_access_revoked")
+        .count()
+        == 1
+    )
+    assert (
+        db_session.query(EventStore)
+        .filter(EventStore.event_type == "reseller_user.access_revoked")
+        .count()
+        == 1
     )
 
 

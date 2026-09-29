@@ -230,6 +230,7 @@ ALLOWED_RESTORERS: dict[EnforcementReason, set[str]] = {
     EnforcementReason.customer_hold: {"customer", "admin"},
     EnforcementReason.fraud: {"admin"},
     EnforcementReason.system: {"system", "admin"},
+    EnforcementReason.ticket_sla: {"admin"},
 }
 
 # Verify ALLOWED_RESTORERS covers every enum member at import time

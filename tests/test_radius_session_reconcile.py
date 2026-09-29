@@ -462,6 +462,16 @@ class TestActiveSessionReconcile:
         expected = min([sub_a.id, sub_b.id], key=lambda u: str(u))
         assert row.subscription_id == expected
 
+    def test_task_retries_transient_database_failures(self):
+        from sqlalchemy.exc import OperationalError
+
+        from app.tasks.radius import reconcile_active_sessions
+
+        assert OperationalError in reconcile_active_sessions.autoretry_for
+        assert reconcile_active_sessions.retry_backoff is True
+        assert reconcile_active_sessions.retry_backoff_max == 60
+        assert reconcile_active_sessions.retry_kwargs["max_retries"] == 3
+
     def test_advisory_lock_single_flight_skips(self):
         from app import tasks as _tasks  # noqa: F401  ensure task registered
         from app.tasks.radius import reconcile_active_sessions

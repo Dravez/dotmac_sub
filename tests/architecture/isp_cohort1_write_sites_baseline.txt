@@ -51,7 +51,7 @@
 1 service|app/services/mrr_snapshot.py
 1 service|app/services/network_subscriber_bridge.py
 1 service|app/services/nin_verifications.py
-21 service|app/services/party.py
+23 service|app/services/party.py
 14 service|app/services/subscriber.py
 2 service|app/services/subscriber_profile_cleanup.py
 3 service|app/services/team_inbox_commands.py
@@ -60,4 +60,4 @@
 1 web_presenter|app/services/web_customer_details.py
 1 web_presenter|app/services/web_system_import_wizard.py
 3 web_presenter|app/services/web_system_restore_tool.py
-TOTAL 118
+TOTAL 120

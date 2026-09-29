@@ -116,6 +116,10 @@ from app.services.owner_commands import (
     execute_owner_command,
     execute_owner_savepoint,
 )
+from app.services.prepaid_calendar_contracts import (
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidServicePeriodQuery,
+)
 from app.services.service_entitlements import prepaid_entitlement_coverage_end
 from app.timezone import APP_TIMEZONE, APP_TIMEZONE_NAME
 
@@ -487,6 +491,58 @@ def resolve_prepaid_settlement_period(
         starts_on=interval.starts_at.astimezone(zone).date(),
         ends_on=interval.ends_at.astimezone(zone).date(),
         timezone_name=query.timezone_name,
+    )
+
+
+def resolve_reviewed_prepaid_service_period(
+    query: ReviewedPrepaidServicePeriodQuery,
+) -> PrepaidSettlementPeriod:
+    """Resolve reviewed Lagos dates without silently rewriting an anniversary.
+
+    Date-only evidence defaults to local midnight. Historical continuation may
+    explicitly preserve the clock of an exact recorded interval instead. The
+    caller must verify that record's account/subscription/document identity;
+    this pure reader accepts no arbitrary clock or timezone override.
+    """
+
+    zone = ZoneInfo(APP_TIMEZONE_NAME)
+    clock = time.min
+    if query.basis is ReviewedPrepaidCalendarBasis.documented_anniversary:
+        reference = query.documented_period
+        if (
+            reference is None
+            or reference.starts_at.tzinfo is None
+            or reference.ends_at.tzinfo is None
+            or reference.starts_at.utcoffset() is None
+            or reference.ends_at.utcoffset() is None
+            or reference.ends_at <= reference.starts_at
+        ):
+            _error(
+                "invalid_period",
+                "Exact aware documentary calendar evidence is required.",
+            )
+        local_start = reference.starts_at.astimezone(zone)
+        local_end = reference.ends_at.astimezone(zone)
+        if local_start.time() != local_end.time():
+            _error("invalid_period", "Documentary anniversary clock times disagree.")
+        clock = local_start.time()
+    elif (
+        query.basis is not ReviewedPrepaidCalendarBasis.business_midnight
+        or query.documented_period is not None
+    ):
+        _error("invalid_period", "Reviewed calendar basis and evidence disagree.")
+    starts_at = datetime.combine(query.starts_on, clock, zone).astimezone(UTC)
+    ends_at = datetime.combine(query.ends_on, clock, zone).astimezone(UTC)
+    if ends_at <= starts_at:
+        _error(
+            "invalid_period", "Reviewed service dates must form a positive interval."
+        )
+    return PrepaidSettlementPeriod(
+        starts_at=starts_at,
+        ends_at=ends_at,
+        starts_on=query.starts_on,
+        ends_on=query.ends_on,
+        timezone_name=APP_TIMEZONE_NAME,
     )
 
 
