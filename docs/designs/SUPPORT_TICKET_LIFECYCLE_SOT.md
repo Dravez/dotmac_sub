@@ -258,6 +258,13 @@ compatibility projection. Historical CSAT reporting reads `support_csat_requests
 and its agent/team snapshots, not mutable current Ticket assignment.
 
 `support.ticket_sla_clock` remains the Ticket SLA clock and breach owner.
+When it records a breach it also stages the bounded
+`support.ticket.sla_breached` Automation Center event; an overdue UI projection
+alone never emits that event. `support.ticket_sla_service_consequence` owns the
+optional cross-domain consequence that suspends the only active Subscription
+linked through the Ticket's canonical customer-account identity. It fails
+closed when that identity or service selection is missing or ambiguous and
+delegates all lock and access-state writes to `access.subscription_lifecycle`.
 `support.ticket_work_order_handoff` remains the only issuance/provenance
 boundary into field work. Issuance requires ticket-update and dispatch-write
 permission evidence plus an idempotency key. A field result may add internal

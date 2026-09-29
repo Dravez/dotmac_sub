@@ -39,6 +39,7 @@ class EventType(enum.Enum):
 
     # Support ticket lifecycle events
     support_ticket_created = "support.ticket.created"
+    support_ticket_sla_breached = "support.ticket.sla_breached"
 
     # Subscriber events
     subscriber_created = "subscriber.created"

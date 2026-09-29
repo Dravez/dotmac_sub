@@ -53,6 +53,7 @@ account-scoped; it is never coerced to zero, paid, funded, or safe-to-suspend.
 | Postpaid collections policy | `financial.dunning` | Owns overdue AR consequences and financial shields. |
 | Financial consequence confirmation | `financial.dunning` access consequence owner | Locks, recomputes, fingerprints, applies, and evidences suspend/restore/throttle/reject consequences. |
 | Locks and subscription/account state | `access.subscription_lifecycle` | Sole writer of reason-scoped locks, account status, and child-service access state in one transaction. |
+| Ticket SLA suspension consequence | `support.ticket_sla_service_consequence` | Selects exactly one active service from a breached Ticket's canonical customer link, fails closed on ambiguity, and delegates the system lock and suspension writes to `access.subscription_lifecycle`; billing treatment is unchanged. |
 | Network projection | `access.radius_projection` | Owns the exact per-login plan, idempotent external writes, and bidirectional convergence check. |
 
 Routes, jobs, webhooks, event handlers, commands, and notification transports

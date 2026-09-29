@@ -56,8 +56,8 @@ class ServiceStatusItem(BaseModel):
     # Next billing event. Informational — NOT an expiry.
     next_charge_at: datetime | None = None
     # ok | low_balance | overdue | fair_usage | administrative_hold |
-    # customer_hold | fraud_review | system_hold | multiple_holds | suspended |
-    # stopped | ended
+    # customer_hold | fraud_review | system_hold | ticket_sla_breach |
+    # multiple_holds | suspended | stopped | ended
     reason: str
     action: ServiceStatusAction | None = None
 

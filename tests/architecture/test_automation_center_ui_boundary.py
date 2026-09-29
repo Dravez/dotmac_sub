@@ -125,6 +125,7 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert "data-automation-target" in client_runtime
     assert "database/write client" in client_runtime
     assert '_DEFAULT_TRIGGER = ""' in route
+    assert "ticket-sla-suspension" not in route
 
 
 def test_server_scripts_dispatch_from_declared_target_events_without_native_rules() -> (

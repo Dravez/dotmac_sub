@@ -28,6 +28,7 @@ from app.services.automation_script_runner import (
     ExecuteAutomationServerScriptCommand,
     parse_script_action_requests,
 )
+from app.services.domain_errors import DomainError
 from app.services.events.handlers.owner_session import owner_session
 from app.services.events.types import Event, EventType
 from app.services.operator_tenant import OPERATOR_TENANT_ID
@@ -73,8 +74,18 @@ HANDLED_EVENT_TYPES = frozenset(
 )
 
 
-class AutomationEventHandlerError(RuntimeError):
-    """Keep the durable event retryable when any automation action fails."""
+class AutomationEventHandlerError(DomainError):
+    """Typed failure preserving the module action's retry classification."""
+
+
+def _handler_error(
+    message: str, *, retryable: bool = True
+) -> AutomationEventHandlerError:
+    return AutomationEventHandlerError(
+        code="automation.execution.event_handler_failed",
+        message=message,
+        retryable=retryable,
+    )
 
 
 def _path_value(payload: Mapping[str, object], path: str) -> object:
@@ -91,8 +102,9 @@ def _required_uuid(payload: Mapping[str, object], path: str) -> UUID:
     try:
         return UUID(str(value))
     except (TypeError, ValueError) as exc:
-        raise AutomationEventHandlerError(
-            f"Automation event identity field {path!r} is missing or invalid."
+        raise _handler_error(
+            f"Automation event identity field {path!r} is missing or invalid.",
+            retryable=False,
         ) from exc
 
 
@@ -123,7 +135,7 @@ def _script_action_inputs(
 
     raw_inputs = tuple(request.inputs)
     if len({item.key for item in raw_inputs}) != len(raw_inputs):
-        raise AutomationEventHandlerError(
+        raise _handler_error(
             f"Server script repeated an input for action {action.key!r}."
         )
     declared = {item.key: item for item in action.inputs}
@@ -135,7 +147,7 @@ def _script_action_inputs(
         if item.required and (item.key not in supplied or supplied[item.key] is None)
     )
     if unknown or missing:
-        raise AutomationEventHandlerError(
+        raise _handler_error(
             f"Server script inputs for {action.key!r} are invalid "
             f"(unknown={unknown!r}, missing={missing!r})."
         )
@@ -173,7 +185,7 @@ def _script_action_inputs(
         elif definition.value_type is AutomationValueType.enum:
             valid = isinstance(value, str) and value in definition.enum_values
         if not valid:
-            raise AutomationEventHandlerError(
+            raise _handler_error(
                 f"Server script input {key!r} for {action.key!r} has the wrong type."
             )
     return tuple(
@@ -218,8 +230,9 @@ class AutomationEventHandler:
         for trigger in triggers:
             tenant_id = _required_uuid(payload, trigger.tenant_id_field)
             if tenant_id != OPERATOR_TENANT_ID:
-                raise AutomationEventHandlerError(
-                    "Automation event tenant does not match the operator tenant."
+                raise _handler_error(
+                    "Automation event tenant does not match the operator tenant.",
+                    retryable=False,
                 )
             target_id = _required_uuid(payload, trigger.entity_id_field)
             self._execute_server_scripts(
@@ -263,8 +276,9 @@ class AutomationEventHandler:
                 continue
             tenant_id = _required_uuid(payload, target.tenant_id_field)
             if tenant_id != OPERATOR_TENANT_ID:
-                raise AutomationEventHandlerError(
-                    "Automation event tenant does not match the operator tenant."
+                raise _handler_error(
+                    "Automation event tenant does not match the operator tenant.",
+                    retryable=False,
                 )
             target_id = _required_uuid(payload, target.entity_id_field)
             self._execute_server_scripts(
@@ -292,11 +306,12 @@ class AutomationEventHandler:
             try:
                 action = automation_capabilities.action_capability(request.action_key)
                 if not action.runtime_enabled:
-                    raise AutomationEventHandlerError(
-                        f"Server script action {action.key!r} is not runtime-enabled."
+                    raise _handler_error(
+                        f"Server script action {action.key!r} is not runtime-enabled.",
+                        retryable=False,
                     )
                 if action.entity_type != script.target_type:
-                    raise AutomationEventHandlerError(
+                    raise _handler_error(
                         f"Server script action {action.key!r} targets "
                         f"{action.entity_type!r}, not {script.target_type!r}."
                     )
@@ -332,7 +347,7 @@ class AutomationEventHandler:
                     ),
                 )
             except automation_capabilities.AutomationCapabilityError as exc:
-                raise AutomationEventHandlerError(
+                raise _handler_error(
                     f"Server script requested an undeclared action {request.action_key!r}."
                 ) from exc
 
@@ -434,7 +449,7 @@ class AutomationEventHandler:
                     ),
                 )
             if status is not AutomationScriptRunStatus.succeeded:
-                raise AutomationEventHandlerError(
+                raise _handler_error(
                     f"Server script {script.script_id} stopped with {status.value}."
                 )
 
@@ -456,7 +471,7 @@ class AutomationEventHandler:
                 ),
             )
         if outcome.error_code:
-            raise AutomationEventHandlerError(
+            raise _handler_error(
                 f"Automation run {run.run_id} stopped with {outcome.error_code}."
             )
 

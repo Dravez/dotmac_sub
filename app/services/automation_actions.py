@@ -144,6 +144,43 @@ def _set_support_ticket_priority(
     )
 
 
+def _suspend_support_ticket_service_for_sla_breach(
+    db: Session, command: ExecuteAutomationActionCommand
+) -> AutomationActionOutcome:
+    from app.services.ticket_sla_service_automation import (
+        SuspendTicketServiceForSlaBreachCommand,
+        suspend_unique_active_service_for_ticket_sla_breach,
+    )
+
+    if command.target.entity_type != "support.ticket":
+        raise AutomationActionExecutorError(
+            "The ticket SLA service-suspension action received the wrong target type."
+        )
+    if command.inputs:
+        raise AutomationActionExecutorError(
+            "The ticket SLA service-suspension action does not accept inputs."
+        )
+    outcome = suspend_unique_active_service_for_ticket_sla_breach(
+        db,
+        SuspendTicketServiceForSlaBreachCommand(
+            ticket_id=command.target.entity_id,
+            event_id=command.event_id,
+            rule_id=command.rule_id,
+            rule_version_id=command.rule_version_id,
+            step_index=command.step_index,
+            context=command.context,
+        ),
+    )
+    return AutomationActionOutcome(
+        disposition=AutomationActionDisposition.succeeded,
+        outcome_code=(
+            "support_ticket_service_suspension_replayed"
+            if outcome.replayed
+            else "support_ticket_service_suspended"
+        ),
+    )
+
+
 def _set_project_status(
     db: Session, command: ExecuteAutomationActionCommand
 ) -> AutomationActionOutcome:
@@ -445,6 +482,9 @@ _ACTION_EXECUTORS: Mapping[str, AutomationActionExecutor] = MappingProxyType(
     {
         "support.ticket.assign_service_team": _assign_support_ticket_service_team,
         "support.ticket.set_priority": _set_support_ticket_priority,
+        "support.ticket.suspend_unique_active_service": (
+            _suspend_support_ticket_service_for_sla_breach
+        ),
         "operations.project.set_status": _set_project_status,
         "operations.material_request.enqueue_cancellation": _enqueue_material_request_cancellation,
         "sales.lead.set_status": _set_sales_lead_status,
