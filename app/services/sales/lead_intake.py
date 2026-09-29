@@ -51,10 +51,12 @@ from app.schemas.lead_intake import (
     AiLeadIntakeClassification,
     LeadCandidateAttribution,
     LeadIntakeIntent,
-    LeadIntakePartyType as LeadIntakePartyTypeValue,
     LeadIntakeSubmission,
     LeadIntakeTemplateDraft,
     ResolvedLeadIntakeAddress,
+)
+from app.schemas.lead_intake import (
+    LeadIntakePartyType as LeadIntakePartyTypeValue,
 )
 from app.services import (
     conversation_lead_relationships,
