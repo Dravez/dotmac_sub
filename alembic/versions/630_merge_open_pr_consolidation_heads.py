@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from alembic import op
-
 revision: str = "630_merge_open_pr_consolidation_heads"
 down_revision: tuple[str, str] = (
     "629_inbox_classified_lead_origin",
