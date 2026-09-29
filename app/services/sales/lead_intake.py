@@ -50,6 +50,8 @@ from app.models.team_inbox import (
 from app.schemas.lead_intake import (
     AiLeadIntakeClassification,
     LeadCandidateAttribution,
+    LeadIntakeIntent,
+    LeadIntakePartyType as LeadIntakePartyTypeValue,
     LeadIntakeSubmission,
     LeadIntakeTemplateDraft,
     ResolvedLeadIntakeAddress,
@@ -1457,9 +1459,9 @@ def classified_candidate_drift(
             continue
         try:
             classification = AiLeadIntakeClassification(
-                intent=str(metadata["ai_intent"]),
+                intent=LeadIntakeIntent(str(metadata["ai_intent"])),
                 intent_confidence=float(metadata["ai_confidence"]),
-                party_type=str(metadata["ai_party_type"]),
+                party_type=LeadIntakePartyTypeValue(str(metadata["ai_party_type"])),
                 party_type_confidence=float(metadata["ai_party_type_confidence"]),
             )
             raw_attribution = metadata.get("meta_referral_observation")
