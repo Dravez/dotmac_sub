@@ -583,7 +583,8 @@ legacy allocation ledger pair. Preview requires all of these invariants:
 - each invoice has one exact recurring line and matches canonical contract and
   tax terms;
 - the allocation plan plus reviewed legacy allocations settles every invoice
-  and consumes every selected payment exactly;
+  and consumes every selected payment exactly, except that a late-recorded
+  one-document repair may retain an explicitly previewed payment residual;
 - selected pre-opening payment value minus allocations to invoices ending at
   the opening boundary equals the unconsumed approved opening position;
 - the remainder of those pre-opening payments allocated to later invoices is
@@ -617,6 +618,21 @@ idempotency reservation, invoice metadata on every target, audit event, and
 `prepaid_invoice_sequence.reconstructed` event record the result. Any changed
 cent, missing row, extra allocation, overlap, non-zero customer-position delta,
 or unexpected remaining credit rolls back the complete command.
+
+The same reviewed command accepts a one-document sequence for an expired issued
+or overdue prepaid invoice whose receivable debit already reduced the customer
+position. That manifest must select the exact unallocated native payment and
+the complete remaining reviewed opening source. Confirmation records the
+payment allocation and opening-funding consumption as settlement evidence,
+adopts the service identity, and requires the customer-position delta to remain
+zero. The selected payment may exceed the invoice balance only when the preview
+proves the exact allocation and residual; the residual remains reusable account
+credit and must equal the manifest's post-repair expectation. When a provider
+payment's captured amount includes a gateway fee, the selected funding total is
+the exact settlement-backed customer credit rather than the captured gross; the
+preview fingerprints both values. If a later funded period has already advanced
+the billing anchor, the command preserves that anchor rather than moving it
+backwards.
 
 ## Rollout
 

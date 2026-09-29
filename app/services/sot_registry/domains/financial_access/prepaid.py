@@ -2313,7 +2313,14 @@ SERVICES: tuple[SOTService, ...] = (
             "pairs. It proves the complete pre/post-opening conservation "
             "equation, records only zero-position allocation structure, "
             "settles every document atomically, projects the final expired "
-            "coverage anchor, and never restores access."
+            "coverage anchor, and never restores access. A one-document "
+            "reconstruction may additionally consume the exact reviewed "
+            "opening remainder when an existing issued-invoice debit already "
+            "reduced the customer position. A late-recorded one-document "
+            "repair may retain an exactly previewed selected-payment residual; "
+            "provider-fee payments use their exact settlement-backed customer "
+            "credit instead of captured gross. The owner preserves any later "
+            "billing anchor and requires a zero position delta."
             " When the reviewed command explicitly selects continuous-period "
             "funding, the same owner retires the wrong paid invoice, settles "
             "the historical draft from its selected Payment, and invokes the "
@@ -2517,6 +2524,8 @@ SERVICES: tuple[SOTService, ...] = (
                         "against a named staff principal plus chronological "
                         "invoice, line, period, payment split, settlement ledger, "
                         "legacy allocation, opening-credit, post-repair-credit, "
+                        "optional exact opening-funding consumption, selected "
+                        "payment allocation and residual totals, "
                         "authoritative-funding, Finance approval, ticket, digest, "
                         "preview, actor, reason, and idempotency evidence"
                     ),
@@ -2536,9 +2545,9 @@ SERVICES: tuple[SOTService, ...] = (
                     owner="financial.invoices",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
                     source=(
-                        "locked active non-proforma draft, exact positive "
-                        "subscription line, period, currency, totals, and "
-                        "existing settlement evidence"
+                        "locked active non-proforma draft or reviewed issued "
+                        "historical document, exact positive selected line, "
+                        "period, currency, totals, and existing settlement evidence"
                     ),
                 ),
                 AuthorityInput(
