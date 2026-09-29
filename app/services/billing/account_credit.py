@@ -610,15 +610,26 @@ class AccountCreditApplications:
         payment = db.scalar(
             select(Payment).where(Payment.id == payment_id).with_for_update()
         )
+        # The invoice issuance has already reduced the authoritative prepaid
+        # funding position. Requiring the post-issuance *spendable* balance to
+        # cover the same invoice again double-counts that charge and rejects a
+        # reviewed payment even when its unallocated envelope is exact. This
+        # selected-payment path therefore proves the reusable credit envelope
+        # and the selected payment's remaining room; callers still verify the
+        # authoritative post-settlement residual after allocation.
         account_credit = round_money(
-            get_spendable_account_credit_balance(
+            get_account_credit_balance(
                 db,
                 str(invoice.account_id),
                 currency=currency,
             )
         )
         payment_available = (
-            round_money(PaymentAllocations.available_amount(db, str(payment_id)))
+            round_money(
+                PaymentAllocations.available_amount_for_reviewed_document_correction(
+                    db, str(payment_id)
+                )
+            )
             if payment is not None
             else Decimal("0.00")
         )
@@ -654,7 +665,11 @@ class AccountCreditApplications:
             amount=expected,
         )
         try:
-            allocation_preview = PaymentAllocations.preview(db, request)
+            allocation_preview = (
+                PaymentAllocations.preview_reviewed_document_correction_for_owner(
+                    db, request
+                )
+            )
             confirmation = (
                 PaymentAllocations.stage_confirm_reviewed_document_correction(
                     db,
