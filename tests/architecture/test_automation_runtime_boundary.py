@@ -62,7 +62,7 @@ def test_ticket_sla_consequence_delegates_to_subscription_owner() -> None:
 
 
 def test_ticket_sla_enforcement_reason_is_migrated() -> None:
-    migration = _source("alembic/versions/629_ticket_sla_enforcement_reason.py")
+    migration = _source("alembic/versions/630_ticket_sla_enforcement_reason.py")
     assert "ADD VALUE IF NOT EXISTS 'ticket_sla'" in migration
 
 

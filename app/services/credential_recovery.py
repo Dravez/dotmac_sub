@@ -26,7 +26,7 @@ from app.models.domain_settings import SettingDomain
 from app.models.notification import Notification
 from app.models.subscriber import ResellerUser, Subscriber, SubscriberStatus
 from app.models.system_user import SystemUser
-from app.services.audit_adapter import stage_audit_event
+from app.services.audit_adapter import AuditActor, stage_audit_event
 from app.services.context_signing import sign_context_token, verify_context_token
 from app.services.domain_errors import DomainError
 from app.services.events import emit_event
@@ -576,8 +576,7 @@ def _stage_request(
         action="auth.password_recovery_requested",
         entity_type=principal.principal_type,
         entity_id=str(principal.principal_id),
-        actor_type=actor_type,
-        actor_id=actor_id,
+        actor=AuditActor(actor_type=actor_type, actor_id=actor_id),
         metadata=evidence,
     )
     emit_event(
@@ -879,8 +878,7 @@ def complete_password_reset(
             action="auth.password_reset_completed",
             entity_type=principal_type,
             entity_id=str(principal_id),
-            actor_type=AuditActorType.user,
-            actor_id=str(principal_id),
+            actor=AuditActor.user(str(principal_id)),
             metadata=evidence,
         )
         emit_event(

@@ -618,7 +618,6 @@ def reseller_user_reset_password(
             ),
         )
     except Exception as exc:
-        db.rollback()
         return _portal_access_error_response(
             request,
             db,
@@ -674,7 +673,6 @@ def reseller_user_remove(
             ),
         )
     except Exception as exc:
-        db.rollback()
         return _portal_access_error_response(
             request,
             db,
