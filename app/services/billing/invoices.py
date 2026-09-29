@@ -2029,7 +2029,7 @@ class Invoices(ListResponseMixin):
                 },
             ),
         )
-        if not native_issue:
+        if target_status != InvoiceStatus.issued:
             _apply_available_account_credit(db, invoice)
         return invoice
 
@@ -2126,9 +2126,7 @@ class Invoices(ListResponseMixin):
             # issued receivable, its own debit must not make the same funding look
             # unavailable before the paired allocation is written.
             issuance_funding = (
-                AccountCreditApplications.preview_invoice_issuance_funding(
-                    db, invoice
-                )
+                AccountCreditApplications.preview_invoice_issuance_funding(db, invoice)
             )
         invoice.status = InvoiceStatus.issued
         invoice.issued_at = issuance.issued_at

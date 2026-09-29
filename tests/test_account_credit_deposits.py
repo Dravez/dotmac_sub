@@ -1201,9 +1201,7 @@ def test_prepaid_issuance_reserves_funding_before_its_own_receivable_debit(
     assert allocation.amount == Decimal("18812.50")
     assert allocation.ledger_entry_id is not None
     assert allocation.consumption_ledger_entry_id is not None
-    assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal(
-        "0.00"
-    )
+    assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal("0.00")
 
 
 def test_ineligible_invoice_states_and_currency_consume_nothing(db_session, subscriber):

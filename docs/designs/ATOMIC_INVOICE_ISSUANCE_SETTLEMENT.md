@@ -41,4 +41,3 @@ does not infer or rewrite historical payment provenance.
 funding previously disappeared from the allocator after the invoice's own debit
 posted. It requires the issued invoice to become paid with one exact allocation
 and zero remaining reusable credit.
-

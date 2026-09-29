@@ -599,8 +599,7 @@ class AccountCreditApplications:
             ),
         }
         if (
-            _invoice_funding_fingerprint(reservation_payload)
-            != reservation.fingerprint
+            _invoice_funding_fingerprint(reservation_payload) != reservation.fingerprint
             or not invoice.is_active
             or reservation.invoice_id != invoice.id
             or reservation.account_id != invoice.account_id
@@ -633,10 +632,8 @@ class AccountCreditApplications:
                 amount=source.amount,
             )
             try:
-                preview = (
-                    PaymentAllocations.preview_issuance_reserved_credit_for_owner(
-                        db, request
-                    )
+                preview = PaymentAllocations.preview_issuance_reserved_credit_for_owner(
+                    db, request
                 )
                 confirmation = (
                     PaymentAllocations.stage_confirm_issuance_reserved_credit_for_owner(
