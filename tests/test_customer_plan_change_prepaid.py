@@ -418,6 +418,7 @@ def test_confirm_service_change_queues_delivery_without_ticket_or_plan_swap(
     assert subscription.offer_id == current_offer.id
     assert request is not None
     assert request.status.value == "pending"
+    assert request.requested_by_subscriber_id == subscriber.id
     assert request.confirmation_snapshot["delivery_mode"] == expected_mode
     assert request.confirmation_snapshot["delivery_state"] == "awaiting_verification"
     if expected_mode == "remote_reprovision":
@@ -1342,6 +1343,7 @@ def test_prepaid_upgrade_with_exact_funding_preserves_anniversary_and_posts_debi
         SubscriptionChangeRequest, result["change_request_id"]
     )
     assert change_request is not None
+    assert change_request.requested_by_subscriber_id == subscriber.id
     assert change_request.confirmation_preview_fingerprint
     assert change_request.confirmation_idempotency_key
     assert change_request.confirmation_snapshot["prepaid_funding_before"] == "50.00"
