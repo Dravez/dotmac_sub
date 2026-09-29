@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import StrEnum
@@ -157,6 +157,12 @@ from app.services.owner_commands import (
     execute_owner_command,
     execute_owner_savepoint,
     owner_command_active,
+)
+from app.services.prepaid_calendar_contracts import (
+    DocumentedPrepaidServicePeriod,
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidCalendarSelection,
+    ReviewedPrepaidServicePeriodQuery,
 )
 from app.services.prepaid_funding_reconstruction import (
     PrepaidFundingBaselineMissingError,
@@ -899,6 +905,7 @@ class ReviewedPrepaidInvoiceSequenceQuery:
     expected_post_repair_credit: Decimal
     expected_authoritative_prepaid_funding: Decimal
     approval: ReviewedExistingDraftSettlementApproval
+    calendar: ReviewedPrepaidCalendarSelection = ReviewedPrepaidCalendarSelection()
 
 
 @dataclass(frozen=True, slots=True)
@@ -907,8 +914,13 @@ class ReviewedPrepaidInvoiceSequencePreview:
     subscription_id: UUID
     invoice_ids: tuple[UUID, ...]
     payment_ids: tuple[UUID, ...]
-    service_period_start: datetime
-    service_period_end: datetime
+    service_period_start: datetime | None
+    service_period_end: datetime | None
+    service_periods: tuple[PrepaidSettlementPeriod, ...]
+    calendar_basis: ReviewedPrepaidCalendarBasis
+    timezone_name: str
+    initial_anchor_at: datetime | None
+    expected_post_repair_credit: Decimal
     funding_position_at: datetime | None
     invoice_total: Decimal
     existing_allocation_total: Decimal
@@ -7013,14 +7025,46 @@ def settle_reviewed_existing_prepaid_draft(
     )
 
 
+def _reviewed_sequence_query_fingerprint(
+    query: ReviewedPrepaidInvoiceSequenceQuery,
+) -> str:
+    """Canonical reporting-boundary serialization, not dataclass repr hashing."""
+
+    def serialize(value: object) -> str:
+        if isinstance(value, datetime):
+            return (
+                _utc(value).isoformat()
+                if value.tzinfo is not None and value.utcoffset() is not None
+                else value.isoformat()
+            )
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, StrEnum):
+            return value.value
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, Decimal):
+            return str(value)
+        raise TypeError(
+            f"Unsupported sequence fingerprint value: {type(value).__name__}"
+        )
+
+    encoded = json.dumps(
+        asdict(query), sort_keys=True, separators=(",", ":"), default=serialize
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _build_reviewed_sequence_preview(
     *,
     query: ReviewedPrepaidInvoiceSequenceQuery,
     account_id: UUID,
     invoice_ids: tuple[UUID, ...],
     payment_ids: tuple[UUID, ...],
-    period_start: datetime,
-    period_end: datetime,
+    period_start: datetime | None,
+    period_end: datetime | None,
+    service_periods: tuple[PrepaidSettlementPeriod, ...],
+    initial_anchor_at: datetime | None,
     disposition: ReviewedPrepaidInvoiceSequenceDisposition,
     reason: str,
     funding_position_at: datetime | None = None,
@@ -7040,6 +7084,26 @@ def _build_reviewed_sequence_preview(
         "invoice_ids": invoice_ids,
         "payment_ids": payment_ids,
         "documents": query.documents,
+        "query_fingerprint": _reviewed_sequence_query_fingerprint(query),
+        "calendar": {
+            "basis": query.calendar.basis.value,
+            "expected_initial_anchor_at": (
+                _utc(query.calendar.expected_initial_anchor_at).isoformat()
+                if query.calendar.expected_initial_anchor_at is not None
+                else None
+            ),
+        },
+        "service_periods": tuple(
+            {
+                "starts_at": item.starts_at.isoformat(),
+                "ends_at": item.ends_at.isoformat(),
+                "starts_on": item.starts_on.isoformat(),
+                "ends_on": item.ends_on.isoformat(),
+                "timezone_name": item.timezone_name,
+            }
+            for item in service_periods
+        ),
+        "initial_anchor_at": initial_anchor_at,
         "allocations": query.allocations,
         "settlement_evidence": query.settlement_evidence,
         "existing_allocation_evidence": query.existing_allocation_evidence,
@@ -7069,6 +7133,11 @@ def _build_reviewed_sequence_preview(
         payment_ids=payment_ids,
         service_period_start=period_start,
         service_period_end=period_end,
+        service_periods=service_periods,
+        calendar_basis=query.calendar.basis,
+        timezone_name=APP_TIMEZONE_NAME,
+        initial_anchor_at=initial_anchor_at,
+        expected_post_repair_credit=round_money(query.expected_post_repair_credit),
         funding_position_at=funding_position_at,
         invoice_total=round_money(invoice_total),
         existing_allocation_total=round_money(existing_allocation_total),
@@ -7098,15 +7167,56 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         _error("invoice_not_found", "The first reviewed invoice was not found.")
     account_id = first_invoice.account_id
     payment_ids = tuple(dict.fromkeys(item.payment_id for item in query.allocations))
-    periods = tuple(
-        (
-            _business_midnight(item.service_start_on),
-            _business_midnight(item.next_billing_on),
-        )
-        for item in query.documents
+    subscription = db.get(Subscription, query.subscription_id)
+    initial_anchor_at = (
+        _utc(subscription.next_billing_at)
+        if subscription is not None and subscription.next_billing_at is not None
+        else None
     )
-    period_start = periods[0][0]
-    period_end = periods[-1][1]
+    from app.services.prepaid_service_renewals import (
+        PrepaidServiceRenewalError,
+        resolve_reviewed_prepaid_service_period,
+    )
+
+    reference = None
+    calendar_error = None
+    if query.calendar.basis is ReviewedPrepaidCalendarBasis.documented_anniversary:
+        expected_anchor = query.calendar.expected_initial_anchor_at
+        if (
+            expected_anchor is None
+            or expected_anchor.tzinfo is None
+            or expected_anchor.utcoffset() is None
+            or first_invoice.billing_period_start is None
+            or first_invoice.billing_period_end is None
+        ):
+            calendar_error = "documentary calendar requires exact stored bounds and an aware expected anchor"
+        else:
+            reference = DocumentedPrepaidServicePeriod(
+                starts_at=_utc(first_invoice.billing_period_start),
+                ends_at=_utc(first_invoice.billing_period_end),
+            )
+    elif query.calendar.expected_initial_anchor_at is not None:
+        calendar_error = "business-midnight calendar does not accept an anchor override"
+
+    service_periods: tuple[PrepaidSettlementPeriod, ...] = ()
+    if calendar_error is None:
+        try:
+            service_periods = tuple(
+                resolve_reviewed_prepaid_service_period(
+                    ReviewedPrepaidServicePeriodQuery(
+                        starts_on=item.service_start_on,
+                        ends_on=item.next_billing_on,
+                        basis=query.calendar.basis,
+                        documented_period=reference,
+                    )
+                )
+                for item in query.documents
+            )
+        except PrepaidServiceRenewalError:
+            calendar_error = "reviewed service calendar evidence is not exact"
+    periods = tuple((item.starts_at, item.ends_at) for item in service_periods)
+    period_start = periods[0][0] if periods else None
+    period_end = periods[-1][1] if periods else None
     stored = dict(first_invoice.metadata_ or {}).get(
         _REVIEWED_PREPAID_INVOICE_SEQUENCE_METADATA_KEY
     )
@@ -7118,6 +7228,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             payment_ids=payment_ids,
             period_start=period_start,
             period_end=period_end,
+            service_periods=service_periods,
+            initial_anchor_at=initial_anchor_at,
             disposition=(
                 ReviewedPrepaidInvoiceSequenceDisposition.already_reconstructed
             ),
@@ -7135,9 +7247,25 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             payment_ids=payment_ids,
             period_start=period_start,
             period_end=period_end,
+            service_periods=service_periods,
+            initial_anchor_at=initial_anchor_at,
             disposition=ReviewedPrepaidInvoiceSequenceDisposition.manual_review,
             reason=reason,
             evidence=evidence,
+        )
+
+    if calendar_error is not None:
+        return manual(calendar_error)
+    assert period_start is not None and period_end is not None
+    if reference is not None and (
+        reference.starts_at != periods[0][0]
+        or reference.ends_at != periods[0][1]
+        or initial_anchor_at
+        != _utc(cast(datetime, query.calendar.expected_initial_anchor_at))
+        or initial_anchor_at != reference.ends_at
+    ):
+        return manual(
+            "documentary calendar dates or reviewed opening anchor are not exact"
         )
 
     approval = query.approval
@@ -7174,7 +7302,6 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
     ):
         return manual("reviewed periods are not contiguous, positive, and expired")
 
-    subscription = db.get(Subscription, query.subscription_id)
     if (
         subscription is None
         or subscription.subscriber_id != account_id
@@ -7582,6 +7709,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             period_start=period_start,
             period_end=period_end,
             funding_position_at=boundary,
+            service_periods=service_periods,
+            initial_anchor_at=initial_anchor_at,
             invoice_total=invoice_total,
             existing_allocation_total=existing_allocation_total,
             selected_payment_total=selected_payment_total,
@@ -7633,6 +7762,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         period_start=period_start,
         period_end=period_end,
         funding_position_at=boundary,
+        service_periods=service_periods,
+        initial_anchor_at=initial_anchor_at,
         invoice_total=invoice_total,
         existing_allocation_total=existing_allocation_total,
         selected_payment_total=selected_payment_total,
@@ -7690,6 +7821,22 @@ def _reviewed_prepaid_invoice_sequence_result(
         or not isinstance(metadata, dict)
     ):
         _error("incomplete_repair", "Sequence reconstruction evidence is incomplete.")
+    if replayed and (
+        metadata.get("preview_fingerprint") != preview_fingerprint
+        or (
+            metadata.get("query_fingerprint") is not None
+            and metadata["query_fingerprint"]
+            != _reviewed_sequence_query_fingerprint(query)
+        )
+        or (
+            metadata.get("query_fingerprint") is None
+            and query.calendar != ReviewedPrepaidCalendarSelection()
+        )
+    ):
+        _error(
+            "idempotency_conflict",
+            "Replay must match the authorized sequence and calendar.",
+        )
     return ReviewedPrepaidInvoiceSequenceResult(
         account_id=first_invoice.account_id,
         subscription_id=query.subscription_id,
@@ -7752,6 +7899,11 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
         ):
             if lock_for_update(db, Invoice, invoice_id) is None:
                 _error("not_actionable", "A reviewed invoice disappeared.")
+        for line_id in sorted(
+            {item.line_id for item in command.query.documents}, key=str
+        ):
+            if lock_for_update(db, InvoiceLine, line_id) is None:
+                _error("not_actionable", "A reviewed invoice line disappeared.")
         if lock_for_update(db, Subscription, command.query.subscription_id) is None:
             _error("not_actionable", "The reviewed subscription disappeared.")
         if (
@@ -7777,6 +7929,10 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 is None
             ):
                 _error("not_actionable", "Legacy allocation evidence disappeared.")
+        # SELECT FOR UPDATE does not refresh an already-cached ORM entity.
+        # The authoritative re-preview must observe the locked documentary
+        # bounds/anchor rather than the operator's earlier session snapshot.
+        db.expire_all()
         current = preview_reviewed_prepaid_invoice_sequence_reconstruction(
             db, command.query
         )
@@ -7785,7 +7941,13 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 "stale_preview",
                 "Reviewed sequence evidence changed after preview; preview again.",
             )
-        if not current.actionable or current.funding_position_at is None:
+        if (
+            not current.actionable
+            or current.funding_position_at is None
+            or current.service_period_start is None
+            or current.service_period_end is None
+            or len(current.service_periods) != len(command.query.documents)
+        ):
             _error(
                 "not_actionable",
                 "Invoice sequence requires additional evidence review.",
@@ -7852,13 +8014,15 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
             item.invoice_id: index for index, item in enumerate(command.query.documents)
         }
         documents: dict[UUID, Invoice] = {}
-        for selection in command.query.documents:
+        for selection, period in zip(
+            command.query.documents, current.service_periods, strict=True
+        ):
             invoice = db.get(Invoice, selection.invoice_id)
             line = db.get(InvoiceLine, selection.line_id)
             if invoice is None or line is None:
                 _error("incomplete_repair", "Reviewed invoice document is missing.")
-            starts_at = _business_midnight(selection.service_start_on)
-            ends_at = _business_midnight(selection.next_billing_on)
+            starts_at = period.starts_at
+            ends_at = period.ends_at
             try:
                 changed = Invoices.adopt_reviewed_prepaid_sequence_document_for_owner(
                     db,
@@ -8051,6 +8215,20 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
             "entitlement_ids": [str(item.id) for item in entitlements],
             "service_period_start": current.service_period_start.isoformat(),
             "service_period_end": current.service_period_end.isoformat(),
+            "calendar_basis": current.calendar_basis.value,
+            "timezone_name": current.timezone_name,
+            "initial_anchor_at": (
+                current.initial_anchor_at.isoformat()
+                if current.initial_anchor_at
+                else None
+            ),
+            "service_periods": [
+                {
+                    "starts_at": item.starts_at.isoformat(),
+                    "ends_at": item.ends_at.isoformat(),
+                }
+                for item in current.service_periods
+            ],
             "funding_position_at": current.funding_position_at.isoformat(),
             "opening_credit": str(current.opening_credit),
             "remaining_credit": str(remaining_credit),
@@ -8065,6 +8243,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
             "ticket_reference": command.query.approval.ticket_reference.strip(),
             "evidence_sha256": (command.query.approval.evidence_sha256.strip().lower()),
             "preview_fingerprint": current.fingerprint,
+            "query_fingerprint": _reviewed_sequence_query_fingerprint(command.query),
             "idempotency_key": key,
             "command_id": str(command.context.command_id),
             "actor": command.context.actor,

@@ -183,6 +183,16 @@ selected boundary and stores UTC instants. Canceled or reversed extensions can
 therefore never defer a paid period, and an applied extension is not added a
 second time after the new paid month.
 
+Finance-reviewed historical multi-invoice reconstruction uses a typed reader
+under that same renewal calendar owner. Dates default to Lagos midnight; an
+explicit documentary-anniversary mode preserves exact stored instants only
+when the first invoice's linked period, reviewed local dates, and expected
+initial anchor all agree. It never silently rounds a historical anniversary,
+shifts a preceding paid period, or treats date equality as proof of no overlap.
+The preview includes exact UTC/Lagos intervals; apply uses that locked preview.
+Expired reconstruction never restores access. See
+`docs/runbooks/REVIEWED_PREPAID_INVOICE_SEQUENCE_RECONSTRUCTION.md`.
+
 A cash-funded prepaid renewal creates a document only after the complete charge
 is available. The owner creates one draft and base-subscription line, issues and
 fully settles that invoice from exact payment-backed credit and any approved

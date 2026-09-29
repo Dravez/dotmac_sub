@@ -70,6 +70,7 @@ def test_prepaid_draft_reconciliation_has_one_contracted_owner():
     assert sequence.role is OwnerRole.RECONCILER
     assert sequence.canonical_writer == service.name
     assert "reviewed invoice-sequence reconstruction command" in sequence.input_names
+    assert "canonical reviewed service calendar" in sequence.input_names
     opening_settlement = next(
         item
         for item in service.contract.concerns
@@ -239,6 +240,31 @@ def test_sequence_reconstruction_cli_is_dry_run_first_and_permission_gated():
     assert "reconstruct_reviewed_prepaid_invoice_sequence(" in source
     assert "system_user_role_names(" in source
     assert "has_permission(auth, db, REPAIR_SCOPE)" in source
+
+
+def test_reviewed_sequence_uses_one_typed_calendar_owner_and_locked_periods():
+    preview = inspect.getsource(
+        prepaid_draft_reconciliation.preview_reviewed_prepaid_invoice_sequence_reconstruction
+    )
+    apply = inspect.getsource(
+        prepaid_draft_reconciliation.reconstruct_reviewed_prepaid_invoice_sequence
+    )
+    assert "resolve_reviewed_prepaid_service_period(" in preview
+    assert "ReviewedPrepaidServicePeriodQuery(" in preview
+    assert "expected_initial_anchor_at" in preview
+    for source in (preview, apply):
+        assert "_business_midnight(" not in source
+        assert "datetime.combine(" not in source
+    assert "current.service_periods" in apply
+    assert "db.expire_all()" in apply
+    service = service_relationship("financial.prepaid_service_renewals")
+    concern = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed prepaid documentary service-period resolution"
+    )
+    assert concern.role is OwnerRole.RESOLVER
+    assert "canonical documentary service period" in concern.input_names
 
 
 def test_admin_invoice_adapter_calls_only_the_authoritative_reconciler():

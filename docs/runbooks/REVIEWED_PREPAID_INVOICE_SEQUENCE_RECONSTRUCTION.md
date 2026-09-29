@@ -65,6 +65,37 @@ invoice must be exactly settled by its selected allocations plus the explicitly
 listed pre-existing allocations. Include one settlement ledger selection for
 every selected payment, including payments whose settlement row already exists.
 
+### Select the reviewed calendar basis
+
+Without a `calendar` object, dates retain the existing `business_midnight`
+meaning: midnight in Africa/Lagos, persisted as UTC. Never assume that a stored
+UTC midnight is Lagos midnight; it is 01:00 in Lagos.
+
+For continuation of a documented historical anniversary, include:
+
+```json
+"calendar": {
+  "basis": "documented_anniversary",
+  "expected_initial_anchor_at": "<exact observed first invoice end, ISO-8601 with offset>"
+}
+```
+
+This mode preserves the first invoice's exact stored interval and derives later
+reviewed dates using its Lagos anniversary clock. The first invoice must already
+have the selected subscription line and both period bounds. Its dates must equal
+the reviewed Lagos dates and its end must exactly equal both the observed
+subscription anchor and the manifest expectation. Missing/partial identity,
+different endpoint clocks, changed bounds, or a stale anchor blocks preview.
+There is no arbitrary clock-time or timezone override and no automatic fallback.
+
+For example, a documented 00:00 UTC boundary displays as 01:00 Africa/Lagos on
+the same date. Continuing that anniversary does not move a preceding paid
+invoice or manufacture a one-hour overlap. Actual instant overlaps still block.
+Changing an existing paid period to Lagos midnight is a different repair owned
+by `financial.prepaid_billing_calendar_reconciliation`, with its own exact paid
+invoice/allocation/settlement/entitlement evidence and authorization. Do not
+shift that invoice merely to force this sequence to pass.
+
 ## Preview
 
 ```bash
@@ -76,6 +107,11 @@ Proceed only when `disposition` is `exact_sequence` and `actionable` is true.
 Finance must verify the returned invoice/payment identifiers, service bounds,
 opening credit, post-boundary credit, authoritative prepaid funding, totals,
 and fingerprint against the evidence package.
+Verify `calendar_basis`, `timezone_name`, `initial_anchor_at`, every returned
+`service_periods` UTC and Lagos timestamp, `reviewed_allocation_plan`, and
+`expected_post_repair_credit`. Unresolved calendar evidence returns null bounds
+and no periods; that is never actionable. A calendar change requires a new
+preview and separate authorization of its exact fingerprint.
 
 ## Apply
 
