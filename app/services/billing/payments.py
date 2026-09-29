@@ -4280,6 +4280,7 @@ def _build_payment_allocation_preview(
     *,
     funding_position_at: datetime | None = None,
     allow_existing_allocation: bool = False,
+    reserve_prepaid_funding: bool = True,
 ) -> PaymentAllocationPreview:
     payment = get_by_id(db, Payment, payload.payment_id)
     if not payment:
@@ -4353,7 +4354,12 @@ def _build_payment_allocation_preview(
             status_code=409,
             detail="Allocation exceeds this payment's unallocated credit",
         )
-    account_credit_before = get_spendable_account_credit_balance(
+    credit_reader = (
+        get_spendable_account_credit_balance
+        if reserve_prepaid_funding
+        else get_account_credit_balance
+    )
+    account_credit_before = credit_reader(
         db,
         str(payment.account_id),
         currency=payment.currency,
@@ -4530,6 +4536,40 @@ class PaymentAllocations(ListResponseMixin):
             db,
             payment_id,
             funding_position_at=None,
+        )
+
+    @staticmethod
+    def available_amount_for_reviewed_document_correction(
+        db: Session, payment_id: str
+    ) -> Decimal:
+        """Return exact payment room after its invoice charge is already posted.
+
+        Reviewed document corrections issue the replacement before attaching
+        its selected payment. The invoice has therefore already reduced the
+        prepaid funding position; applying that reservation a second time here
+        would reject otherwise exact settlement evidence.
+        """
+
+        payment = get_by_id(db, Payment, payment_id)
+        if (
+            payment is None
+            or not payment.is_active
+            or payment.account_id is None
+            or payment.status != PaymentStatus.succeeded
+            or payment.settlement is None
+            or payment.refunds
+            or payment.reversal is not None
+        ):
+            return Decimal("0.00")
+        payment_available = _payment_unallocated_credit_remaining(db, payment)
+        account_available = get_account_credit_balance(
+            db,
+            str(payment.account_id),
+            currency=payment.currency,
+        )
+        return max(
+            Decimal("0.00"),
+            min(payment_available, round_money(account_available)),
         )
 
     @staticmethod
@@ -4831,6 +4871,19 @@ class PaymentAllocations(ListResponseMixin):
         payload: PaymentAllocationPreviewRequest,
     ) -> PaymentAllocationPreview:
         return _build_payment_allocation_preview(db, payload)
+
+    @staticmethod
+    def preview_reviewed_document_correction_for_owner(
+        db: Session,
+        payload: PaymentAllocationPreviewRequest,
+    ) -> PaymentAllocationPreview:
+        """Preview selected-payment evidence without double-reserving its invoice."""
+
+        return _build_payment_allocation_preview(
+            db,
+            payload,
+            reserve_prepaid_funding=False,
+        )
 
     @staticmethod
     def preview_at_reviewed_boundary_for_owner(
@@ -5192,6 +5245,10 @@ class PaymentAllocations(ListResponseMixin):
             db,
             preview_request,
             funding_position_at=funding_position_at,
+            reserve_prepaid_funding=(
+                finalization_mode
+                is not PaymentAllocationFinalizationMode.reviewed_document_correction
+            ),
         )
         if preview.fingerprint != payload.preview_fingerprint:
             raise HTTPException(

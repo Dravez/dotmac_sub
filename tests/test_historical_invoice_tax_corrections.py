@@ -26,7 +26,15 @@ from app.models.billing import (
     TaxApplication,
     TaxRate,
 )
+from app.models.billing_shadow_verification import BillingCutoverVerificationRun
+from app.models.customer_subledger import (
+    CustomerSubledgerAuthorityCutover,
+    CustomerSubledgerOpeningCorrection,
+    CustomerSubledgerOpeningPosition,
+)
 from app.models.event_store import EventStore
+from app.models.prepaid_funding import PrepaidFundingBaseline
+from app.models.system_user import SystemUser
 from app.schemas.billing import PaymentCreate
 from app.services import billing as billing_service
 from app.services.billing._common import get_spendable_account_credit_balance
@@ -48,6 +56,7 @@ from app.services.historical_invoice_tax_corrections import (
     preview_historical_invoice_tax_correction,
 )
 from app.services.owner_commands import CommandContext
+from tests.prepaid_funding_helpers import materialize_test_prepaid_opening_balance
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +222,90 @@ def _context(*, key: str = "historical-tax-correction-test-key") -> CommandConte
         reason="Correct omitted VAT using the exact reviewed payment evidence",
         idempotency_key=key,
     )
+
+
+def _activate_reviewed_opening(
+    db_session, *, account_id: UUID, amount: Decimal, occurred_at: datetime
+) -> CustomerSubledgerOpeningPosition:
+    materialize_test_prepaid_opening_balance(
+        db_session, account_id, amount, position_at=occurred_at
+    )
+    baseline = db_session.scalar(
+        select(PrepaidFundingBaseline).where(
+            PrepaidFundingBaseline.account_id == account_id
+        )
+    )
+    assert baseline is not None
+    command_id = uuid4()
+    run = BillingCutoverVerificationRun(
+        phase="customer_subledger_phase3",
+        cohort_name="pytest-historical-tax-correction",
+        evidence_schema_version=1,
+        policy_version="pytest",
+        cutoff_at=occurred_at,
+        observation_started_at=occurred_at - timedelta(days=1),
+        observation_ended_at=occurred_at,
+        cohort_count=1,
+        covered_count=1,
+        unresolved_count=0,
+        ambiguous_count=0,
+        unexpected_unlinked_count=0,
+        duplicate_count=0,
+        shadow_variance_count=0,
+        expected_difference_count=0,
+        gap_count=0,
+        overlap_count=0,
+        source_fingerprint="a" * 64,
+        result_fingerprint="b" * 64,
+        currency_totals={},
+        cohort_classification={},
+        event_outcomes={},
+        code_version="pytest",
+        database_schema_version="523",
+        idempotency_key=f"pytest-historical-tax-opening:{command_id}",
+        command_id=command_id,
+        correlation_id=command_id,
+        actor="pytest:operator",
+        reason="Reviewed historical-tax opening",
+        operator_approved_by="pytest:operator",
+        operator_approved_at=occurred_at,
+        finance_approved_by="pytest:finance",
+        finance_approved_at=occurred_at,
+        created_at=occurred_at,
+    )
+    db_session.add(run)
+    db_session.flush()
+    opening = CustomerSubledgerOpeningPosition(
+        verification_run_id=run.id,
+        baseline_id=baseline.id,
+        account_id=account_id,
+        currency="NGN",
+        legacy_position=amount,
+        shadow_position_before=Decimal("0.00"),
+        opening_delta=amount,
+        evidence_fingerprint="c" * 64,
+        review_reference="pytest:approved-opening",
+        captured_by="pytest:finance",
+        command_id=command_id,
+        correlation_id=command_id,
+        occurred_at=occurred_at,
+        created_at=occurred_at,
+    )
+    db_session.add(opening)
+    db_session.flush()
+    db_session.add(
+        CustomerSubledgerAuthorityCutover(
+            verification_run_id=run.id,
+            result_fingerprint="d" * 64,
+            review_reference="pytest:approved-cutover",
+            activated_by="pytest:operator",
+            command_id=command_id,
+            correlation_id=command_id,
+            cutover_at=occurred_at + timedelta(minutes=1),
+        )
+    )
+    db_session.commit()
+    return opening
 
 
 def _command(
@@ -399,23 +492,55 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
         approver_name="Israel Aimola",
         currency="NGN",
     )
+    preopening_at = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    opening_at = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    source.created_at = preopening_at
+    payment.created_at = preopening_at
+    payment.paid_at = preopening_at
+    allocation.created_at = preopening_at
+    for entry in db_session.scalars(
+        select(LedgerEntry).where(LedgerEntry.payment_id == payment.id)
+    ).all():
+        entry.created_at = preopening_at
+        entry.effective_date = preopening_at
+    db_session.commit()
+    opening = _activate_reviewed_opening(
+        db_session,
+        account_id=scenario.account_id,
+        amount=Decimal("17625.00"),
+        occurred_at=opening_at,
+    )
+    authorized_user = SystemUser(
+        first_name="Test",
+        last_name="Finance Operator",
+        display_name="Test Finance Operator",
+        email=f"historical-tax-{uuid4()}@example.com",
+        is_active=True,
+    )
+    db_session.add(authorized_user)
+    db_session.flush()
+    authorized_user_id = authorized_user.id
     db_session.commit()
 
     preview = preview_existing_replacement_tax_correction(db_session, query)
-    assert preview.actionable
+    assert preview.actionable, preview.reason
     assert preview.source_invoice_id == source.id
     assert preview.replacement_invoice_id == replacement.id
     assert preview.replacement_total == Decimal("215000.00")
     assert preview.current_account_credit == Decimal("17625.00")
     assert preview.projected_remaining_credit == Decimal("2625.00")
     assert preview.reconstruct_consumption_evidence is True
+    assert preview.opening_position_id == opening.id
+    assert preview.opening_amount_before == Decimal("17625.00")
+    assert preview.opening_amount_after == Decimal("217625.00")
+    assert preview.preopening_release_fingerprint is not None
 
     db_session.rollback()
     command = CorrectExistingReplacementTaxInvoiceCommand(
         query=query,
         expected_preview_fingerprint=preview.fingerprint,
         permission_granted=True,
-        authorized_system_user_id=uuid4(),
+        authorized_system_user_id=authorized_user_id,
     )
     result = correct_historical_invoice_tax_using_existing_replacement(
         db_session,
@@ -455,6 +580,15 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
     assert get_spendable_account_credit_balance(
         db_session, str(scenario.account_id), currency="NGN"
     ) == Decimal("2625.00")
+    correction = db_session.scalar(
+        select(CustomerSubledgerOpeningCorrection).where(
+            CustomerSubledgerOpeningCorrection.opening_position_id == opening.id
+        )
+    )
+    assert correction is not None
+    assert correction.previous_opening_amount == Decimal("17625.00")
+    assert correction.corrected_opening_amount == Decimal("217625.00")
+    assert correction.delta == Decimal("200000.00")
     assert db_session.query(Invoice).filter(Invoice.id == replacement.id).count() == 1
     evidence = Invoices.existing_tax_replacement_evidence(replacement)
     assert evidence is not None
@@ -462,6 +596,22 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
     assert evidence.approver_name == "Israel Aimola"
     assert evidence.remaining_credit == Decimal("2625.00")
     assert evidence.recorded_at.tzinfo is not None
+    assert evidence.opening_position_id == opening.id
+    assert evidence.opening_correction_id == correction.id
+    assert evidence.opening_correction_posting_group_id is not None
+    audit = db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action
+            == "correct_historical_invoice_tax_using_existing_replacement",
+            AuditEvent.entity_id == str(source.id),
+        )
+    )
+    assert audit is not None
+    assert audit.metadata_["opening_position_id"] == str(opening.id)
+    assert audit.metadata_["opening_correction_id"] == str(correction.id)
+    assert audit.metadata_["preopening_release_fingerprint"] == (
+        preview.preopening_release_fingerprint
+    )
 
     db_session.rollback()
     replay = correct_historical_invoice_tax_using_existing_replacement(
@@ -476,6 +626,12 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
     )
     assert replay.replayed is True
     assert replay.replacement_invoice_id == replacement.id
+    assert (
+        db_session.query(CustomerSubledgerOpeningCorrection)
+        .filter(CustomerSubledgerOpeningCorrection.opening_position_id == opening.id)
+        .count()
+        == 1
+    )
 
 
 def test_permission_denial_preserves_all_reviewed_documents(db_session, subscriber):

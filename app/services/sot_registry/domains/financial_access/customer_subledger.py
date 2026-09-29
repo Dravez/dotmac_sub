@@ -395,6 +395,10 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     (
                         "financial.customer_subledger_opening_positions."
+                        "allocation_not_preopening"
+                    ),
+                    (
+                        "financial.customer_subledger_opening_positions."
                         "funding_baseline_already_exists"
                     ),
                     (
@@ -452,6 +456,10 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     (
                         "financial.customer_subledger_opening_positions."
+                        "invalid_preopening_release"
+                    ),
+                    (
+                        "financial.customer_subledger_opening_positions."
                         "invalid_result_fingerprint"
                     ),
                     (
@@ -466,6 +474,10 @@ SERVICES: tuple[SOTService, ...] = (
                     ("financial.customer_subledger_opening_positions.no_change"),
                     (
                         "financial.customer_subledger_opening_positions."
+                        "owner_context_required"
+                    ),
+                    (
+                        "financial.customer_subledger_opening_positions."
                         "opening_position_not_found"
                     ),
                     (
@@ -478,7 +490,15 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     (
                         "financial.customer_subledger_opening_positions."
+                        "preopening_release_evidence_mismatch"
+                    ),
+                    (
+                        "financial.customer_subledger_opening_positions."
                         "source_cohort_incomplete"
+                    ),
+                    (
+                        "financial.customer_subledger_opening_positions."
+                        "stale_preopening_release_preview"
                     ),
                     (
                         "financial.customer_subledger_opening_positions."

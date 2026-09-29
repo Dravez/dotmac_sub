@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditActorType
+from app.models.billing import Invoice, Payment, PaymentAllocation, PaymentStatus
 from app.models.billing_contract import BillingRecordAuthority
 from app.models.billing_shadow_verification import BillingCutoverVerificationRun
 from app.models.customer_subledger import (
@@ -62,7 +63,9 @@ from app.services.locking import lock_for_update
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
+    current_command_context,
     execute_owner_command,
+    owner_command_active,
 )
 from app.services.system_user_assignments import system_user_role_names
 
@@ -206,6 +209,32 @@ class CustomerSubledgerOpeningCorrectionResult:
     corrected_opening_amount: Decimal
     delta: Decimal
     replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPreopeningAllocationReleaseQuery:
+    """Exact legacy allocation omitted from an approved opening position."""
+
+    account_id: UUID
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    currency: str
+    amount: Decimal
+    reason: str
+    review_reference: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPreopeningAllocationReleasePreview:
+    opening_position_id: UUID
+    allocation_id: UUID
+    allocation_created_at: datetime
+    opening_occurred_at: datetime
+    previous_opening_amount: Decimal
+    corrected_opening_amount: Decimal
+    delta: Decimal
+    preview_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1326,6 +1355,134 @@ def correct_customer_subledger_opening_position(
     )
 
 
+def preview_reviewed_preopening_allocation_release(
+    db: Session,
+    query: ReviewedPreopeningAllocationReleaseQuery,
+) -> ReviewedPreopeningAllocationReleasePreview:
+    """Prove that releasing one legacy allocation must amend the opening."""
+
+    currency = query.currency.strip().upper()
+    amount = round_money(Decimal(query.amount))
+    if len(currency) != 3 or amount <= Decimal("0.00"):
+        raise _error(
+            "invalid_preopening_release",
+            "Pre-opening allocation release requires a positive amount and currency.",
+        )
+    allocation = db.get(PaymentAllocation, query.allocation_id)
+    payment = db.get(Payment, query.payment_id)
+    invoice = db.get(Invoice, query.invoice_id)
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == currency,
+        )
+    )
+    if (
+        allocation is None
+        or not allocation.is_active
+        or allocation.payment_id != query.payment_id
+        or allocation.invoice_id != query.invoice_id
+        or round_money(allocation.amount) != amount
+        or allocation.consumption_ledger_entry_id is not None
+        or payment is None
+        or not payment.is_active
+        or payment.status is not PaymentStatus.succeeded
+        or payment.account_id != query.account_id
+        or payment.currency.upper() != currency
+        or invoice is None
+        or invoice.account_id != query.account_id
+        or invoice.currency.upper() != currency
+        or opening is None
+    ):
+        raise _error(
+            "preopening_release_evidence_mismatch",
+            "Allocation, payment, invoice, or opening evidence does not match.",
+        )
+    allocation_created_at = _utc(allocation.created_at)
+    opening_occurred_at = _utc(opening.occurred_at)
+    if allocation_created_at > opening_occurred_at:
+        raise _error(
+            "allocation_not_preopening",
+            "Only an allocation carried into the approved opening may amend it.",
+            allocation_id=str(allocation.id),
+        )
+    prior_delta = db.scalar(
+        select(
+            func.coalesce(func.sum(CustomerSubledgerOpeningCorrection.delta), 0)
+        ).where(CustomerSubledgerOpeningCorrection.opening_position_id == opening.id)
+    )
+    previous = round_money(Decimal(opening.legacy_position) + Decimal(prior_delta or 0))
+    corrected = round_money(previous + amount)
+    fingerprint = _digest(
+        {
+            "opening_position_id": str(opening.id),
+            "allocation_id": str(allocation.id),
+            "payment_id": str(payment.id),
+            "invoice_id": str(invoice.id),
+            "account_id": str(query.account_id),
+            "currency": currency,
+            "allocation_created_at": allocation_created_at,
+            "opening_occurred_at": opening_occurred_at,
+            "previous_opening_amount": str(previous),
+            "corrected_opening_amount": str(corrected),
+            "delta": str(amount),
+            "reason": query.reason.strip(),
+            "review_reference": query.review_reference.strip(),
+        }
+    )
+    return ReviewedPreopeningAllocationReleasePreview(
+        opening_position_id=opening.id,
+        allocation_id=allocation.id,
+        allocation_created_at=allocation_created_at,
+        opening_occurred_at=opening_occurred_at,
+        previous_opening_amount=previous,
+        corrected_opening_amount=corrected,
+        delta=amount,
+        preview_fingerprint=fingerprint,
+    )
+
+
+def stage_reviewed_preopening_allocation_release_for_owner(
+    db: Session,
+    query: ReviewedPreopeningAllocationReleaseQuery,
+    *,
+    expected_preview_fingerprint: str,
+    authorized_system_user_id: UUID,
+    idempotency_key: str,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    """Stage the correction inside the historical-tax coordinator transaction."""
+
+    if not owner_command_active(
+        db, owner="financial.historical_invoice_tax_corrections"
+    ):
+        raise _error(
+            "owner_context_required",
+            "Pre-opening release correction requires the historical-tax owner.",
+        )
+    preview = preview_reviewed_preopening_allocation_release(db, query)
+    if preview.preview_fingerprint != expected_preview_fingerprint:
+        raise _error(
+            "stale_preopening_release_preview",
+            "Pre-opening allocation evidence changed after review.",
+        )
+    opening_query = PreviewCustomerSubledgerOpeningCorrectionQuery(
+        account_id=query.account_id,
+        currency=query.currency,
+        corrected_opening_amount=preview.corrected_opening_amount,
+        reason=query.reason,
+        review_reference=query.review_reference,
+    )
+    opening_preview = preview_customer_subledger_opening_correction(db, opening_query)
+    return _stage_opening_correction(
+        db,
+        query=opening_query,
+        preview=opening_preview,
+        context=current_command_context(db),
+        authorized_system_user_id=authorized_system_user_id,
+        idempotency_key=idempotency_key,
+    )
+
+
 def _correction_result(
     db: Session,
     correction: CustomerSubledgerOpeningCorrection,
@@ -1401,6 +1558,25 @@ def _correct_opening(
             "stale_reviewed_preview",
             "The opening position changed after review; preview it again.",
         )
+    return _stage_opening_correction(
+        db,
+        query=command.query,
+        preview=preview,
+        context=command.context,
+        authorized_system_user_id=command.authorized_system_user_id,
+        idempotency_key=key,
+    )
+
+
+def _stage_opening_correction(
+    db: Session,
+    *,
+    query: PreviewCustomerSubledgerOpeningCorrectionQuery,
+    preview: CustomerSubledgerOpeningCorrectionPreview,
+    context: CommandContext,
+    authorized_system_user_id: UUID,
+    idempotency_key: str,
+) -> CustomerSubledgerOpeningCorrectionResult:
     occurred_at = datetime.now(UTC)
     correction = CustomerSubledgerOpeningCorrection(
         opening_position_id=preview.opening_position_id,
@@ -1409,14 +1585,14 @@ def _correct_opening(
         previous_opening_amount=preview.previous_opening_amount,
         corrected_opening_amount=preview.corrected_opening_amount,
         delta=preview.delta,
-        reason=command.query.reason.strip(),
-        review_reference=command.query.review_reference.strip(),
+        reason=query.reason.strip(),
+        review_reference=query.review_reference.strip(),
         preview_fingerprint=preview.preview_fingerprint,
-        idempotency_key=key,
-        applied_by=command.context.actor,
-        authorized_system_user_id=command.authorized_system_user_id,
-        command_id=command.context.command_id,
-        correlation_id=command.context.correlation_id,
+        idempotency_key=idempotency_key,
+        applied_by=context.actor,
+        authorized_system_user_id=authorized_system_user_id,
+        command_id=context.command_id,
+        correlation_id=context.correlation_id,
         occurred_at=occurred_at,
     )
     db.add(correction)
@@ -1439,7 +1615,7 @@ def _correct_opening(
             effects=(EffectInput(effect=effect, amount=abs(preview.delta)),),
             idempotency_key=f"posting:opening-correction:{correction.id}",
         ),
-        context=command.context,
+        context=context,
     )
     emit_event(
         db,
@@ -1452,10 +1628,10 @@ def _correct_opening(
             "previous_opening_amount": str(preview.previous_opening_amount),
             "corrected_opening_amount": str(preview.corrected_opening_amount),
             "delta": str(preview.delta),
-            "review_reference": command.query.review_reference.strip(),
-            "authorized_system_user_id": str(command.authorized_system_user_id),
+            "review_reference": query.review_reference.strip(),
+            "authorized_system_user_id": str(authorized_system_user_id),
         },
-        actor=command.context.actor,
+        actor=context.actor,
     )
     return _correction_result(db, correction, replayed=False)
 

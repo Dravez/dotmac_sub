@@ -309,6 +309,9 @@ class ExistingInvoiceTaxReplacementEvidence:
     approver_name: str
     recorded_at: datetime
     reason: str
+    opening_position_id: UUID | None = None
+    opening_correction_id: UUID | None = None
+    opening_correction_posting_group_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -335,6 +338,15 @@ class ExistingInvoiceTaxReplacementEvidence:
             raise ValueError("invoice-tax replacement approval evidence is required")
         if not self.reason.strip() or len(self.reason) > 500:
             raise ValueError("invoice-tax replacement reason is invalid")
+        opening_evidence = (
+            self.opening_position_id,
+            self.opening_correction_id,
+            self.opening_correction_posting_group_id,
+        )
+        if any(value is None for value in opening_evidence) and any(
+            value is not None for value in opening_evidence
+        ):
+            raise ValueError("invoice-tax replacement opening evidence is incomplete")
 
     def as_metadata(self) -> dict[str, object]:
         return {
@@ -359,6 +371,21 @@ class ExistingInvoiceTaxReplacementEvidence:
             "approver_name": self.approver_name.strip(),
             "recorded_at": self.recorded_at.isoformat(),
             "reason": self.reason.strip(),
+            "opening_position_id": (
+                str(self.opening_position_id)
+                if self.opening_position_id is not None
+                else None
+            ),
+            "opening_correction_id": (
+                str(self.opening_correction_id)
+                if self.opening_correction_id is not None
+                else None
+            ),
+            "opening_correction_posting_group_id": (
+                str(self.opening_correction_posting_group_id)
+                if self.opening_correction_posting_group_id is not None
+                else None
+            ),
         }
 
 
@@ -2745,6 +2772,21 @@ class Invoices(ListResponseMixin):
                 approver_name=str(raw["approver_name"]),
                 recorded_at=datetime.fromisoformat(str(raw["recorded_at"])),
                 reason=str(raw["reason"]),
+                opening_position_id=(
+                    UUID(str(raw["opening_position_id"]))
+                    if raw.get("opening_position_id") is not None
+                    else None
+                ),
+                opening_correction_id=(
+                    UUID(str(raw["opening_correction_id"]))
+                    if raw.get("opening_correction_id") is not None
+                    else None
+                ),
+                opening_correction_posting_group_id=(
+                    UUID(str(raw["opening_correction_posting_group_id"]))
+                    if raw.get("opening_correction_posting_group_id") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise InvoiceOwnerError(

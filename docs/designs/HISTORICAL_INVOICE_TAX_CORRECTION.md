@@ -23,6 +23,11 @@ following for a single customer and currency:
   source-invoice credit and unallocated-credit rows; the preview binds those
   exact ledger IDs and the correction command repairs the missing structural
   consumption link without changing customer position;
+- when that allocation predates an approved customer-subledger opening, the
+  preview proves the exact opening, allocation timestamp, current corrected
+  opening amount, and required release delta. The opening owner then appends a
+  fingerprint-bound correction so releasing an allocation already absorbed by
+  the opening becomes authoritative funding exactly once;
 - an existing-draft correction uses the draft's own issue and due dates and
   does not require a separate unpaid subscription invoice;
 - the expected remaining payment-backed customer credit is exactly
@@ -77,13 +82,17 @@ The existing-replacement mode performs these steps:
    consumption debit required to release the old allocation. A reconstructed
    row is an append-only structural pair with `affects_customer_position=false`;
    the payment owner audits that it has no money effect.
-3. `financial.invoices` previews and voids the incorrect paid source document,
+3. If the allocation predates the approved opening,
+   `financial.customer_subledger_opening_positions` appends the exact positive
+   opening correction and matching customer-position evidence. This participant
+   only flushes inside the historical-tax coordinator transaction.
+4. `financial.invoices` previews and voids the incorrect paid source document,
    releasing its exact payment allocation.
-4. `financial.invoices` issues the named existing VAT-inclusive draft using its
+5. `financial.invoices` issues the named existing VAT-inclusive draft using its
    existing issue and due dates.
-5. `financial.account_credit_applications` settles that invoice from the named
+6. `financial.account_credit_applications` settles that invoice from the named
    payment only.
-6. The invoice records typed source, closure, allocation, payment, VAT, ticket,
+7. The invoice records typed source, closure, allocation, payment, VAT, ticket,
    approver, timestamp, residual-credit, and preview-fingerprint lineage. Audit
    and event evidence are staged in the same transaction.
 
@@ -92,6 +101,11 @@ selected payment's available amount equals the fingerprinted residual, and the
 customer's spendable account credit equals that same residual. For the reviewed
 NGN 217,625 payment and NGN 215,000 replacement, the required residual is NGN
 2,625. Any mismatch rolls the complete correction back.
+
+An allocation created after the opening, an ambiguous or missing opening, a
+changed opening correction total, or a stale pre-opening-release fingerprint
+fails closed. The command does not synthesize generic customer credit and does
+not invoke a second owner-command transaction.
 
 ## Locking, replay, and drift
 

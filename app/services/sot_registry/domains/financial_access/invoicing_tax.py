@@ -1197,6 +1197,7 @@ SERVICES: tuple[SOTService, ...] = (
         ),
         depends_on=(
             "financial.account_credit_applications",
+            "financial.customer_subledger_opening_positions",
             "financial.customer_tax_policies",
             "financial.invoices",
             "financial.payments",
@@ -1210,6 +1211,8 @@ SERVICES: tuple[SOTService, ...] = (
             "a replacement. Its existing-replacement command instead validates and "
             "reuses one VAT-inclusive Finance draft, repairs missing non-position "
             "legacy allocation evidence through financial.payments, voids the source, "
+            "amends an approved opening through the customer-subledger opening owner "
+            "when the released allocation predates that opening, "
             "and settles only the replacement while preserving the exact residual "
             "customer credit in one transaction."
         ),
@@ -1233,12 +1236,22 @@ SERVICES: tuple[SOTService, ...] = (
                         "reviewed existing-replacement tax correction command",
                         "canonical source and replacement invoices",
                         "canonical selected payment and settlement evidence",
+                        "canonical customer-subledger opening position",
                         "canonical customer VAT policy",
                         "canonical tax-rate evidence",
                     ),
                 ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical customer-subledger opening position",
+                    owner="financial.customer_subledger_opening_positions",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "the exact approved opening and append-only correction required "
+                        "when a reviewed source allocation predates that opening"
+                    ),
+                ),
                 AuthorityInput(
                     name="reviewed historical tax correction command",
                     owner="financial.historical_invoice_tax_corrections",
@@ -1325,7 +1338,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "issuance and allocation or existing-draft issuance, replacement "
                     "allocation, typed lineage, audit, and event commit together. "
                     "Historical payment settlement and non-position consumption evidence "
-                    "repair flush through financial.payments in that same transaction."
+                    "repair flush through financial.payments in that same transaction; "
+                    "a fingerprinted pre-opening release correction flushes through "
+                    "financial.customer_subledger_opening_positions."
                 ),
                 locking=(
                     "Locks the customer account first, then the three reviewed invoices "
@@ -1364,6 +1379,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.historical_invoice_tax_corrections.permission_denied",
                     "financial.historical_invoice_tax_corrections.payment_consumption_evidence_rejected",
                     "financial.historical_invoice_tax_corrections.payment_settlement_evidence_rejected",
+                    "financial.historical_invoice_tax_corrections.preopening_release_rejected",
                     "financial.historical_invoice_tax_corrections.preview_invalid",
                     "financial.historical_invoice_tax_corrections.reason_invalid",
                     "financial.historical_invoice_tax_corrections.replay_conflict",

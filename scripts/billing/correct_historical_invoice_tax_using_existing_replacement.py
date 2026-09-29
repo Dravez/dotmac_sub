@@ -92,6 +92,22 @@ def _preview_dict(value: ExistingReplacementTaxCorrectionPreview) -> dict[str, o
         "current_account_credit": str(value.current_account_credit),
         "projected_remaining_credit": str(value.projected_remaining_credit),
         "reconstruct_consumption_evidence": value.reconstruct_consumption_evidence,
+        "opening_position_id": (
+            str(value.opening_position_id)
+            if value.opening_position_id is not None
+            else None
+        ),
+        "opening_amount_before": (
+            str(value.opening_amount_before)
+            if value.opening_amount_before is not None
+            else None
+        ),
+        "opening_amount_after": (
+            str(value.opening_amount_after)
+            if value.opening_amount_after is not None
+            else None
+        ),
+        "preopening_release_fingerprint": value.preopening_release_fingerprint,
         "preview_fingerprint": value.fingerprint,
     }
 
