@@ -459,7 +459,11 @@ def process_provider_observation(
                             "meta_referral_observation": payload.meta_referral_observation,
                             "contact_profile": payload.contact_profile,
                             "observation_id": str(row.id),
-                            "campaign_attributed": payload.campaign_attributed,
+                            **(
+                                {"campaign_attributed": True}
+                                if payload.campaign_attributed
+                                else {}
+                            ),
                             "attachments": [
                                 _attachment_metadata(item)
                                 for item in payload.attachments
