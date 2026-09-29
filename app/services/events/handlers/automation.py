@@ -135,7 +135,7 @@ def _script_action_inputs(
 
     raw_inputs = tuple(request.inputs)
     if len({item.key for item in raw_inputs}) != len(raw_inputs):
-        raise AutomationEventHandlerError(
+        raise _handler_error(
             f"Server script repeated an input for action {action.key!r}."
         )
     declared = {item.key: item for item in action.inputs}
@@ -147,7 +147,7 @@ def _script_action_inputs(
         if item.required and (item.key not in supplied or supplied[item.key] is None)
     )
     if unknown or missing:
-        raise AutomationEventHandlerError(
+        raise _handler_error(
             f"Server script inputs for {action.key!r} are invalid "
             f"(unknown={unknown!r}, missing={missing!r})."
         )
@@ -185,7 +185,7 @@ def _script_action_inputs(
         elif definition.value_type is AutomationValueType.enum:
             valid = isinstance(value, str) and value in definition.enum_values
         if not valid:
-            raise AutomationEventHandlerError(
+            raise _handler_error(
                 f"Server script input {key!r} for {action.key!r} has the wrong type."
             )
     return tuple(
@@ -276,8 +276,9 @@ class AutomationEventHandler:
                 continue
             tenant_id = _required_uuid(payload, target.tenant_id_field)
             if tenant_id != OPERATOR_TENANT_ID:
-                raise AutomationEventHandlerError(
-                    "Automation event tenant does not match the operator tenant."
+                raise _handler_error(
+                    "Automation event tenant does not match the operator tenant.",
+                    retryable=False,
                 )
             target_id = _required_uuid(payload, target.entity_id_field)
             self._execute_server_scripts(
@@ -305,11 +306,12 @@ class AutomationEventHandler:
             try:
                 action = automation_capabilities.action_capability(request.action_key)
                 if not action.runtime_enabled:
-                    raise AutomationEventHandlerError(
-                        f"Server script action {action.key!r} is not runtime-enabled."
+                    raise _handler_error(
+                        f"Server script action {action.key!r} is not runtime-enabled.",
+                        retryable=False,
                     )
                 if action.entity_type != script.target_type:
-                    raise AutomationEventHandlerError(
+                    raise _handler_error(
                         f"Server script action {action.key!r} targets "
                         f"{action.entity_type!r}, not {script.target_type!r}."
                     )
@@ -345,7 +347,7 @@ class AutomationEventHandler:
                     ),
                 )
             except automation_capabilities.AutomationCapabilityError as exc:
-                raise AutomationEventHandlerError(
+                raise _handler_error(
                     f"Server script requested an undeclared action {request.action_key!r}."
                 ) from exc
 
@@ -447,7 +449,7 @@ class AutomationEventHandler:
                     ),
                 )
             if status is not AutomationScriptRunStatus.succeeded:
-                raise AutomationEventHandlerError(
+                raise _handler_error(
                     f"Server script {script.script_id} stopped with {status.value}."
                 )
 

@@ -1,7 +1,7 @@
 """Add the dedicated Ticket SLA enforcement-lock reason.
 
-Revision ID: 621_ticket_sla_enforcement_reason
-Revises: 620_zeptomail_delivery_statuses
+Revision ID: 629_ticket_sla_enforcement_reason
+Revises: 628_widen_subscription_change_confirmation_origin
 Create Date: 2026-09-29
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "621_ticket_sla_enforcement_reason"
-down_revision: str | None = "620_zeptomail_delivery_statuses"
+revision: str = "629_ticket_sla_enforcement_reason"
+down_revision: str | None = "628_widen_subscription_change_confirmation_origin"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
