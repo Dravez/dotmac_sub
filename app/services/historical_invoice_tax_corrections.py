@@ -41,6 +41,13 @@ from app.models.billing import (
     TaxApplication,
     TaxRate,
 )
+from app.models.customer_subledger import (
+    CustomerPostingGroup,
+    CustomerSubledgerOpeningCorrection,
+    CustomerSubledgerOpeningPosition,
+    PostingProducer,
+    PostingSourceKind,
+)
 from app.schemas.audit import AuditEventCreate
 from app.schemas.billing import (
     InvoiceCreate,
@@ -68,6 +75,11 @@ from app.services.billing.payments import (
     PaymentAllocations,
     Payments,
     ReviewedLegacyAllocationConsumptionEvidence,
+)
+from app.services.billing.subledger_opening import (
+    ReviewedPreopeningAllocationReleaseQuery,
+    preview_reviewed_preopening_allocation_release,
+    stage_reviewed_preopening_allocation_release_for_owner,
 )
 from app.services.common import round_money
 from app.services.customer_tax_policies import get_customer_vat_exemption_policy
@@ -1220,6 +1232,10 @@ class ExistingReplacementTaxCorrectionPreview:
     current_account_credit: Decimal
     projected_remaining_credit: Decimal
     reconstruct_consumption_evidence: bool
+    opening_position_id: UUID | None
+    opening_amount_before: Decimal | None
+    opening_amount_after: Decimal | None
+    preopening_release_fingerprint: str | None
     fingerprint: str
 
     @property
@@ -1311,8 +1327,42 @@ def _existing_replacement_result(
     )
     replacement_lines = _active_lines(db, invoice.id, lock=False)
     payment = db.get(Payment, evidence.payment_id)
+    opening_correction = (
+        db.get(CustomerSubledgerOpeningCorrection, evidence.opening_correction_id)
+        if evidence.opening_correction_id is not None
+        else None
+    )
+    opening_posting = (
+        db.get(CustomerPostingGroup, evidence.opening_correction_posting_group_id)
+        if evidence.opening_correction_posting_group_id is not None
+        else None
+    )
+    opening_evidence_invalid = (
+        (evidence.opening_position_id is None)
+        != (evidence.opening_correction_id is None)
+        or (evidence.opening_correction_id is None)
+        != (evidence.opening_correction_posting_group_id is None)
+        or (
+            evidence.opening_correction_id is not None
+            and (
+                opening_correction is None
+                or opening_correction.opening_position_id
+                != evidence.opening_position_id
+                or opening_correction.account_id != evidence.account_id
+                or round_money(opening_correction.delta)
+                != round_money(evidence.subtotal)
+                or opening_posting is None
+                or opening_posting.source_id != opening_correction.id
+                or opening_posting.producer_owner
+                != PostingProducer.customer_subledger_opening_positions.value
+                or opening_posting.source_kind
+                != PostingSourceKind.customer_subledger_opening_correction.value
+            )
+        )
+    )
     if (
-        source is None
+        opening_evidence_invalid
+        or source is None
         or source.status is not InvoiceStatus.void
         or source.account_id != evidence.account_id
         or round_money(source.total) != round_money(evidence.subtotal)
@@ -1424,6 +1474,10 @@ def _existing_replacement_manual_preview(
         current_account_credit=zero,
         projected_remaining_credit=zero,
         reconstruct_consumption_evidence=False,
+        opening_position_id=None,
+        opening_amount_before=None,
+        opening_amount_after=None,
+        preopening_release_fingerprint=None,
         fingerprint=_fingerprint(payload),
     )
 
@@ -1467,6 +1521,10 @@ def _build_existing_replacement_preview(
             current_account_credit=outcome.remaining_credit,
             projected_remaining_credit=outcome.remaining_credit,
             reconstruct_consumption_evidence=False,
+            opening_position_id=None,
+            opening_amount_before=None,
+            opening_amount_after=None,
+            preopening_release_fingerprint=None,
             fingerprint=outcome.preview_fingerprint,
         )
     if get_customer_vat_exemption_policy(db, account_id=query.account_id).vat_exempt:
@@ -1702,6 +1760,46 @@ def _build_existing_replacement_preview(
             query, "Existing settlement lacks its exact allocation ledger link."
         )
 
+    opening_position_id: UUID | None = None
+    opening_amount_before: Decimal | None = None
+    opening_amount_after: Decimal | None = None
+    preopening_release_fingerprint: str | None = None
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == currency,
+        )
+    )
+    if (
+        opening is not None
+        and allocation.consumption_ledger_entry_id is None
+        and _utc(allocation.created_at) <= _utc(opening.occurred_at)
+    ):
+        release_query = ReviewedPreopeningAllocationReleaseQuery(
+            account_id=query.account_id,
+            allocation_id=allocation.id,
+            payment_id=payment.id,
+            invoice_id=source.id,
+            currency=currency,
+            amount=source_subtotal,
+            reason=f"Ticket {query.ticket_reference}: historical VAT correction",
+            review_reference=(
+                f"Finance approver {query.approver_name}; ticket {query.ticket_reference}"
+            ),
+        )
+        try:
+            release = preview_reviewed_preopening_allocation_release(db, release_query)
+        except DomainError:
+            return _existing_replacement_manual_preview(
+                query,
+                "Pre-opening allocation release evidence is incomplete or ambiguous.",
+                payment_reference=payment.external_id,
+            )
+        opening_position_id = release.opening_position_id
+        opening_amount_before = release.previous_opening_amount
+        opening_amount_after = release.corrected_opening_amount
+        preopening_release_fingerprint = release.preview_fingerprint
+
     projected_credit = round_money(account_credit + source_subtotal - replacement_total)
     payload: dict[str, object] = {
         "account_id": query.account_id,
@@ -1730,6 +1828,10 @@ def _build_existing_replacement_preview(
         "replacement_total": replacement_total,
         "account_credit": account_credit,
         "projected_remaining_credit": projected_credit,
+        "opening_position_id": opening_position_id,
+        "opening_amount_before": opening_amount_before,
+        "opening_amount_after": opening_amount_after,
+        "preopening_release_fingerprint": preopening_release_fingerprint,
         "ticket_reference": query.ticket_reference.strip(),
         "approver_name": query.approver_name.strip(),
         "issued_at": issued_at,
@@ -1759,6 +1861,10 @@ def _build_existing_replacement_preview(
         current_account_credit=account_credit,
         projected_remaining_credit=projected_credit,
         reconstruct_consumption_evidence=allocation.consumption_ledger_entry_id is None,
+        opening_position_id=opening_position_id,
+        opening_amount_before=opening_amount_before,
+        opening_amount_after=opening_amount_after,
+        preopening_release_fingerprint=preopening_release_fingerprint,
         fingerprint=_fingerprint(payload),
     )
 
@@ -1852,6 +1958,42 @@ def correct_historical_invoice_tax_using_existing_replacement(
                     "Payment owner rejected historical settlement evidence.",
                     reason=exc.code,
                 )
+        opening_correction = None
+        if current.preopening_release_fingerprint is not None:
+            try:
+                opening_correction = (
+                    stage_reviewed_preopening_allocation_release_for_owner(
+                        db,
+                        ReviewedPreopeningAllocationReleaseQuery(
+                            account_id=command.query.account_id,
+                            allocation_id=allocation.id,
+                            payment_id=payment.id,
+                            invoice_id=source.id,
+                            currency=current.currency,
+                            amount=current.subtotal,
+                            reason=(
+                                f"Ticket {command.query.ticket_reference}: "
+                                "historical VAT correction"
+                            ),
+                            review_reference=(
+                                f"Finance approver {command.query.approver_name}; "
+                                f"ticket {command.query.ticket_reference}"
+                            ),
+                        ),
+                        expected_preview_fingerprint=(
+                            current.preopening_release_fingerprint
+                        ),
+                        authorized_system_user_id=(command.authorized_system_user_id),
+                        idempotency_key=_child_key("opening-release", key),
+                    )
+                )
+            except DomainError as exc:
+                _error(
+                    "preopening_release_rejected",
+                    "Opening-position owner rejected the reviewed legacy release.",
+                    reason=exc.code,
+                    owner_details=exc.details,
+                )
         try:
             PaymentAllocations.stage_reviewed_legacy_consumption_evidence(
                 db,
@@ -1933,6 +2075,7 @@ def correct_historical_invoice_tax_using_existing_replacement(
                 "replacement_settlement_incomplete",
                 "Account-credit owner rejected the exact replacement settlement.",
                 reason=exc.code,
+                owner_details=exc.details,
             )
         if len(application.allocation_ids) != 1:
             _error(
@@ -1978,6 +2121,17 @@ def correct_historical_invoice_tax_using_existing_replacement(
             approver_name=command.query.approver_name,
             recorded_at=recorded_at,
             reason=reason,
+            opening_position_id=current.opening_position_id,
+            opening_correction_id=(
+                opening_correction.correction_id
+                if opening_correction is not None
+                else None
+            ),
+            opening_correction_posting_group_id=(
+                opening_correction.posting_group_id
+                if opening_correction is not None
+                else None
+            ),
         )
         Invoices.stage_existing_tax_replacement_evidence_for_owner(
             db, replacement.id, evidence=evidence
@@ -2009,6 +2163,34 @@ def correct_historical_invoice_tax_using_existing_replacement(
                     "ticket_reference": command.query.ticket_reference.strip(),
                     "approval_recorded_at": recorded_at.isoformat(),
                     "evidence_fingerprint": current.fingerprint,
+                    "opening_position_id": (
+                        str(current.opening_position_id)
+                        if current.opening_position_id is not None
+                        else None
+                    ),
+                    "opening_correction_id": (
+                        str(opening_correction.correction_id)
+                        if opening_correction is not None
+                        else None
+                    ),
+                    "opening_correction_posting_group_id": (
+                        str(opening_correction.posting_group_id)
+                        if opening_correction is not None
+                        else None
+                    ),
+                    "opening_amount_before": (
+                        str(current.opening_amount_before)
+                        if current.opening_amount_before is not None
+                        else None
+                    ),
+                    "opening_amount_after": (
+                        str(current.opening_amount_after)
+                        if current.opening_amount_after is not None
+                        else None
+                    ),
+                    "preopening_release_fingerprint": (
+                        current.preopening_release_fingerprint
+                    ),
                     "command_id": str(context.command_id),
                     "command_reason": reason,
                 },
