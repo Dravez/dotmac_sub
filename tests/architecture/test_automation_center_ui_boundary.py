@@ -34,36 +34,31 @@ def test_hub_is_registered_and_visible_only_with_hub_permission() -> None:
     assert '"/admin/automation"' in navigation
 
 
-def test_hub_presents_governance_and_rule_lifecycle_controls() -> None:
+def test_hub_is_a_directory_and_keeps_diagnostics_out_of_the_default_workspace() -> None:
     template = _source("templates/admin/automation/index.html")
     for heading in (
-        "Module registry",
         "Workflows",
-        "Recent execution",
-        "Existing automation ownership",
-        "Runtime dormant",
+        "Client scripts",
+        "Server scripts",
+        "Execution history",
+        "Automation runtime dormant",
     ):
         assert heading in template
-    assert "Deployment creates no rules and causes no business side effects" in template
-    assert "New workflow" in template
-    assert 'action="/admin/automation/rules/{{ rule.rule_id }}/publish"' in template
-    assert 'action="/admin/automation/rules/{{ rule.rule_id }}/pause"' in template
-    assert 'action="/admin/automation/rules/{{ rule.rule_id }}/resume"' in template
-    assert "rule.runtime_ready" in template
-    assert "Activation unavailable" in template
+    assert "Business automation catalogue" not in template
+    assert "Module registry" not in template
+    assert "Existing automation ownership" not in template
+    assert 'href="/admin/automation/workflows"' in template
+    assert 'href="/admin/automation/client-scripts/manage"' in template
+    assert 'href="/admin/automation/server-scripts"' in template
 
 
 def test_hub_shows_support_communications_readiness_and_next_step() -> None:
     template = _source("templates/admin/automation/index.html")
     projection = _source("app/services/web_automation_center.py")
-    assert "Business automation catalogue" in template
-    assert "{{ row.state_label }}" in template
     assert 'AutomationCatalogState.unavailable: "Unavailable"' in projection
     assert 'AutomationCatalogState.managed_elsewhere: "Managed elsewhere"' in projection
     assert 'AutomationCatalogState.retired: "Retired"' in projection
-    assert "{{ row.explanation }}" in template
-    assert "{{ row.item.management_path }}" in template
-    assert "Create workflow" in template
+    assert "registry diagnostics are intentionally kept out of the operator workspace" in template
 
 
 def test_runtime_health_card_uses_semantic_status_and_safe_responsive_layout() -> None:
@@ -75,10 +70,6 @@ def test_runtime_health_card_uses_semantic_status_and_safe_responsive_layout() -
     assert "status-panel-warning" in template
     assert "status-foreground" in template
     assert 'class="p-5"' in template
-    assert 'class="mt-5 grid w-full grid-cols-3' in template
-    assert "xl:flex-row" not in template
-    assert "dark:bg-slate-800 dark:text-slate-300" in template
-    assert "bg-primary-600" in template
     assert ".dark .status-panel-positive" in design_system
     assert ".dark .status-panel-negative" in design_system
     assert ".dark .status-panel-warning" in design_system
@@ -105,12 +96,19 @@ def test_rule_builder_uses_registered_options_and_supports_multiple_steps() -> N
 
 def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     template = _source("templates/admin/automation/index.html")
+    workflows = _source("templates/admin/automation/workflows.html")
+    client_scripts = _source("templates/admin/automation/script_list.html")
     script_builder = _source("templates/admin/automation/script_builder.html")
     route = _source("app/web/admin/automation_center.py")
     client_runtime = _source("static/js/automation-client-runtime.js")
-    assert "Create client script" in template
-    assert "Create server script" in template
-    assert "Rule support by target" in template
+    assert "Workflows" in workflows
+    assert "updated_from" in client_scripts
+    assert "updated_to" in client_scripts
+    assert "Create client script" not in template
+    assert "Create server script" not in template
+    assert '"/workflows"' in route
+    assert '"/client-scripts/manage"' in route
+    assert '"/server-scripts"' in route
     assert "server_script_runtime_state" in template
     assert "JavaScript source" in script_builder
     assert "published_client_scripts" in route
@@ -118,7 +116,6 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert "data-automation-target" in client_runtime
     assert "database/write client" in client_runtime
     assert '_DEFAULT_TRIGGER = ""' in route
-    assert 'href="#mechanism-heading"' in template
 
 
 def test_server_scripts_dispatch_from_declared_target_events_without_native_rules() -> (

@@ -149,9 +149,11 @@ Script publication repeats target permissions and runtime readiness checks.
 The Center never grants a script arbitrary ORM access, imports, process access,
 network access, dynamic code evaluation, or a generic database writer.
 
-The admin shell is available at `/admin/automation`. Opening the hub requires
-`automation:hub:read`; its rule and execution sections independently require
-`automation:rule:read` and `automation:run:read`. Run details require
+The admin shell is available at `/admin/automation`. The hub is a directory
+that links to focused `/workflows`, `/client-scripts/manage`,
+`/server-scripts`, and `/runs` workspaces. Opening the hub requires
+`automation:hub:read`; each workflow, script, and execution workspace keeps
+its own read permission. Run details require
 `automation:run:read`; continuing a failed run additionally requires
 `automation:run:redrive`. The run detail shows the affected record, rule
 version, timestamps, each action step and its attempts, safe failure guidance,

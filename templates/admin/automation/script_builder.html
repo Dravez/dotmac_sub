@@ -14,6 +14,7 @@
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <input type="hidden" name="command_token" value="{{ command_token }}">
         <input type="hidden" name="kind" value="{{ script_kind }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
         <div class="grid gap-5 sm:grid-cols-2">
             <label class="space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200">Name<input name="name" value="{{ name }}" required maxlength="160" class="mt-1 block min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white" placeholder="Validate lead before save"></label>
             <label class="space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200">Key<input name="key" value="{{ key }}" required maxlength="160" pattern="[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*" class="mt-1 block min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white" placeholder="sales.validate_lead"></label>

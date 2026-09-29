@@ -118,6 +118,7 @@ class AutomationScriptSummary:
     event_name: str
     status: AutomationScriptStatus
     version: int
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +465,7 @@ def list_scripts(
             event_name=script.event_name,
             status=AutomationScriptStatus(script.status),
             version=version.version,
+            updated_at=script.updated_at,
         )
         for script, version in rows
     )

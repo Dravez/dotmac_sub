@@ -34,7 +34,9 @@ def test_automation_center_guidance_explains_the_read_only_boundary() -> None:
     assert guide is not None
     assert guide.id == "automation-center"
     content = " ".join((*guide.steps, *guide.notes)).lower()
-    assert "module registry" in content
+    assert "workflows" in content
+    assert "client scripts" in content
+    assert "server scripts" in content
     assert "recent execution evidence" in content
     assert "read-only" in content
     assert "custom fields" in content
