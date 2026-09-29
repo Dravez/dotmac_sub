@@ -577,7 +577,26 @@ command. It is not an extension of automatic draft discovery.
 
 The typed query names every invoice and line, half-open service interval,
 expected contract total, payment-to-invoice split, settlement ledger row, and
-legacy allocation ledger pair. Preview requires all of these invariants:
+legacy allocation ledger pair. `financial.prepaid_service_renewals` owns the
+typed reviewed calendar reader; the reconciler and CLI never independently
+round these periods. Date-only manifests default to Africa/Lagos midnight.
+An explicit `documented_anniversary` selection also names the expected initial
+anchor. It requires the first invoice's exact existing linked period, equal
+reviewed Lagos dates, equal endpoint clocks, and an anchor exactly equal to its
+end. Later intervals preserve that documentary clock. A UTC-midnight historical
+boundary therefore remains 01:00 Lagos rather than being silently shifted an
+hour. The preceding paid invoice is unchanged; real overlap still fails closed.
+This continuation mode is not the paid-period calendar correction workflow.
+
+The preview fingerprints the calendar selection, resolved intervals and initial
+anchor, and reports each UTC/local interval and expected final reusable credit.
+Apply consumes those same typed intervals after locking and re-previewing; it
+does not recalculate dates in a participant. Missing or inconsistent calendar
+evidence remains manual review without guessed bounds. New lapsed renewals still
+use the canonical settlement-day Lagos-midnight policy, while uninterrupted
+funded coverage preserves its exact anniversary as before.
+
+Preview requires all of these invariants:
 
 - periods are positive, contiguous, and already expired;
 - each invoice has one exact recurring line and matches canonical contract and

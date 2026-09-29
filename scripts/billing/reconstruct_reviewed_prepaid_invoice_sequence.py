@@ -14,11 +14,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TypeAlias, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from app.models.system_user import SystemUser
 from app.services.auth_dependencies import has_permission
 from app.services.db_session_adapter import db_session_adapter
 from app.services.owner_commands import CommandContext
+from app.services.prepaid_calendar_contracts import (
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidCalendarSelection,
+)
 from app.services.prepaid_draft_reconciliation import (
     REPAIR_SCOPE,
     ReconstructReviewedPrepaidInvoiceSequenceCommand,
@@ -76,6 +81,35 @@ def _objects(value: object, field: str) -> tuple[JsonObject, ...]:
     return tuple(cast(JsonObject, item) for item in value)
 
 
+def _calendar(value: object) -> ReviewedPrepaidCalendarSelection:
+    if not isinstance(value, dict):
+        raise ValueError("calendar must be a JSON object")
+    data = cast(JsonObject, value)
+    if set(data) - {"basis", "expected_initial_anchor_at"}:
+        raise ValueError("calendar contains unsupported fields")
+    try:
+        basis = ReviewedPrepaidCalendarBasis(str(data.get("basis")))
+    except ValueError as exc:
+        raise ValueError(
+            "calendar.basis must be business_midnight or documented_anniversary"
+        ) from exc
+    anchor = data.get("expected_initial_anchor_at")
+    if basis is ReviewedPrepaidCalendarBasis.documented_anniversary and anchor is None:
+        raise ValueError(
+            "documented_anniversary requires calendar.expected_initial_anchor_at"
+        )
+    if basis is ReviewedPrepaidCalendarBasis.business_midnight and anchor is not None:
+        raise ValueError("business_midnight does not accept an anchor override")
+    return ReviewedPrepaidCalendarSelection(
+        basis=basis,
+        expected_initial_anchor_at=(
+            _timestamp(anchor, "calendar.expected_initial_anchor_at")
+            if anchor is not None
+            else None
+        ),
+    )
+
+
 def _manifest(path: Path) -> ReviewedPrepaidInvoiceSequenceQuery:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -86,6 +120,11 @@ def _manifest(path: Path) -> ReviewedPrepaidInvoiceSequenceQuery:
         raise ValueError("approval must be a JSON object")
     approval = cast(JsonObject, approval_value)
     return ReviewedPrepaidInvoiceSequenceQuery(
+        calendar=(
+            _calendar(data["calendar"])
+            if "calendar" in data
+            else ReviewedPrepaidCalendarSelection()
+        ),
         subscription_id=_uuid(data.get("subscription_id"), "subscription_id"),
         documents=tuple(
             ReviewedPrepaidInvoiceSequenceDocumentSelection(
@@ -211,8 +250,73 @@ def main() -> int:
                     "subscription_id": str(preview.subscription_id),
                     "invoice_ids": [str(item) for item in preview.invoice_ids],
                     "payment_ids": [str(item) for item in preview.payment_ids],
-                    "service_period_start": preview.service_period_start.isoformat(),
-                    "service_period_end": preview.service_period_end.isoformat(),
+                    "service_period_start": (
+                        preview.service_period_start.isoformat()
+                        if preview.service_period_start
+                        else None
+                    ),
+                    "service_period_end": (
+                        preview.service_period_end.isoformat()
+                        if preview.service_period_end
+                        else None
+                    ),
+                    "calendar_basis": preview.calendar_basis.value,
+                    "timezone_name": preview.timezone_name,
+                    "initial_anchor_at": (
+                        preview.initial_anchor_at.isoformat()
+                        if preview.initial_anchor_at
+                        else None
+                    ),
+                    "service_periods": [
+                        {
+                            "invoice_id": str(selection.invoice_id),
+                            "line_id": str(selection.line_id),
+                            "expected_total": str(selection.expected_total),
+                            "starts_at": period.starts_at.isoformat(),
+                            "ends_at": period.ends_at.isoformat(),
+                            "starts_at_local": period.starts_at.astimezone(
+                                ZoneInfo(period.timezone_name)
+                            ).isoformat(),
+                            "ends_at_local": period.ends_at.astimezone(
+                                ZoneInfo(period.timezone_name)
+                            ).isoformat(),
+                        }
+                        for selection, period in zip(
+                            query.documents, preview.service_periods
+                        )
+                    ],
+                    "reviewed_allocation_plan": [
+                        {
+                            "payment_id": str(item.payment_id),
+                            "invoice_id": str(item.invoice_id),
+                            "amount": str(item.amount),
+                        }
+                        for item in query.allocations
+                    ],
+                    "settlement_evidence": [
+                        {
+                            "payment_id": str(item.payment_id),
+                            "unallocated_ledger_entry_id": str(
+                                item.unallocated_ledger_entry_id
+                            ),
+                        }
+                        for item in query.settlement_evidence
+                    ],
+                    "existing_allocation_evidence": [
+                        {
+                            "allocation_id": str(item.allocation_id),
+                            "invoice_ledger_entry_id": str(
+                                item.invoice_ledger_entry_id
+                            ),
+                            "balancing_ledger_entry_id": str(
+                                item.balancing_ledger_entry_id
+                            ),
+                        }
+                        for item in query.existing_allocation_evidence
+                    ],
+                    "expected_post_repair_credit": str(
+                        preview.expected_post_repair_credit
+                    ),
                     "funding_position_at": (
                         preview.funding_position_at.isoformat()
                         if preview.funding_position_at
