@@ -221,6 +221,12 @@ def main() -> int:
                     "invoice_total": str(preview.invoice_total),
                     "existing_allocation_total": str(preview.existing_allocation_total),
                     "selected_payment_total": str(preview.selected_payment_total),
+                    "selected_payment_allocation_total": str(
+                        preview.selected_payment_allocation_total
+                    ),
+                    "selected_payment_residual": str(
+                        preview.selected_payment_residual
+                    ),
                     "opening_credit": str(preview.opening_credit),
                     "opening_funding_consumption": str(
                         preview.opening_funding_consumption

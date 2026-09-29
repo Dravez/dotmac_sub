@@ -64,12 +64,20 @@ shape, preserving chronological document and allocation order:
 }
 ```
 
-Every selected payment must be fully distributed by `allocations`. Every target
-invoice must be exactly settled by its selected allocations plus the explicitly
-listed pre-existing allocations and opening-funding consumption. Opening funding
-may be selected only for a single expired document and must equal the full
-remaining reviewed opening source. Include one settlement ledger selection for
-every selected payment, including payments whose settlement row already exists.
+Every selected payment in a multi-document sequence must be fully distributed by
+`allocations`. A late-recorded, single-document repair may use only the amount
+needed to settle the invoice and retain the previewed residual as reusable
+account credit. Every target invoice must be exactly settled by its selected
+allocations plus the explicitly listed pre-existing allocations and
+opening-funding consumption. Opening funding may be selected only for a single
+expired document and must equal the full remaining reviewed opening source.
+Include one settlement ledger selection for every selected payment, including
+payments whose settlement row already exists. The preview's
+`selected_payment_allocation_total`, `selected_payment_residual`, and
+`post_boundary_credit` must match the reviewed evidence before apply.
+For a provider payment, `selected_payment_total` is the exact settlement-backed
+customer credit. It may be lower than the captured payment amount when the
+difference is an evidenced gateway fee.
 
 ## Preview
 

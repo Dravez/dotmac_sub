@@ -914,6 +914,8 @@ class ReviewedPrepaidInvoiceSequencePreview:
     invoice_total: Decimal
     existing_allocation_total: Decimal
     selected_payment_total: Decimal
+    selected_payment_allocation_total: Decimal
+    selected_payment_residual: Decimal
     opening_credit: Decimal
     opening_funding_consumption: Decimal
     opening_funding_baseline_id: UUID | None
@@ -7031,6 +7033,8 @@ def _build_reviewed_sequence_preview(
     invoice_total: Decimal = Decimal("0.00"),
     existing_allocation_total: Decimal = Decimal("0.00"),
     selected_payment_total: Decimal = Decimal("0.00"),
+    selected_payment_allocation_total: Decimal = Decimal("0.00"),
+    selected_payment_residual: Decimal = Decimal("0.00"),
     opening_credit: Decimal = Decimal("0.00"),
     opening_funding_consumption: Decimal = Decimal("0.00"),
     opening_funding_baseline_id: UUID | None = None,
@@ -7056,6 +7060,10 @@ def _build_reviewed_sequence_preview(
         "invoice_total": round_money(invoice_total),
         "existing_allocation_total": round_money(existing_allocation_total),
         "selected_payment_total": round_money(selected_payment_total),
+        "selected_payment_allocation_total": round_money(
+            selected_payment_allocation_total
+        ),
+        "selected_payment_residual": round_money(selected_payment_residual),
         "opening_credit": round_money(opening_credit),
         "opening_funding_consumption": round_money(opening_funding_consumption),
         "opening_funding_baseline_id": opening_funding_baseline_id,
@@ -7083,6 +7091,10 @@ def _build_reviewed_sequence_preview(
         invoice_total=round_money(invoice_total),
         existing_allocation_total=round_money(existing_allocation_total),
         selected_payment_total=round_money(selected_payment_total),
+        selected_payment_allocation_total=round_money(
+            selected_payment_allocation_total
+        ),
+        selected_payment_residual=round_money(selected_payment_residual),
         opening_credit=round_money(opening_credit),
         opening_funding_consumption=round_money(opening_funding_consumption),
         opening_funding_baseline_id=opening_funding_baseline_id,
@@ -7484,10 +7496,20 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
     if set(settlement_evidence) != set(payment_ids):
         return manual("every selected payment requires one settlement ledger selection")
     payments: dict[UUID, Payment] = {}
+    selected_credit_by_payment: dict[UUID, Decimal] = {}
     selected_payment_total = Decimal("0.00")
     for payment_id in payment_ids:
         payment = db.get(Payment, payment_id)
         entry = db.get(LedgerEntry, settlement_evidence[payment_id])
+        settlement_credit = round_money(
+            to_decimal(
+                payment.settlement.unallocated_amount
+                if payment is not None and payment.settlement is not None
+                else payment.amount
+                if payment is not None
+                else Decimal("0.00")
+            )
+        )
         if (
             payment is None
             or not payment.is_active
@@ -7498,7 +7520,7 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             or payment.reversal is not None
             or payment.allocations
             or planned_by_payment.get(payment_id, Decimal("0.00"))
-            != round_money(to_decimal(payment.amount))
+            > settlement_credit
             or entry is None
             or not entry.is_active
             or entry.account_id != account_id
@@ -7507,14 +7529,17 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             or entry.entry_type is not LedgerEntryType.credit
             or entry.source is not LedgerSource.payment
             or entry.currency != payment.currency
-            or round_money(to_decimal(entry.amount))
-            != round_money(to_decimal(payment.amount))
+            or round_money(to_decimal(entry.amount)) != settlement_credit
             or (
                 payment.settlement is not None
                 and (
                     payment.settlement.unallocated_ledger_entry_id != entry.id
                     or round_money(to_decimal(payment.settlement.unallocated_amount))
-                    != round_money(to_decimal(payment.amount))
+                    != settlement_credit
+                    or round_money(to_decimal(payment.settlement.prepaid_amount))
+                    != Decimal("0.00")
+                    or round_money(to_decimal(payment.settlement.amount))
+                    != settlement_credit
                 )
             )
         ):
@@ -7523,14 +7548,24 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
                 payment_id=str(payment_id),
             )
         payments[payment.id] = payment
+        selected_credit_by_payment[payment.id] = settlement_credit
         selected_payment_total = round_money(
-            selected_payment_total + to_decimal(payment.amount)
+            selected_payment_total + settlement_credit
         )
+    selected_payment_allocation_total = round_money(
+        sum(planned_by_payment.values(), Decimal("0.00"))
+    )
+    selected_payment_residual = round_money(
+        selected_payment_total - selected_payment_allocation_total
+    )
     if (
         round_money(
-            selected_payment_total + existing_allocation_total + opening_consumption
+            selected_payment_allocation_total
+            + existing_allocation_total
+            + opening_consumption
         )
         != invoice_total
+        or selected_payment_residual < Decimal("0.00")
     ):
         return manual("selected payments do not conserve the invoice sequence total")
 
@@ -7602,7 +7637,14 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         )
     except PrepaidFundingBaselineMissingError:
         return manual("authoritative prepaid funding is unavailable")
-    historical_single_document = opening_consumption > Decimal("0.00")
+    historical_single_document = bool(
+        len(documents) == 1
+        and opening_consumption == opening_credit
+        and all(
+            invoice.created_at is not None and _utc(invoice.created_at) > boundary
+            for invoice, _line, _start, _end in documents.values()
+        )
+    )
     legacy_sequence_conserved = (
         round_money(pre_boundary_payment_total - pre_boundary_closed_allocation)
         == opening_credit
@@ -7611,9 +7653,10 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
     )
     historical_document_conserved = (
         historical_single_document
-        and opening_consumption == opening_credit
         and post_boundary_credit
-        == round_money(selected_payment_total + query.expected_post_repair_credit)
+        == round_money(
+            selected_payment_allocation_total + query.expected_post_repair_credit
+        )
     )
     funding_conserved = (
         historical_document_conserved
@@ -7634,6 +7677,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             invoice_total=invoice_total,
             existing_allocation_total=existing_allocation_total,
             selected_payment_total=selected_payment_total,
+            selected_payment_allocation_total=selected_payment_allocation_total,
+            selected_payment_residual=selected_payment_residual,
             opening_credit=opening_credit,
             opening_funding_consumption=opening_consumption,
             opening_funding_baseline_id=opening_baseline_id,
@@ -7666,6 +7711,7 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
             (
                 payment.id,
                 round_money(to_decimal(payment.amount)),
+                selected_credit_by_payment[payment.id],
                 payment.paid_at,
                 payment.settlement.id if payment.settlement else None,
                 settlement_evidence[payment.id],
@@ -7676,6 +7722,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         "pre_boundary_closed_allocation": pre_boundary_closed_allocation,
         "pre_boundary_open_allocation": pre_boundary_open_allocation,
         "post_boundary_payment_total": post_boundary_payment_total,
+        "selected_payment_allocation_total": selected_payment_allocation_total,
+        "selected_payment_residual": selected_payment_residual,
     }
     return _build_reviewed_sequence_preview(
         query=query,
@@ -7688,6 +7736,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         invoice_total=invoice_total,
         existing_allocation_total=existing_allocation_total,
         selected_payment_total=selected_payment_total,
+        selected_payment_allocation_total=selected_payment_allocation_total,
+        selected_payment_residual=selected_payment_residual,
         opening_credit=opening_credit,
         opening_funding_consumption=opening_consumption,
         opening_funding_baseline_id=opening_baseline_id,
@@ -8024,7 +8074,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 currency=(opening_invoice.currency or "NGN").upper(),
                 invoice_total=current.invoice_total,
                 balance_due=current.opening_funding_consumption,
-                payment_backed_credit=current.selected_payment_total,
+                payment_backed_credit=current.selected_payment_allocation_total,
                 authoritative_funding=current.authoritative_prepaid_funding,
                 opening_funding_available=current.opening_credit,
                 opening_funding_required=current.opening_funding_consumption,
@@ -8168,6 +8218,11 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
             "service_period_end": current.service_period_end.isoformat(),
             "funding_position_at": current.funding_position_at.isoformat(),
             "opening_credit": str(current.opening_credit),
+            "selected_payment_total": str(current.selected_payment_total),
+            "selected_payment_allocation_total": str(
+                current.selected_payment_allocation_total
+            ),
+            "selected_payment_residual": str(current.selected_payment_residual),
             "opening_funding_consumption": str(current.opening_funding_consumption),
             "opening_funding_consumption_id": (
                 str(opening_consumption.id) if opening_consumption is not None else None
