@@ -518,6 +518,8 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
         is_active=True,
     )
     db_session.add(authorized_user)
+    db_session.flush()
+    authorized_user_id = authorized_user.id
     db_session.commit()
 
     preview = preview_existing_replacement_tax_correction(db_session, query)
@@ -538,7 +540,7 @@ def test_existing_replacement_preserves_credit_and_records_finance_approval(
         query=query,
         expected_preview_fingerprint=preview.fingerprint,
         permission_granted=True,
-        authorized_system_user_id=authorized_user.id,
+        authorized_system_user_id=authorized_user_id,
     )
     result = correct_historical_invoice_tax_using_existing_replacement(
         db_session,
