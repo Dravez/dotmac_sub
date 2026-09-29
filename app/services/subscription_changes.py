@@ -34,7 +34,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
         subscription_id: str,
         new_offer_id: str,
         effective_date: date,
-        requested_by_person_id: str | None = None,
+        requested_by_subscriber_id: str | None = None,
         notes: str | None = None,
         confirmation_preview_fingerprint: str | None = None,
         confirmation_idempotency_key: str | None = None,
@@ -49,7 +49,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
             subscription_id: The subscription to change
             new_offer_id: The new offer to switch to
             effective_date: When the change should take effect
-            requested_by_person_id: Person making the request
+            requested_by_subscriber_id: Subscriber making the request
             notes: Optional notes
 
         Returns:
@@ -129,8 +129,8 @@ class SubscriptionChangeRequests(ListResponseMixin):
             current_offer_id=subscription.offer_id,
             requested_offer_id=new_offer.id,
             effective_date=effective_date,
-            requested_by_subscriber_id=coerce_uuid(requested_by_person_id)
-            if requested_by_person_id
+            requested_by_subscriber_id=coerce_uuid(requested_by_subscriber_id)
+            if requested_by_subscriber_id
             else None,
             notes=notes,
             status=SubscriptionChangeStatus.pending,
@@ -157,7 +157,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
         subscription_id: str,
         new_offer_id: str,
         effective_date: date,
-        requested_by_person_id: str | None = None,
+        requested_by_subscriber_id: str | None = None,
         notes: str | None = None,
     ) -> SubscriptionChangeRequest:
         """Schedule an admin-initiated plan change to apply at a future date.
@@ -175,7 +175,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
             subscription_id: The subscription to change
             new_offer_id: The new offer to switch to
             effective_date: When the change should take effect (next cycle)
-            requested_by_person_id: Person scheduling the change
+            requested_by_subscriber_id: Subscriber scheduling the change
             notes: Optional notes
 
         Returns:
@@ -236,11 +236,11 @@ class SubscriptionChangeRequests(ListResponseMixin):
             current_offer_id=subscription.offer_id,
             requested_offer_id=new_offer.id,
             effective_date=effective_date,
-            requested_by_subscriber_id=coerce_uuid(requested_by_person_id)
-            if requested_by_person_id
+            requested_by_subscriber_id=coerce_uuid(requested_by_subscriber_id)
+            if requested_by_subscriber_id
             else None,
-            reviewed_by_subscriber_id=coerce_uuid(requested_by_person_id)
-            if requested_by_person_id
+            reviewed_by_subscriber_id=coerce_uuid(requested_by_subscriber_id)
+            if requested_by_subscriber_id
             else None,
             reviewed_at=now,
             notes=notes,
@@ -602,7 +602,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
         idempotency_key: str,
         confirmation_origin: str,
         confirmation_snapshot: dict[str, object],
-        requested_by_person_id: str | None = None,
+        requested_by_subscriber_id: str | None = None,
         actor_id: str | None = None,
         notes: str | None = None,
     ) -> SubscriptionChangeRequest:
@@ -629,7 +629,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
                 subscription_id=subscription_id,
                 new_offer_id=new_offer_id,
                 effective_date=date.today(),
-                requested_by_person_id=requested_by_person_id,
+                requested_by_subscriber_id=requested_by_subscriber_id,
                 notes=notes,
                 confirmation_preview_fingerprint=fingerprint,
                 confirmation_idempotency_key=key,
@@ -675,7 +675,7 @@ class SubscriptionChangeRequests(ListResponseMixin):
                 idempotency_key=key,
                 confirmation_origin=confirmation_origin,
                 confirmation_snapshot=confirmation_snapshot,
-                requested_by_person_id=requested_by_person_id,
+                requested_by_subscriber_id=requested_by_subscriber_id,
                 actor_id=actor_id,
                 notes=notes,
             )

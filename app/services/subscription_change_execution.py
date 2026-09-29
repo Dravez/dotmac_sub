@@ -768,7 +768,7 @@ def prepare_approved_relocation_quote(
                 subscription_id=str(source.id),
                 new_offer_id=str(destination_offer_id),
                 effective_date=datetime.now(UTC).date(),
-                requested_by_person_id=str(command.subscriber_id),
+                requested_by_subscriber_id=str(command.subscriber_id),
                 notes=f"Customer-approved relocation Quote {quote.id}",
                 confirmation_idempotency_key=key,
                 confirmation_origin="customer_approved_quote",
