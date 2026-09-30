@@ -1,7 +1,7 @@
 """Persist customer-send purpose on notification templates.
 
-Revision ID: 627_notification_template_purpose
-Revises: 626_automation_script_control_plane
+Revision ID: 634_notification_template_purpose
+Revises: 633_retire_system_admin_main_reseller_membership
 Create Date: 2026-09-30
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "627_notification_template_purpose"
-down_revision: str | None = "626_automation_script_control_plane"
+revision: str = "634_notification_template_purpose"
+down_revision: str | None = "633_retire_system_admin_main_reseller_membership"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

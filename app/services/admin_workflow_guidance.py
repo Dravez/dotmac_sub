@@ -987,7 +987,8 @@ HELP_ONLY_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         ("/admin/notifications",),
         "Choose Templates, Policies, Queue, or Delivery Logs for the task you need to perform.",
         "Search and open the exact notification record before editing or retrying anything.",
-        "Create or edit templates and policies, preview the resulting message, then save and verify them.",
+        "Create or edit templates and policies, choose the purpose that matches the customer message, preview the result, then save and verify it.",
+        "For manual customer-page sends, suspended or blocked accounts may receive only account, billing, service, or credentials messages; canceled and disabled accounts receive none.",
         "Review delivery failure evidence before retrying or canceling a queued notification.",
     ),
     _guide(
