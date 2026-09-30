@@ -580,4 +580,3 @@ def test_service_detail_returns_not_found_when_projection_omits_subscription(
     )
 
     assert detail is None
-
