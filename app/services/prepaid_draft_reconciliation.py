@@ -895,6 +895,14 @@ class ReviewedPrepaidExistingAllocationEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewedPrepaidInvoiceSequenceApproval:
+    """Named Finance approver for a reviewed sequence repair."""
+
+    approver_system_user_id: UUID
+    approver_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewedPrepaidInvoiceSequenceQuery:
     subscription_id: UUID
     documents: tuple[ReviewedPrepaidInvoiceSequenceDocumentSelection, ...]
@@ -904,7 +912,7 @@ class ReviewedPrepaidInvoiceSequenceQuery:
     expected_opening_credit: Decimal
     expected_post_repair_credit: Decimal
     expected_authoritative_prepaid_funding: Decimal
-    approval: ReviewedExistingDraftSettlementApproval
+    approval: ReviewedPrepaidInvoiceSequenceApproval
     expected_opening_funding_consumption: Decimal = Decimal("0.00")
     calendar: ReviewedPrepaidCalendarSelection = ReviewedPrepaidCalendarSelection()
 
@@ -7300,15 +7308,8 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         if approver is not None
         else ""
     )
-    digest = approval.evidence_sha256.strip().lower()
     if (
-        approval.approved_at.tzinfo is None
-        or _utc(approval.approved_at) > datetime.now(UTC)
-        or not approval.ticket_reference.strip()
-        or len(approval.ticket_reference.strip()) > 120
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-        or approver is None
+        approver is None
         or not approver.is_active
         or canonical_approver_name.casefold()
         != approval.approver_name.strip().casefold()
@@ -8085,10 +8086,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                         PaymentSettlementReconciliationRequest(
                             allocation_ledger_entry_ids={},
                             unallocated_ledger_entry_id=settlement_evidence[payment.id],
-                            reason=(
-                                "Finance-reviewed prepaid invoice sequence repair "
-                                f"{command.query.approval.ticket_reference.strip()}"
-                            ),
+                            reason="Finance-reviewed prepaid invoice sequence repair",
                         ),
                         commit=False,
                     )
@@ -8135,10 +8133,7 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                         expected_line_unit_price=to_decimal(line.unit_price),
                         expected_line_amount=to_decimal(line.amount),
                         line_description=f"{line.description}",
-                        evidence_ref=(
-                            f"{_OWNER}:{current.fingerprint}:"
-                            f"{command.query.approval.ticket_reference.strip()}"
-                        ),
+                        evidence_ref=f"{_OWNER}:{current.fingerprint}",
                     ),
                 )
                 if changed.status is InvoiceStatus.draft:
@@ -8410,9 +8405,6 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 command.query.approval.approver_system_user_id
             ),
             "approver_name": command.query.approval.approver_name.strip(),
-            "approved_at": _utc(command.query.approval.approved_at).isoformat(),
-            "ticket_reference": command.query.approval.ticket_reference.strip(),
-            "evidence_sha256": (command.query.approval.evidence_sha256.strip().lower()),
             "preview_fingerprint": current.fingerprint,
             "query_fingerprint": _reviewed_sequence_query_fingerprint(command.query),
             "idempotency_key": key,
@@ -10713,6 +10705,7 @@ __all__ = [
     "ReviewedExistingDraftSettlementQuery",
     "ReviewedExistingDraftSettlementResult",
     "ReviewedPrepaidExistingAllocationEvidence",
+    "ReviewedPrepaidInvoiceSequenceApproval",
     "ReviewedPrepaidInvoiceSequenceAllocationSelection",
     "ReviewedPrepaidInvoiceSequenceDisposition",
     "ReviewedPrepaidInvoiceSequenceDocumentSelection",

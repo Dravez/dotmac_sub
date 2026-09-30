@@ -51,9 +51,6 @@ def test_manifest_parses_explicit_calendar_into_typed_selection(
         "approval": {
             "approver_system_user_id": str(uuid4()),
             "approver_name": "Synthetic Approver",
-            "approved_at": "2026-09-28T12:00:00Z",
-            "ticket_reference": "pytest-sequence",
-            "evidence_sha256": "d" * 64,
         },
         "calendar": calendar,
     }
@@ -69,6 +66,7 @@ def test_manifest_parses_explicit_calendar_into_typed_selection(
     del payload["calendar"]
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert _manifest(path).calendar == ReviewedPrepaidCalendarSelection()
+    assert query.approval.approver_name == "Synthetic Approver"
 
 
 @pytest.mark.parametrize(

@@ -85,6 +85,7 @@ from app.services.prepaid_draft_reconciliation import (
     ReviewedExistingDraftSettlementDisposition,
     ReviewedExistingDraftSettlementQuery,
     ReviewedPrepaidExistingAllocationEvidence,
+    ReviewedPrepaidInvoiceSequenceApproval,
     ReviewedPrepaidInvoiceSequenceAllocationSelection,
     ReviewedPrepaidInvoiceSequenceDisposition,
     ReviewedPrepaidInvoiceSequenceDocumentSelection,
@@ -2653,12 +2654,9 @@ def test_reviewed_prepaid_invoice_sequence_reconstructs_cutover_evidence_atomica
         expected_opening_credit=Decimal("20.00"),
         expected_post_repair_credit=Decimal("0.00"),
         expected_authoritative_prepaid_funding=Decimal("0.00"),
-        approval=ReviewedExistingDraftSettlementApproval(
+        approval=ReviewedPrepaidInvoiceSequenceApproval(
             approver_system_user_id=approver.id,
             approver_name="Finance Approver",
-            approved_at=datetime.now(UTC) - timedelta(minutes=1),
-            ticket_reference="pytest-reviewed-sequence",
-            evidence_sha256="d" * 64,
         ),
     )
     if evidence_change is SequenceEvidenceChange.missing_bounds:
@@ -2825,9 +2823,9 @@ def test_reviewed_prepaid_invoice_sequence_reconstructs_cutover_evidence_atomica
         assert invoice.billing_period_end == period[1].replace(tzinfo=None)
         assert (
             invoice.metadata_["reviewed_prepaid_invoice_sequence_reconstruction"][
-                "ticket_reference"
+                "approver_name"
             ]
-            == "pytest-reviewed-sequence"
+            == "Finance Approver"
         )
         assert (
             invoice.metadata_["reviewed_prepaid_invoice_sequence_reconstruction"][

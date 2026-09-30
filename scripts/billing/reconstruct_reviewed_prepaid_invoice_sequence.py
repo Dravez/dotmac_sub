@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-"""Preview or apply one Finance-approved prepaid invoice-sequence repair.
+"""Preview or apply one named-approval prepaid invoice-sequence repair.
 
 The manifest contains only explicit identifiers, dates, amounts, ledger
-selections, and approval evidence. Preview is the default and is read-only.
+selections, and named Finance approver. Preview is the default and is
+read-only.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from app.services.prepaid_calendar_contracts import (
 from app.services.prepaid_draft_reconciliation import (
     REPAIR_SCOPE,
     ReconstructReviewedPrepaidInvoiceSequenceCommand,
-    ReviewedExistingDraftSettlementApproval,
+    ReviewedPrepaidInvoiceSequenceApproval,
     ReviewedPrepaidExistingAllocationEvidence,
     ReviewedPrepaidInvoiceSequenceAllocationSelection,
     ReviewedPrepaidInvoiceSequenceDocumentSelection,
@@ -196,15 +197,12 @@ def _manifest(path: Path) -> ReviewedPrepaidInvoiceSequenceQuery:
             data.get("expected_opening_funding_consumption", "0.00"),
             "expected_opening_funding_consumption",
         ),
-        approval=ReviewedExistingDraftSettlementApproval(
+        approval=ReviewedPrepaidInvoiceSequenceApproval(
             approver_system_user_id=_uuid(
                 approval.get("approver_system_user_id"),
                 "approval.approver_system_user_id",
             ),
             approver_name=str(approval.get("approver_name") or ""),
-            approved_at=_timestamp(approval.get("approved_at"), "approval.approved_at"),
-            ticket_reference=str(approval.get("ticket_reference") or ""),
-            evidence_sha256=str(approval.get("evidence_sha256") or ""),
         ),
     )
 
