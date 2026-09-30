@@ -15,7 +15,7 @@ from app.models.catalog import (
 )
 from app.models.network import OntAssignment, OntUnit
 from app.models.subscriber import Subscriber
-import app.services.customer_portal_flow_services as customer_portal_flow_services
+from app.services import customer_portal_flow_services
 from app.services.customer_device_commands import (
     CustomerDeviceCommandError,
     get_subscription_wifi_status,
@@ -557,7 +557,7 @@ def test_record_device_command_refusal_cannot_touch_a_sql_transaction():
         "session" in name.lower() or "db" in name.lower() for name in parameters
     )
 
-def test_service_detail_returns_not_found_when_health_projection_omits_subscription(
+def test_service_detail_returns_not_found_when_projection_omits_subscription(
     db_session, monkeypatch
 ):
     subscriber, subscription, _ont = _active_subscription_with_ont(db_session)
