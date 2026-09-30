@@ -73,7 +73,7 @@ def test_pause_and_resume_preserve_exact_unused_service_time(
     db_session.refresh(active_subscription)
     db_session.refresh(subscriber)
     assert active_subscription.status is SubscriptionStatus.paused
-    assert active_subscription.next_billing_at == original_anchor
+    assert _as_utc(active_subscription.next_billing_at) == original_anchor
     assert subscriber.status is SubscriberStatus.paused
 
     resume_context = _context(reason="linked ticket resolved")
