@@ -436,4 +436,3 @@ def test_native_work_order_events_use_uuid_and_preserve_public_identity(
     for payload in emitted:
         assert UUID(payload["work_order_id"]) == work_order.id
         assert payload["work_order_public_id"] == work_order.public_id
-
