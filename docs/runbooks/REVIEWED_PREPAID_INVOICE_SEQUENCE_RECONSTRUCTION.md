@@ -57,12 +57,14 @@ shape, preserving chronological document and allocation order:
   "approval": {
     "approver_system_user_id": "<uuid>",
     "approver_name": "<canonical active Finance approver name>",
-    "approved_at": "<ISO-8601 timestamp with offset>",
-    "ticket_reference": "<ticket>",
-    "evidence_sha256": "<64 lowercase hex characters>"
+    "ticket_reference": "<ticket>"
   }
 }
 ```
+
+The sequence owner records the named Finance approver and ticket reference as
+audit provenance. An approval timestamp or evidence digest may be included when
+available, but neither is required by this sequence-specific repair path.
 
 Every selected payment in a multi-document sequence must be fully distributed by
 `allocations`. A late-recorded, single-document repair may use only the amount
@@ -166,8 +168,8 @@ After an authorized apply, confirm:
 7. Post-boundary reusable credit and authoritative prepaid funding equal the
    manifest expectations.
 8. The customer financial position delta is exactly zero.
-9. Each invoice carries the same ticket, Finance approval, evidence digest,
-   fingerprint, command id, and idempotency metadata.
+9. Each invoice carries the same ticket, Finance approver, optional approval
+   evidence, fingerprint, command id, and idempotency metadata.
 10. One sequence audit record and one
    `prepaid_invoice_sequence.reconstructed` durable event exist.
 11. Repeating the same command returns `replayed: true` and creates no rows.

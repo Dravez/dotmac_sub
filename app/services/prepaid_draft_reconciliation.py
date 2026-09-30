@@ -895,6 +895,17 @@ class ReviewedPrepaidExistingAllocationEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewedPrepaidInvoiceSequenceApproval:
+    """Named approval reference for a reviewed sequence repair."""
+
+    approver_system_user_id: UUID
+    approver_name: str
+    ticket_reference: str
+    approved_at: datetime | None = None
+    evidence_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewedPrepaidInvoiceSequenceQuery:
     subscription_id: UUID
     documents: tuple[ReviewedPrepaidInvoiceSequenceDocumentSelection, ...]
@@ -904,7 +915,7 @@ class ReviewedPrepaidInvoiceSequenceQuery:
     expected_opening_credit: Decimal
     expected_post_repair_credit: Decimal
     expected_authoritative_prepaid_funding: Decimal
-    approval: ReviewedExistingDraftSettlementApproval
+    approval: ReviewedPrepaidInvoiceSequenceApproval
     expected_opening_funding_consumption: Decimal = Decimal("0.00")
     calendar: ReviewedPrepaidCalendarSelection = ReviewedPrepaidCalendarSelection()
 
@@ -7300,18 +7311,28 @@ def preview_reviewed_prepaid_invoice_sequence_reconstruction(
         if approver is not None
         else ""
     )
-    digest = approval.evidence_sha256.strip().lower()
+    digest = (approval.evidence_sha256 or "").strip().lower()
     if (
-        approval.approved_at.tzinfo is None
-        or _utc(approval.approved_at) > datetime.now(UTC)
-        or not approval.ticket_reference.strip()
+        not approval.ticket_reference.strip()
         or len(approval.ticket_reference.strip()) > 120
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
         or approver is None
         or not approver.is_active
         or canonical_approver_name.casefold()
         != approval.approver_name.strip().casefold()
+        or (
+            approval.approved_at is not None
+            and (
+                approval.approved_at.tzinfo is None
+                or _utc(approval.approved_at) > datetime.now(UTC)
+            )
+        )
+        or (
+            digest
+            and (
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            )
+        )
     ):
         return manual("Finance approval evidence is incomplete or inactive")
     if (
@@ -8410,9 +8431,17 @@ def reconstruct_reviewed_prepaid_invoice_sequence(
                 command.query.approval.approver_system_user_id
             ),
             "approver_name": command.query.approval.approver_name.strip(),
-            "approved_at": _utc(command.query.approval.approved_at).isoformat(),
+            "approved_at": (
+                _utc(command.query.approval.approved_at).isoformat()
+                if command.query.approval.approved_at is not None
+                else None
+            ),
             "ticket_reference": command.query.approval.ticket_reference.strip(),
-            "evidence_sha256": (command.query.approval.evidence_sha256.strip().lower()),
+            "evidence_sha256": (
+                command.query.approval.evidence_sha256.strip().lower()
+                if command.query.approval.evidence_sha256
+                else None
+            ),
             "preview_fingerprint": current.fingerprint,
             "query_fingerprint": _reviewed_sequence_query_fingerprint(command.query),
             "idempotency_key": key,
@@ -10713,6 +10742,7 @@ __all__ = [
     "ReviewedExistingDraftSettlementQuery",
     "ReviewedExistingDraftSettlementResult",
     "ReviewedPrepaidExistingAllocationEvidence",
+    "ReviewedPrepaidInvoiceSequenceApproval",
     "ReviewedPrepaidInvoiceSequenceAllocationSelection",
     "ReviewedPrepaidInvoiceSequenceDisposition",
     "ReviewedPrepaidInvoiceSequenceDocumentSelection",
