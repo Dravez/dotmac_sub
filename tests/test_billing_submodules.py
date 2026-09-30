@@ -1741,6 +1741,22 @@ class TestPaymentWithAllocations:
         invoice.status = InvoiceStatus.void
         db_session.flush()
         allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
         preview = billing_service.payment_allocations.preview_reviewed_reversal(
             db_session,
             PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id),
@@ -1786,6 +1802,22 @@ class TestPaymentWithAllocations:
             ),
         )
         allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
         with pytest.raises(HTTPException, match="void invoices"):
             billing_service.payment_allocations.preview_reviewed_reversal(
                 db_session,

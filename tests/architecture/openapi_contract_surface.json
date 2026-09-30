@@ -16962,6 +16962,16 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "POST /api/v1/payment-allocation-reversals/confirm": {
+   "params": [],
+   "request": null,
+   "responses": {}
+  },
+  "POST /api/v1/payment-allocation-reversals/preview": {
+   "params": [],
+   "request": null,
+   "responses": {}
+  },
   "POST /api/v1/payment-allocations": {
    "params": [
     "header:authorization",
@@ -20369,6 +20379,10 @@
   "PaymentAllocationPreviewRead": "378a3d01d4e2",
   "PaymentAllocationPreviewRequest": "a36f13eb689e",
   "PaymentAllocationRead": "e66bef702266",
+  "PaymentAllocationReversalConfirm": "000000000000",
+  "PaymentAllocationReversalPreviewRead": "000000000000",
+  "PaymentAllocationReversalPreviewRequest": "000000000000",
+  "PaymentAllocationReversalRead": "000000000000",
   "PaymentChannelAccountCreate": "2a5c5725785b",
   "PaymentChannelAccountRead": "278a859a05dd",
   "PaymentChannelAccountUpdate": "191f2e0e5d23",
