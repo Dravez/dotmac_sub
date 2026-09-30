@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services import automation_capabilities
-from app.services.sot_registry.registry import find_service
+from app.services.sot_registry.registry import service_relationship
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,7 +23,7 @@ def test_automation_pause_action_delegates_to_registered_coordinator() -> None:
     capability = automation_capabilities.action_capability(
         "support.ticket.pause_unique_active_service"
     )
-    owner = find_service("support.ticket_sla_service_consequence")
+    owner = service_relationship("support.ticket_sla_service_consequence")
 
     assert capability is not None
     assert capability.command_owner == owner.name

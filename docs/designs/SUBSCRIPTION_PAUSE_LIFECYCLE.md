@@ -29,7 +29,8 @@ cause and is not used by this Automation action.
 causes, account projection, the typed prepaid pause-compensation entitlement,
 billing-anchor adjustment, lifecycle evidence, and events.
 `support.ticket_sla_service_consequence` owns revalidating Ticket/SLA evidence
-and coordinating the SLA cause. Automation adapters, routes, event handlers,
+and coordinating the SLA cause, including typed resume eligibility previews.
+Automation adapters, routes, event handlers,
 and templates do not write lifecycle or billing state.
 
 One episode represents `[effective_at, resumed_at)`. Multiple typed causes may

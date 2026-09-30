@@ -90,6 +90,7 @@ DEFAULT_PERMISSIONS = [
     ("system:write", "Manage system administration resources"),
     ("notification:read", "View notification templates, queue, and history"),
     ("notification:write", "Manage notification templates and delivery"),
+    ("support:ticket_service_pause:resume", "Resume a ticket-linked service pause"),
     (
         "communications:customer:send",
         "Send customer notifications to selected customer scopes",

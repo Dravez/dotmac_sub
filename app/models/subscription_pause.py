@@ -192,7 +192,7 @@ class SubscriptionPauseCause(Base):
     )
     ticket_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tickets.id", ondelete="RESTRICT"),
+        ForeignKey("support_tickets.id", ondelete="RESTRICT"),
         index=True,
     )
     sla_clock_id: Mapped[uuid.UUID | None] = mapped_column(

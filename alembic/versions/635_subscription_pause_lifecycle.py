@@ -1,7 +1,7 @@
 """Add first-class subscription and account pause lifecycle evidence.
 
-Revision ID: 633_subscription_pause_lifecycle
-Revises: 632_reviewed_payment_allocation_reversal
+Revision ID: 635_subscription_pause_lifecycle
+Revises: 634_notification_template_purpose
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "633_subscription_pause_lifecycle"
-down_revision: str | None = "632_reviewed_payment_allocation_reversal"
+revision: str = "635_subscription_pause_lifecycle"
+down_revision: str | None = "634_notification_template_purpose"
 branch_labels = None
 depends_on = None
 
@@ -203,7 +203,9 @@ def upgrade() -> None:
             ["subscription_pause_episodes.id"],
             ondelete="CASCADE",
         ),
-        sa.ForeignKeyConstraint(["ticket_id"], ["tickets.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["ticket_id"], ["support_tickets.id"], ondelete="RESTRICT"
+        ),
         sa.ForeignKeyConstraint(
             ["sla_breach_id"], ["sla_breaches.id"], ondelete="RESTRICT"
         ),

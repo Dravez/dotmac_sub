@@ -728,37 +728,17 @@ def subscription_detail_page_context(
     }
     context.update(core.subscription_detail_context(db, subscription))
     if subscription.status == SubscriptionStatus.paused:
-        from app.models.subscription_pause import (
-            SubscriptionPauseCause,
-            SubscriptionPauseCauseStatus,
-            SubscriptionPauseEpisode,
-            SubscriptionPauseEpisodeStatus,
-        )
         from app.services.ticket_sla_service_automation import (
-            preview_ticket_service_resume,
+            TicketServicePauseResumePreviewQuery,
+            preview_ticket_service_resume_for_subscription,
         )
 
-        active_cause_id = db.scalar(
-            select(SubscriptionPauseCause.id)
-            .join(
-                SubscriptionPauseEpisode,
-                SubscriptionPauseEpisode.id == SubscriptionPauseCause.pause_episode_id,
+        context["ticket_pause_resume_preview"] = (
+            preview_ticket_service_resume_for_subscription(
+                db,
+                TicketServicePauseResumePreviewQuery(subscription_id=subscription.id),
             )
-            .where(
-                SubscriptionPauseEpisode.subscription_id == subscription.id,
-                SubscriptionPauseEpisode.status
-                == SubscriptionPauseEpisodeStatus.active.value,
-                SubscriptionPauseCause.status
-                == SubscriptionPauseCauseStatus.active.value,
-                SubscriptionPauseCause.ticket_id.is_not(None),
-            )
-            .order_by(SubscriptionPauseCause.created_at.asc())
-            .limit(1)
         )
-        if active_cause_id is not None:
-            context["ticket_pause_resume_preview"] = preview_ticket_service_resume(
-                db, cause_id=active_cause_id
-            )
     if (
         subscription.status == SubscriptionStatus.suspended
         and subscription.billing_mode.value == "prepaid"

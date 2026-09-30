@@ -18,7 +18,9 @@ from app.models.event_store import EventStore
 from app.models.subscription_pause import (
     SubscriptionPauseBillingPolicy,
     SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
     SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
     SubscriptionPauseReason,
     SubscriptionPauseResumePolicy,
     SubscriptionPauseSource,
@@ -130,6 +132,12 @@ class TicketServicePauseResumePreview:
         hours, remainder = divmod(remainder, 3_600)
         minutes, seconds = divmod(remainder, 60)
         return f"{days}d {hours}h {minutes}m {seconds}s"
+
+
+@dataclass(frozen=True, slots=True)
+class TicketServicePauseResumePreviewQuery:
+    subscription_id: UUID
+    proposed_resumed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,6 +493,37 @@ def preview_ticket_service_resume(
     )
 
 
+def preview_ticket_service_resume_for_subscription(
+    db: Session,
+    query: TicketServicePauseResumePreviewQuery,
+) -> TicketServicePauseResumePreview | None:
+    """Resolve the active ticket pause and preview resume eligibility."""
+
+    cause_id = db.scalar(
+        select(SubscriptionPauseCause.id)
+        .join(
+            SubscriptionPauseEpisode,
+            SubscriptionPauseEpisode.id == SubscriptionPauseCause.pause_episode_id,
+        )
+        .where(
+            SubscriptionPauseEpisode.subscription_id == query.subscription_id,
+            SubscriptionPauseEpisode.status
+            == SubscriptionPauseEpisodeStatus.active.value,
+            SubscriptionPauseCause.status == SubscriptionPauseCauseStatus.active.value,
+            SubscriptionPauseCause.ticket_id.is_not(None),
+        )
+        .order_by(SubscriptionPauseCause.created_at.asc())
+        .limit(1)
+    )
+    if cause_id is None:
+        return None
+    return preview_ticket_service_resume(
+        db,
+        cause_id=cause_id,
+        proposed_resumed_at=query.proposed_resumed_at,
+    )
+
+
 def resume_ticket_paused_service(
     db: Session,
     command: ResumeTicketPausedServiceCommand,
@@ -755,12 +794,14 @@ __all__ = [
     "ResumeTicketPausedServiceCommand",
     "ResumeTicketPausedServiceOutcome",
     "TicketServicePauseResumePreview",
+    "TicketServicePauseResumePreviewQuery",
     "TicketSlaServiceSelectionPolicy",
     "SuspendTicketServiceForSlaBreachCommand",
     "SuspendTicketServiceForSlaBreachOutcome",
     "TicketSlaServiceAutomationError",
     "pause_unique_active_service_for_ticket_sla_breach",
     "preview_ticket_service_resume",
+    "preview_ticket_service_resume_for_subscription",
     "resume_ticket_paused_service",
     "suspend_unique_active_service_for_ticket_sla_breach",
 ]

@@ -1278,6 +1278,7 @@ DOMAIN = DomainSOT(
             owns=(
                 "ticket SLA-breach service suspension consequence",
                 "ticket resolution SLA-breach service pause consequence",
+                "ticket pause resume eligibility preview",
             ),
             depends_on=(
                 "support.ticket_lifecycle",
@@ -1304,6 +1305,14 @@ DOMAIN = DomainSOT(
                             "durable automation action identity",
                         ),
                     ),
+                    ConcernContract(
+                        name="ticket pause resume eligibility preview",
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "canonical ticket lifecycle state",
+                            "active ticket service pause evidence",
+                        ),
+                    ),
                 ),
                 authoritative_inputs=(
                     AuthorityInput(
@@ -1322,6 +1331,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "Locked Subscription rows and active EnforcementLock "
                             "rows for the linked customer account"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="active ticket service pause evidence",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "active SubscriptionPauseCause and SubscriptionPauseEpisode "
+                            "rows for the requested subscription"
                         ),
                     ),
                     AuthorityInput(

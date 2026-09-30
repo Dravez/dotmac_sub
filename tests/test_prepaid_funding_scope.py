@@ -18,7 +18,7 @@ SECOND = UUID("22222222-2222-2222-2222-222222222222")
 
 def test_reviewed_scope_loads_unique_uuid_lines_and_ignores_comments():
     scope = Path("accounts.txt")
-    contents = "# ticket 29012\n" f"{FIRST}\n" "\n" f"{SECOND} # reviewed\n"
+    contents = f"# ticket 29012\n{FIRST}\n\n{SECOND} # reviewed\n"
 
     with patch.object(Path, "read_text", return_value=contents):
         assert load_reviewed_account_ids(scope) == {FIRST, SECOND}
