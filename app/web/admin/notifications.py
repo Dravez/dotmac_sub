@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models.notification import NotificationTemplatePurpose
 from app.services import staff_notification_read_state
 from app.services import web_admin_notifications as web_admin_notifications_service
 from app.services import (
@@ -271,6 +272,7 @@ def notification_template_create(
     channel: str = Form(...),
     subject: str | None = Form(None),
     body: str = Form(...),
+    purpose: NotificationTemplatePurpose | None = Form(None),
     conditions_json: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -283,6 +285,7 @@ def notification_template_create(
             channel=channel,
             subject=subject,
             body=body,
+            purpose=purpose,
             conditions_json=conditions_json,
         )
         return RedirectResponse(
@@ -356,6 +359,7 @@ def notification_template_update(
     channel: str = Form(...),
     subject: str | None = Form(None),
     body: str = Form(...),
+    purpose: NotificationTemplatePurpose | None = Form(None),
     conditions_json: str | None = Form(None),
     is_active: str | None = Form(None),
     db: Session = Depends(get_db),
@@ -370,6 +374,7 @@ def notification_template_update(
             channel=channel,
             subject=subject,
             body=body,
+            purpose=purpose,
             is_active=is_active is not None,
             conditions_json=conditions_json,
         )
