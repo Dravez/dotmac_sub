@@ -1,4 +1,4 @@
-"""Materialize a reviewed full-cohort prepaid funding reconstruction.
+"""Materialize a reviewed prepaid funding reconstruction.
 
 The input is the Ed25519-sealed JSON emitted by
 ``export_prepaid_funding_snapshot``. The signature is verified against the
@@ -7,9 +7,11 @@ the default. Apply requires the independently reviewed normalized manifest
 hash, a non-secret evidence reference, an approving actor, and an explicit
 acknowledgement that the authority cutover is final.
 
-This command stores account IDs, currency, balances, hashes, timestamps, and a
-non-secret evidence pointer. It never stores bank-statement rows, credentials,
-customer identity text, or narrations.
+The default is the full current prepaid candidate cohort. A separately supplied
+and explicitly confirmed reviewed account-ID file may narrow the operation to a
+bounded candidate subset. This command stores account IDs, currency, balances,
+hashes, timestamps, and a non-secret evidence pointer. It never stores
+bank-statement rows, credentials, customer identity text, or narrations.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from app.services.prepaid_funding_reconstruction import (
     apply_prepaid_funding_reconstruction,
     preview_prepaid_funding_reconstruction,
 )
+from scripts.one_off.prepaid_funding_scope import resolve_reviewed_account_scope
 
 FINAL_CUTOVER_CONFIRMATION = "MATERIALIZE_VERIFIED_PREPAID_FUNDING"
 
@@ -41,6 +44,15 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--reviewed-account-ids-file",
+        type=Path,
+        help="newline-delimited reviewed account UUIDs for a bounded scope",
+    )
+    parser.add_argument(
+        "--confirm-reviewed-scope",
+        help="required acknowledgement when a bounded reviewed scope is supplied",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--reviewed-sha256")
     parser.add_argument("--evidence-ref")
@@ -67,7 +79,11 @@ def main() -> int:
     payload = _load_manifest(args.manifest)
     db = SessionLocal()
     try:
-        expected_ids = set(candidate_prepaid_funding_account_ids(db))
+        expected_ids = resolve_reviewed_account_scope(
+            args.reviewed_account_ids_file,
+            allowed_account_ids=set(candidate_prepaid_funding_account_ids(db)),
+            confirmation=args.confirm_reviewed_scope,
+        )
         preview = preview_prepaid_funding_reconstruction(
             db,
             payload,

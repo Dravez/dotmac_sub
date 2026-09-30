@@ -154,7 +154,10 @@ def test_materializer_owner_requires_a_config_trusted_clean_replay_seal() -> Non
     assert "expected_candidate_hash = candidate_cohort_sha256" in owner
     assert "resolve_opening_balance_history_targets" in exporter
     assert "classify_opening_balance_source_identities" in exporter
-    assert "--allow-quarantined-subset" not in exporter
+    assert "--reviewed-account-ids-file" in exporter
+    assert "--reviewed-account-ids-file" in materializer
+    scope = _read("scripts/one_off/prepaid_funding_scope.py")
+    assert "MATERIALIZE_REVIEWED_PREPAID_SCOPE" in scope
     assert "source_cohort_incomplete" in _read(
         "app/services/billing/opening_balance_history.py"
     )
@@ -302,10 +305,11 @@ def test_audit_restore_runbook_documents_complete_history_completion() -> None:
     runbook = _read("docs/runbooks/PREPAID_FUNDING_AUDIT_RESTORE.md")
 
     assert "complete empty transaction set is zero" in runbook
-    assert "There is no partial-subset option" in runbook
+    assert "MATERIALIZE_REVIEWED_PREPAID_SCOPE" in runbook
+    assert "exact-scope" in runbook
     assert "BILLING_AUDIT_EPHEMERAL" in runbook
     assert "_audit" in runbook
     # The two constraints that most often derail a first attempt.
-    assert "cohort-complete" in runbook
+    assert "full-cohort" in runbook
     assert "reconstruction_position_not_newer" in runbook
     assert "Do not leave the audit stack running" in runbook
