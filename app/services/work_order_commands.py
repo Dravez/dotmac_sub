@@ -185,7 +185,8 @@ def _emit_work_order_created_event(
         {
             "name": "work_order.created",
             "tenant_id": str(OPERATOR_TENANT_ID),
-            "work_order_id": work_order.public_id,
+            "work_order_id": str(work_order.id),
+            "work_order_public_id": work_order.public_id,
             "project_id": str(work_order.project_id)
             if work_order.project_id is not None
             else None,
@@ -212,7 +213,8 @@ def _emit_work_order_updated_event(
         {
             "name": "work_order.updated",
             "tenant_id": str(OPERATOR_TENANT_ID),
-            "work_order_id": work_order.public_id,
+            "work_order_id": str(work_order.id),
+            "work_order_public_id": work_order.public_id,
             "project_id": str(work_order.project_id)
             if work_order.project_id is not None
             else None,

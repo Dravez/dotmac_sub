@@ -44,6 +44,10 @@ Work orders need **re-keying, not migrating**.
   NULL, human-safe). Existing rows backfill `public_id` from
   `crm_work_order_id`; new native rows receive `sub-<uuid>` (later: the
   numbering service, as `support_tickets.number` and `projects` already do).
+- Automation event identity is explicit: the typed `work_order_id` target is the
+  internal UUID primary key; `work_order_public_id` carries the human-safe
+  business identity. Public routes and audit identities continue to use
+  `public_id`.
 - `crm_work_order_id` becomes a nullable unique provenance reference on
   `work_order` **only** — NULL for natively created rows, populated only by
   CRM import/webhook ingest. It is never a join key and never appears on child
