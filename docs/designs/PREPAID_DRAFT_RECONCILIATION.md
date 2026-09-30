@@ -623,7 +623,7 @@ Preview requires all of these invariants:
   the same opening value;
 - selected post-opening payments equal both their planned allocations and the
   native post-boundary account credit;
-- settlement, refund/reversal, overlap, approver, ticket, evidence digest,
+- settlement, refund/reversal, overlap, named approver, ticket reference,
   operator permission, and billing-anchor evidence remain exact.
 
 Confirmation reconciles missing settlement structure without posting money,
