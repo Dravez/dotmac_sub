@@ -557,6 +557,7 @@ def test_record_device_command_refusal_cannot_touch_a_sql_transaction():
         "session" in name.lower() or "db" in name.lower() for name in parameters
     )
 
+
 def test_service_detail_returns_not_found_when_projection_omits_subscription(
     db_session, monkeypatch
 ):
