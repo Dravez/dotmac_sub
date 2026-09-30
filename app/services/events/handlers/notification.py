@@ -169,6 +169,16 @@ EVENT_NOTIFICATION_SPECS: dict[EventType, EventNotificationSpec] = {
             "Please make payment or contact support to restore service."
         ),
     ),
+    EventType.subscription_paused: EventNotificationSpec(
+        template_code="subscription_paused",
+        category="service",
+        subject="Your service has been paused",
+        body=(
+            "Dear {subscriber_name},\n\n"
+            "Your {offer_name} subscription has been paused while support resolves "
+            "the linked issue. Billing is paused for the same interval."
+        ),
+    ),
     EventType.subscription_resumed: EventNotificationSpec(
         template_code="subscription_resumed",
         category="service",
@@ -176,6 +186,16 @@ EVENT_NOTIFICATION_SPECS: dict[EventType, EventNotificationSpec] = {
         body=(
             "Dear {subscriber_name},\n\n"
             "Your {offer_name} subscription has been resumed successfully."
+        ),
+    ),
+    EventType.subscription_pause_resumed: EventNotificationSpec(
+        template_code="subscription_pause_resumed",
+        category="service",
+        subject="Your paused service has resumed",
+        body=(
+            "Dear {subscriber_name},\n\n"
+            "Your {offer_name} subscription has resumed and the paused service "
+            "period has been added to your billing date."
         ),
     ),
     EventType.subscription_canceled: EventNotificationSpec(

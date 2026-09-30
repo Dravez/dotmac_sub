@@ -312,6 +312,7 @@ class FailedEnforcementRow:
 #: Statuses whose intended access is blocked (the enforcement handler blocks on
 #: suspended, disabled and expired events; blocked is the explicit state).
 _BLOCKED_INTENT_STATUSES = (
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
     SubscriptionStatus.blocked,
     SubscriptionStatus.disabled,

@@ -349,6 +349,7 @@ def _radreply_attrs(
     # a hard reject in radcheck instead, so they never reach this radreply.
     is_blocked = subscriber_blocked or sub.status in (
         SubscriptionStatus.blocked,
+        SubscriptionStatus.paused,
         SubscriptionStatus.suspended,
     )
     if is_blocked and captive_redirect_enabled:

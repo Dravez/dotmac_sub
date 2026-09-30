@@ -663,8 +663,9 @@ def _subscription_name_expression(model: type) -> Any:
     status_rank = case(
         (Subscription.status == SubscriptionStatus.active, 0),
         (Subscription.status == SubscriptionStatus.pending, 1),
-        (Subscription.status == SubscriptionStatus.suspended, 2),
-        else_=3,
+        (Subscription.status == SubscriptionStatus.paused, 2),
+        (Subscription.status == SubscriptionStatus.suspended, 3),
+        else_=4,
     )
     return (
         select(CatalogOffer.name)
@@ -676,6 +677,7 @@ def _subscription_name_expression(model: type) -> Any:
                 (
                     SubscriptionStatus.active,
                     SubscriptionStatus.pending,
+                    SubscriptionStatus.paused,
                     SubscriptionStatus.suspended,
                 )
             )

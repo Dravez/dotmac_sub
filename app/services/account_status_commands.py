@@ -242,6 +242,11 @@ def _preview(
             for status in projected_subscription_statuses
         ):
             projected_status = SubscriberStatus.blocked
+        elif any(
+            status == SubscriptionStatus.paused
+            for status in projected_subscription_statuses
+        ):
+            projected_status = SubscriberStatus.paused
         elif projected_subscription_statuses and all(
             status == SubscriptionStatus.disabled
             for status in projected_subscription_statuses
@@ -309,6 +314,11 @@ def _preview(
             for status in activation_projected_statuses
         ):
             projected_status = SubscriberStatus.blocked
+        elif any(
+            status == SubscriptionStatus.paused
+            for status in activation_projected_statuses
+        ):
+            projected_status = SubscriberStatus.paused
         elif all(
             status == SubscriptionStatus.disabled
             for status in activation_projected_statuses

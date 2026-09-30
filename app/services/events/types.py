@@ -56,9 +56,11 @@ class EventType(enum.Enum):
     subscriber_throttled = "subscriber.throttled"
     subscriber_unthrottled = "subscriber.unthrottled"
 
-    # Subscription events (8)
+    # Subscription events
     subscription_created = "subscription.created"
     subscription_activated = "subscription.activated"
+    subscription_paused = "subscription.paused"
+    subscription_pause_resumed = "subscription.pause_resumed"
     subscription_suspended = "subscription.suspended"
     subscription_resumed = "subscription.resumed"
     subscription_disabled = "subscription.disabled"
@@ -569,6 +571,8 @@ class AccountCreditApplicationState(str, enum.Enum):
 # Mapping from EventType to LifecycleEventType for subscription events
 SUBSCRIPTION_LIFECYCLE_MAP = {
     EventType.subscription_activated: "activate",
+    EventType.subscription_paused: "pause",
+    EventType.subscription_pause_resumed: "resume",
     EventType.subscription_suspended: "suspend",
     EventType.subscription_resumed: "resume",
     EventType.subscription_disabled: "other",

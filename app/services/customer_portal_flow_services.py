@@ -75,6 +75,7 @@ _PORTAL_VISIBLE_SERVICE_STATUSES = [
     SubscriptionStatus.active,
     SubscriptionStatus.blocked,
     SubscriptionStatus.suspended,
+    SubscriptionStatus.paused,
     SubscriptionStatus.stopped,
     SubscriptionStatus.disabled,
     SubscriptionStatus.canceled,
@@ -86,6 +87,7 @@ _PORTAL_RESTRICTED_SERVICE_STATUSES = frozenset(
     {
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
     }
@@ -1300,7 +1302,9 @@ def _latest_restricted_service_dates(
         select(SubscriptionLifecycleEvent)
         .where(
             SubscriptionLifecycleEvent.subscription_id.in_(restricted_ids),
-            SubscriptionLifecycleEvent.event_type == LifecycleEventType.suspend,
+            SubscriptionLifecycleEvent.event_type.in_(
+                (LifecycleEventType.suspend, LifecycleEventType.pause)
+            ),
             SubscriptionLifecycleEvent.to_status.in_(
                 tuple(_PORTAL_RESTRICTED_SERVICE_STATUSES)
             ),
@@ -1353,6 +1357,7 @@ def _service_date_projection(
 
     if subscription.status in _PORTAL_RESTRICTED_SERVICE_STATUSES:
         paused = subscription.status in {
+            SubscriptionStatus.paused,
             SubscriptionStatus.stopped,
             SubscriptionStatus.disabled,
         }

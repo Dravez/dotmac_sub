@@ -226,6 +226,7 @@ def resolve_subscription_restriction(
         requested = AccessRestrictionMode.captive
     elif subscription.status in {
         SubscriptionStatus.blocked,
+        SubscriptionStatus.paused,
         SubscriptionStatus.suspended,
         SubscriptionStatus.stopped,
     }:

@@ -1275,7 +1275,10 @@ DOMAIN = DomainSOT(
         SOTService(
             name="support.ticket_sla_service_consequence",
             module="app.services.ticket_sla_service_automation",
-            owns=("ticket SLA-breach service suspension consequence",),
+            owns=(
+                "ticket SLA-breach service suspension consequence",
+                "ticket resolution SLA-breach service pause consequence",
+            ),
             depends_on=(
                 "support.ticket_lifecycle",
                 "access.subscription_lifecycle",
@@ -1285,6 +1288,15 @@ DOMAIN = DomainSOT(
                 concerns=(
                     ConcernContract(
                         name="ticket SLA-breach service suspension consequence",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "canonical support ticket customer link",
+                            "canonical subscription lifecycle state",
+                            "durable automation action identity",
+                        ),
+                    ),
+                    ConcernContract(
+                        name="ticket resolution SLA-breach service pause consequence",
                         role=OwnerRole.APPLICATION_COORDINATOR,
                         input_names=(
                             "canonical support ticket customer link",
@@ -1326,8 +1338,9 @@ DOMAIN = DomainSOT(
                     mode=TransactionMode.COORDINATOR_MANAGED,
                     boundary=(
                         "One owner command locks the Ticket and candidate services, "
-                        "then delegates the suspension and enforcement-lock writes "
-                        "to access.subscription_lifecycle as a flush-only participant."
+                        "then delegates suspension or pause episode, lifecycle, and "
+                        "billing-anchor writes to access.subscription_lifecycle as "
+                        "flush-only participants."
                     ),
                     locking=(
                         "The Ticket, exact prior automation lock, and active service "
@@ -1347,6 +1360,10 @@ DOMAIN = DomainSOT(
                         "support.ticket_sla_service_consequence.ticket_not_found",
                         (
                             "support.ticket_sla_service_consequence."
+                            "ticket_already_resolved"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
                             "customer_account_missing"
                         ),
                         (
@@ -1357,6 +1374,28 @@ DOMAIN = DomainSOT(
                             "support.ticket_sla_service_consequence."
                             "active_service_ambiguous"
                         ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "sla_breach_not_authoritative"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_cause_not_found"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_evidence_incomplete"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_subscription_mismatch"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "resume_reason_required"
+                        ),
+                        ("support.ticket_sla_service_consequence.stale_resume_preview"),
+                        ("support.ticket_sla_service_consequence.resume_ineligible"),
                         ("support.ticket_sla_service_consequence.idempotency_conflict"),
                         *owner_command_boundary_error_codes(
                             "support.ticket_sla_service_consequence"
@@ -1371,6 +1410,8 @@ DOMAIN = DomainSOT(
                 ),
                 events=EventContract(
                     event_types=(
+                        "subscription.paused",
+                        "subscription.pause_resumed",
                         "subscription.suspended",
                         "enforcement_lock.created",
                     ),
@@ -1403,6 +1444,7 @@ DOMAIN = DomainSOT(
                 design_refs=(
                     "docs/designs/AUTOMATION_CENTER_SOT.md",
                     "docs/designs/SUPPORT_TICKET_LIFECYCLE_SOT.md",
+                    "docs/designs/SUBSCRIPTION_PAUSE_LIFECYCLE.md",
                     "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
                     "docs/SOT_RELATIONSHIP_MAP.md",
                 ),
@@ -2272,6 +2314,42 @@ DOMAIN = DomainSOT(
                 runtime_enabled=True,
             ),
             AutomationActionCapability(
+                key="support.ticket.pause_unique_active_service",
+                label=(
+                    "Pause the linked customer's active service and preserve "
+                    "unused service time"
+                ),
+                entity_type="support.ticket",
+                command_owner="support.ticket_sla_service_consequence",
+                command_name=("pause_unique_active_service_for_ticket_sla_breach"),
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="service_selection_policy",
+                        label="Service selection policy",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("unique_active_subscription",),
+                    ),
+                    AutomationActionInput(
+                        key="resume_policy",
+                        label="Resume policy",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("manual_after_ticket_resolution",),
+                    ),
+                    AutomationActionInput(
+                        key="billing_policy",
+                        label="Billing treatment",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("extend_by_effective_pause_duration",),
+                    ),
+                ),
+                author_permission="subscription:pause",
+                runtime_scope="subscription:pause",
+                idempotency="event, rule version, step, and pause-cause source",
+                conflict_scope="support.ticket.sla_service_access_consequence",
+                runtime_enabled=True,
+            ),
+            AutomationActionCapability(
                 key="support.ticket.suspend_unique_active_service",
                 label=(
                     "Suspend the linked customer's only active service "
@@ -2285,6 +2363,7 @@ DOMAIN = DomainSOT(
                 author_permission="subscription:suspend",
                 runtime_scope="subscription:suspend",
                 idempotency="event, rule version, step, and enforcement-lock source",
+                conflict_scope="support.ticket.sla_service_access_consequence",
                 runtime_enabled=True,
             ),
         ),

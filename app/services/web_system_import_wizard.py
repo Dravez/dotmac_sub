@@ -17,7 +17,7 @@ from typing import Any
 from uuid import UUID
 from xml.etree import ElementTree as ET  # nosec
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
 from app.models.billing import Invoice, InvoiceStatus, Payment, PaymentStatus
@@ -61,6 +61,15 @@ class SubscriberImportRow(BaseModel):
     status: SubscriberStatus = SubscriberStatus.active
     is_active: bool = True
 
+    @field_validator("status")
+    @classmethod
+    def _reject_derived_pause(cls, value: SubscriberStatus) -> SubscriberStatus:
+        if value is SubscriberStatus.paused:
+            raise ValueError(
+                "Paused account status must be derived from a pause episode"
+            )
+        return value
+
 
 class SubscriptionImportRow(BaseModel):
     subscriber_id: uuid.UUID
@@ -72,6 +81,13 @@ class SubscriptionImportRow(BaseModel):
     next_billing_at: datetime | None = None
     canceled_at: datetime | None = None
     cancel_reason: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _reject_owner_only_pause(cls, value: SubscriptionStatus) -> SubscriptionStatus:
+        if value is SubscriptionStatus.paused:
+            raise ValueError("Paused status requires an authoritative pause episode")
+        return value
 
 
 class InvoiceImportRow(BaseModel):

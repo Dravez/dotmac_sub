@@ -745,6 +745,7 @@ class BandwidthSamples(ListResponseMixin):
             SubscriptionStatus.active,
             SubscriptionStatus.pending,
             SubscriptionStatus.blocked,
+            SubscriptionStatus.paused,
             SubscriptionStatus.suspended,
             SubscriptionStatus.stopped,
             SubscriptionStatus.disabled,
