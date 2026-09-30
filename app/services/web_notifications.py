@@ -17,6 +17,7 @@ from app.models.notification import (
     DeliveryStatus,
     NotificationChannel,
     NotificationStatus,
+    NotificationTemplatePurpose,
 )
 from app.schemas.notification import (
     NotificationTemplateCreate,
@@ -284,6 +285,10 @@ def template_form_context(
     is_edit = template_id is not None
     context: dict[str, object] = {
         "channels": channels(),
+        "purposes": tuple(
+            (purpose.value, purpose.value.replace("_", " ").title())
+            for purpose in NotificationTemplatePurpose
+        ),
         "action_url": f"/admin/notifications/templates/{template_id}"
         if is_edit
         else "/admin/notifications/templates",
@@ -314,6 +319,7 @@ def create_template(
     channel: str,
     subject: str | None,
     body: str,
+    purpose: NotificationTemplatePurpose | None = None,
     conditions_json: str | None = None,
 ):
     normalized_code = _normalize_template_code(code)
@@ -323,6 +329,7 @@ def create_template(
         name=name.strip(),
         code=normalized_code,
         channel=NotificationChannel(channel),
+        purpose=purpose or NotificationTemplatePurpose.general,
         subject=subject.strip() if subject else None,
         body=body.strip(),
         conditions=conditions,
@@ -340,6 +347,7 @@ def update_template(
     subject: str | None,
     body: str,
     is_active: bool,
+    purpose: NotificationTemplatePurpose | None = None,
     conditions_json: str | None = None,
 ):
     normalized_code = _normalize_template_code(code)
@@ -349,6 +357,7 @@ def update_template(
         name=name.strip(),
         code=normalized_code,
         channel=NotificationChannel(channel),
+        **({"purpose": purpose} if purpose is not None else {}),
         subject=subject.strip() if subject else None,
         body=body.strip(),
         conditions=conditions,
@@ -612,6 +621,7 @@ def _build_bulk_notification_setup_context(
                 "language": language,
                 "label": f"{template.name} ({language})" if language else template.name,
                 "channel": template.channel.value,
+                "purpose": template.purpose.value,
                 "subject": template.subject or "",
                 "is_active": bool(template.is_active),
                 "is_registry_template": bool(provider_template),

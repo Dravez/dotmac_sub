@@ -15,7 +15,9 @@ from app.models.catalog import (
 from app.models.notification import (
     Notification,
     NotificationChannel,
+    NotificationStatus,
     NotificationTemplate,
+    NotificationTemplatePurpose,
 )
 from app.models.subscriber import Subscriber, SubscriberStatus, UserType
 from app.models.support import Ticket
@@ -742,6 +744,82 @@ def test_queue_bulk_message_preview_reports_disabled_customers_as_suppressed(
                 "mode": "selected",
                 "ids": [str(customer.id)],
             },
+            "channel": "email",
+            "template_id": str(template.id),
+            "preview_only": True,
+        },
+    )
+
+    assert result["queued_count"] == 0
+    assert result["suppressed_count"] == 1
+    assert result["suppressed"][0]["reason_code"] == "account_status"
+    assert db_session.query(Notification).count() == 0
+
+
+def test_queue_bulk_account_purpose_allows_suspended_customer(db_session):
+    customer = Subscriber(
+        first_name="Profile",
+        last_name="Reminder",
+        email="profile-reminder@example.com",
+        user_type=UserType.customer,
+        status=SubscriberStatus.suspended,
+    )
+    template = NotificationTemplate(
+        name="Profile reminder",
+        code="update_customer_details",
+        channel=NotificationChannel.email,
+        purpose=NotificationTemplatePurpose.account,
+        subject="Update your profile",
+        body="Hello {customer_name}",
+        is_active=True,
+    )
+    db_session.add_all([customer, template])
+    db_session.commit()
+
+    result = web_customer_actions.queue_bulk_message_from_payload(
+        db_session,
+        _previewed_message_payload(
+            db_session,
+            customer_ids=(str(customer.id),),
+            channel="email",
+            template_id=str(template.id),
+        ),
+    )
+
+    assert result["queued_count"] == 1
+    assert result["suppressed_count"] == 0
+    notification = db_session.get(Notification, result["notification_ids"][0])
+    assert notification is not None
+    assert notification.status is NotificationStatus.queued
+    assert notification.category == "account"
+
+
+def test_queue_bulk_general_purpose_remains_suppressed_for_suspended_customer(
+    db_session,
+):
+    customer = Subscriber(
+        first_name="General",
+        last_name="Reminder",
+        email="general-reminder@example.com",
+        user_type=UserType.customer,
+        status=SubscriberStatus.suspended,
+    )
+    template = NotificationTemplate(
+        name="General message",
+        code="general_message",
+        channel=NotificationChannel.email,
+        purpose=NotificationTemplatePurpose.general,
+        subject="An update",
+        body="Hello {customer_name}",
+        is_active=True,
+    )
+    db_session.add_all([customer, template])
+    db_session.commit()
+
+    result = web_customer_actions.queue_bulk_message_from_payload(
+        db_session,
+        {
+            "selection": {"mode": "selected", "ids": [str(customer.id)]},
             "channel": "email",
             "template_id": str(template.id),
             "preview_only": True,

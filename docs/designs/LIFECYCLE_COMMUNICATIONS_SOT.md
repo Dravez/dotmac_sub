@@ -19,6 +19,7 @@ Projection order is account override, active service (including collections stat
   ledger and the single address/channel eligibility decision. Intent expansion
   consumes that owner; it does not maintain a second suppression model.
 - `notifications` is the delivery outbox. Every customer-facing notification points to an intent and identifies its expanded audience.
+- Notification templates persist a typed purpose for manual customer-page sends. That purpose selects the category evaluated by account-status policy; automated event categories remain owned by their event specifications.
 - `notification_deliveries` and `notifications.status` own provider outcomes.
 - `inbox_messages` and `campaign_recipients` are projections linked by `notification_id`; they do not invoke providers.
 - `app.tasks.notifications` is the customer transport consumer. Operational escalation retains its separate durable delivery queue.
