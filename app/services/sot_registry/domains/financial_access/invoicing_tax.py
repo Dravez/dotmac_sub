@@ -222,6 +222,7 @@ SERVICES: tuple[SOTService, ...] = (
             "cash-first verified provider settlement evidence",
             "settlement-aware customer receipt application summary",
             "payment allocation reconciliation exception lifecycle",
+            "reviewed payment-allocation reversal",
             "payment refund eligibility and preview",
             "payment refund confirmation and exact ledger evidence",
             "payment refund idempotency and audit evidence",

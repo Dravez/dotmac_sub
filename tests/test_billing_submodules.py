@@ -48,6 +48,8 @@ from app.schemas.billing import (
     LedgerEntryCreate,
     LedgerEntryUpdate,
     PaymentAllocationApply,
+    PaymentAllocationReversalConfirm,
+    PaymentAllocationReversalPreviewRequest,
     PaymentChannelCreate,
     PaymentChannelUpdate,
     PaymentCreate,
@@ -1712,6 +1714,116 @@ class TestPaymentCRUD:
 
 
 class TestPaymentWithAllocations:
+    def test_reviewed_reversal_releases_only_allocation(self, db_session, subscriber):
+        invoice = _make_invoice(
+            db_session,
+            subscriber.id,
+            currency="NGN",
+            subtotal=Decimal("15.00"),
+            total=Decimal("15.00"),
+            balance_due=Decimal("15.00"),
+            status=InvoiceStatus.issued,
+        )
+        payment = billing_service.payments.create(
+            db_session,
+            PaymentCreate(
+                account_id=subscriber.id,
+                amount=Decimal("15.00"),
+                currency="NGN",
+                status=PaymentStatus.succeeded,
+                allocations=[
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
+                ],
+            ),
+        )
+        invoice.status = InvoiceStatus.void
+        db_session.flush()
+        allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
+        preview = billing_service.payment_allocations.preview_reviewed_reversal(
+            db_session,
+            PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id),
+        )
+        result = billing_service.payment_allocations.confirm_reviewed_reversal(
+            db_session,
+            PaymentAllocationReversalConfirm(
+                allocation_id=allocation.id,
+                preview_fingerprint=preview.fingerprint,
+                idempotency_key="reviewed-allocation-reversal-1",
+                reason="Finance-approved correction",
+            ),
+        )
+        db_session.flush()
+        assert result.amount == Decimal("15.00")
+        assert allocation.is_active is False
+        assert allocation.reversal_ledger_entry_id is not None
+        assert allocation.reversal_consumption_ledger_entry_id is not None
+        assert payment.status is PaymentStatus.succeeded
+
+    def test_reviewed_reversal_rejects_non_void_invoice(self, db_session, subscriber):
+        invoice = _make_invoice(
+            db_session,
+            subscriber.id,
+            currency="NGN",
+            subtotal=Decimal("15.00"),
+            total=Decimal("15.00"),
+            balance_due=Decimal("15.00"),
+            status=InvoiceStatus.issued,
+        )
+        payment = billing_service.payments.create(
+            db_session,
+            PaymentCreate(
+                account_id=subscriber.id,
+                amount=Decimal("15.00"),
+                currency="NGN",
+                status=PaymentStatus.succeeded,
+                allocations=[
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
+                ],
+            ),
+        )
+        allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
+        with pytest.raises(HTTPException, match="void invoices"):
+            billing_service.payment_allocations.preview_reviewed_reversal(
+                db_session,
+                PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id),
+            )
+
     def test_explicit_allocation_to_invoice(self, db_session, subscriber):
         """Create a payment with explicit allocation to an invoice."""
         invoice = _make_invoice(

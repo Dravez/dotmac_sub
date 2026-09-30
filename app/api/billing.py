@@ -108,6 +108,10 @@ from app.schemas.billing import (
     PaymentAllocationPreviewRead,
     PaymentAllocationPreviewRequest,
     PaymentAllocationRead,
+    PaymentAllocationReversalConfirm,
+    PaymentAllocationReversalPreviewRead,
+    PaymentAllocationReversalPreviewRequest,
+    PaymentAllocationReversalRead,
     PaymentChannelAccountCreate,
     PaymentChannelAccountRead,
     PaymentChannelAccountUpdate,
@@ -1110,6 +1114,31 @@ def list_payment_allocations(
 )
 def delete_payment_allocation(allocation_id: str, db: Session = Depends(get_db)):
     billing_service.payment_allocations.delete(db, allocation_id)
+
+
+@router.post(
+    "/payment-allocation-reversals/preview",
+    response_model=PaymentAllocationReversalPreviewRead,
+    tags=["payments"],
+    dependencies=[Depends(require_permission("billing:payment:update"))],
+)
+def preview_payment_allocation_reversal(
+    payload: PaymentAllocationReversalPreviewRequest, db: Session = Depends(get_db)
+):
+    return billing_service.payment_allocations.preview_reviewed_reversal(db, payload)
+
+
+@router.post(
+    "/payment-allocation-reversals/confirm",
+    response_model=PaymentAllocationReversalRead,
+    status_code=status.HTTP_200_OK,
+    tags=["payments"],
+    dependencies=[Depends(require_permission("billing:payment:update"))],
+)
+def confirm_payment_allocation_reversal(
+    payload: PaymentAllocationReversalConfirm, db: Session = Depends(get_db)
+):
+    return billing_service.payment_allocations.confirm_reviewed_reversal(db, payload)
 
 
 # --- Credit Note Lines ---

@@ -16962,6 +16962,28 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "POST /api/v1/payment-allocation-reversals/confirm": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "7a9f97898313",
+   "responses": {
+    "200": "2d48d08f916e",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "POST /api/v1/payment-allocation-reversals/preview": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "2a74c4b6ab9a",
+   "responses": {
+    "200": "d57139ee5ee1",
+    "422": "a11c9d9b2af8"
+   }
+  },
   "POST /api/v1/payment-allocations": {
    "params": [
     "header:authorization",
@@ -20369,6 +20391,10 @@
   "PaymentAllocationPreviewRead": "378a3d01d4e2",
   "PaymentAllocationPreviewRequest": "a36f13eb689e",
   "PaymentAllocationRead": "e66bef702266",
+  "PaymentAllocationReversalConfirm": "cb778e689ea6",
+  "PaymentAllocationReversalPreviewRead": "554fed822ce2",
+  "PaymentAllocationReversalPreviewRequest": "3ddf156d9e29",
+  "PaymentAllocationReversalRead": "898daeca0670",
   "PaymentChannelAccountCreate": "2a5c5725785b",
   "PaymentChannelAccountRead": "278a859a05dd",
   "PaymentChannelAccountUpdate": "191f2e0e5d23",

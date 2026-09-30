@@ -2113,6 +2113,21 @@ class PaymentAllocation(Base):
             "idempotency_key",
             unique=True,
         ),
+        Index(
+            "uq_payment_allocations_reversal_idempotency_key",
+            "reversal_idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "uq_payment_allocations_reversal_ledger_entry_id",
+            "reversal_ledger_entry_id",
+            unique=True,
+        ),
+        Index(
+            "uq_payment_allocations_reversal_consumption_ledger_entry_id",
+            "reversal_consumption_ledger_entry_id",
+            unique=True,
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2134,6 +2149,17 @@ class PaymentAllocation(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(120))
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
     memo: Mapped[str | None] = mapped_column(Text)
+    reversal_ledger_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ledger_entries.id", ondelete="RESTRICT")
+    )
+    reversal_consumption_ledger_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ledger_entries.id", ondelete="RESTRICT")
+    )
+    reversal_preview_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    reversal_idempotency_key: Mapped[str | None] = mapped_column(String(120))
+    reversal_reason: Mapped[str | None] = mapped_column(Text)
+    reversal_actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"
     )
