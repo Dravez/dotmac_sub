@@ -1701,9 +1701,15 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             permission="notification:write",
         ),
         _action(
+            "send-customer-notification",
+            "Send a manual customer notification",
+            3,
+            permission="communications:customer:send",
+        ),
+        _action(
             "resolve-notification",
             "Review or retry delivery",
-            3,
+            4,
             permission="notification:write",
         ),
     ),

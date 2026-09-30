@@ -19,6 +19,7 @@ from app.models.ticket_workflow import (
     SlaClock,
     SlaClockStatus,
     SlaPolicy,
+    SlaTarget,
     WorkflowEntityType,
 )
 from app.services import account_lifecycle, ticket_sla_service_automation
@@ -76,10 +77,17 @@ def _seed_authoritative_breach(db_session, *, ticket_id, command):
     policy = SlaPolicy(
         name=f"Resolution SLA {uuid4()}",
         entity_type=WorkflowEntityType.ticket.value,
-        target_minutes=30,
         is_active=True,
     )
     db_session.add(policy)
+    db_session.flush()
+    db_session.add(
+        SlaTarget(
+            policy_id=policy.id,
+            target_minutes=30,
+            is_active=True,
+        )
+    )
     db_session.flush()
     clock = SlaClock(
         policy_id=policy.id,

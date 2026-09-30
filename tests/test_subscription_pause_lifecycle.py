@@ -33,6 +33,11 @@ def _context(*, reason: str) -> CommandContext:
     )
 
 
+def _as_utc(value: datetime | None) -> datetime:
+    assert value is not None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def test_pause_and_resume_preserve_exact_unused_service_time(
     db_session, subscriber, active_subscription
 ):
@@ -94,7 +99,7 @@ def test_pause_and_resume_preserve_exact_unused_service_time(
     assert resumed.paused_seconds == expected_seconds
     assert resumed.resulting_next_billing_at == expected_anchor
     assert active_subscription.status is SubscriptionStatus.active
-    assert active_subscription.next_billing_at == expected_anchor
+    assert _as_utc(active_subscription.next_billing_at) == expected_anchor
     assert subscriber.status is SubscriberStatus.active
     assert episode is not None
     assert episode.status == SubscriptionPauseEpisodeStatus.resumed.value
@@ -117,7 +122,7 @@ def test_prepaid_resume_grants_exact_pause_compensation_once(
             subscription_id=active_subscription.id,
             starts_at=datetime(2026, 9, 1, 8, 30, tzinfo=UTC),
             ends_at=original_anchor,
-            amount_funded=active_subscription.recurring_price or 0,
+            amount_funded=active_subscription.unit_price or 0,
             currency="NGN",
             status=ServiceEntitlementStatus.active,
             metadata_={"source": "test_paid_prepaid_invoice"},
@@ -174,9 +179,11 @@ def test_prepaid_resume_grants_exact_pause_compensation_once(
     assert first.resumed
     assert replay.replayed
     assert len(compensation) == 1
-    assert compensation[0].starts_at == original_anchor
-    assert compensation[0].ends_at == original_anchor + timedelta(days=15)
-    assert active_subscription.next_billing_at == compensation[0].ends_at
+    assert _as_utc(compensation[0].starts_at) == original_anchor
+    assert _as_utc(compensation[0].ends_at) == original_anchor + timedelta(days=15)
+    assert _as_utc(active_subscription.next_billing_at) == _as_utc(
+        compensation[0].ends_at
+    )
 
 
 def test_pause_replay_reuses_the_original_cause(db_session, active_subscription):

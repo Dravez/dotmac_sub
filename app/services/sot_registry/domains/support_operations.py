@@ -1316,6 +1316,14 @@ DOMAIN = DomainSOT(
                 ),
                 authoritative_inputs=(
                     AuthorityInput(
+                        name="canonical ticket lifecycle state",
+                        owner="support.ticket_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "current Ticket status, customer link, and resolution state"
+                        ),
+                    ),
+                    AuthorityInput(
                         name="canonical support ticket customer link",
                         owner="support.ticket_lifecycle",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
