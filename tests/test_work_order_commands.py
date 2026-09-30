@@ -16,7 +16,7 @@ from app.schemas.dispatch import (
     WorkOrderHeaderCreate,
     WorkOrderHeaderUpdate,
 )
-import app.services.work_order_commands as work_order_command_module
+from app.services import work_order_commands as work_order_command_module
 from app.services.work_order_commands import work_order_commands
 from app.services.work_order_errors import WorkOrderCommandError
 from tests.staff_identity_fixtures import add_bound_staff_user
@@ -402,6 +402,7 @@ def test_header_command_rejects_parallel_assignment_and_field_status(db_session)
         )
     assert transition.value.status_code == 422
     assert "field transition owner" in transition.value.detail
+
 
 def test_native_work_order_events_use_uuid_and_preserve_public_identity(
     db_session, monkeypatch
