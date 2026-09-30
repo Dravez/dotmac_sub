@@ -75,6 +75,7 @@ _PORTAL_VISIBLE_SERVICE_STATUSES = [
     SubscriptionStatus.active,
     SubscriptionStatus.blocked,
     SubscriptionStatus.suspended,
+    SubscriptionStatus.paused,
     SubscriptionStatus.stopped,
     SubscriptionStatus.disabled,
     SubscriptionStatus.canceled,
@@ -86,6 +87,7 @@ _PORTAL_RESTRICTED_SERVICE_STATUSES = frozenset(
     {
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
     }
@@ -1300,7 +1302,9 @@ def _latest_restricted_service_dates(
         select(SubscriptionLifecycleEvent)
         .where(
             SubscriptionLifecycleEvent.subscription_id.in_(restricted_ids),
-            SubscriptionLifecycleEvent.event_type == LifecycleEventType.suspend,
+            SubscriptionLifecycleEvent.event_type.in_(
+                (LifecycleEventType.suspend, LifecycleEventType.pause)
+            ),
             SubscriptionLifecycleEvent.to_status.in_(
                 tuple(_PORTAL_RESTRICTED_SERVICE_STATUSES)
             ),
@@ -1353,6 +1357,7 @@ def _service_date_projection(
 
     if subscription.status in _PORTAL_RESTRICTED_SERVICE_STATUSES:
         paused = subscription.status in {
+            SubscriptionStatus.paused,
             SubscriptionStatus.stopped,
             SubscriptionStatus.disabled,
         }
@@ -1562,10 +1567,18 @@ def get_service_detail(
             .one_or_none()
         )
     customer_ont_is_uisp = bool(customer_ont and customer_ont.uisp_device_id)
-    account_health = build_portal_account_health(
+    account_health_projection = build_portal_account_health(
         db,
         coerce_uuid(account_id),
-    ).for_subscription(subscription.id)
+    )
+    try:
+        account_health = account_health_projection.for_subscription(subscription.id)
+    except ValueError:
+        logger.warning(
+            "portal_service_missing_from_health_projection",
+            extra={"subscription_id": str(subscription.id)},
+        )
+        return None
 
     # Renewal context: show renewal banner when contract nearing expiration
     renewal_context: dict[str, Any] = {"show_renewal": False}

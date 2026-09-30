@@ -28,6 +28,7 @@ HANDLED_EVENT_TYPES = frozenset(
     {
         EventType.subscription_activated,
         EventType.subscription_resumed,
+        EventType.subscription_pause_resumed,
         EventType.service_order_assigned,
         EventType.service_order_activation_requested,
         EventType.provisioning_completed,
@@ -44,6 +45,9 @@ class ProvisioningHandler:
             self._handle_subscription_activated(db, event)
         elif event.event_type == EventType.subscription_resumed:
             self._handle_subscription_resumed(db, event)
+        elif event.event_type == EventType.subscription_pause_resumed:
+            if event.payload.get("to_status") == "active":
+                self._handle_subscription_resumed(db, event)
         elif event.event_type == EventType.service_order_assigned:
             self._handle_service_order_assigned(db, event)
         elif event.event_type == EventType.service_order_activation_requested:

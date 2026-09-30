@@ -63,6 +63,7 @@ _ACCOUNT_PRESENTATIONS: dict[str, tuple[str, StatusTone, StatusIcon]] = {
         StatusTone.warning,
         StatusIcon.alert,
     ),
+    SubscriberStatus.paused.value: ("Paused", StatusTone.info, StatusIcon.minus),
     SubscriberStatus.blocked.value: ("Blocked", StatusTone.negative, StatusIcon.x),
     SubscriberStatus.disabled.value: ("Disabled", StatusTone.negative, StatusIcon.x),
     SubscriberStatus.canceled.value: ("Canceled", StatusTone.negative, StatusIcon.x),
@@ -85,6 +86,11 @@ _SUBSCRIPTION_PRESENTATIONS: dict[str, tuple[str, StatusTone, StatusIcon]] = {
         "Suspended",
         StatusTone.warning,
         StatusIcon.alert,
+    ),
+    SubscriptionStatus.paused.value: (
+        "Paused",
+        StatusTone.info,
+        StatusIcon.minus,
     ),
     SubscriptionStatus.stopped.value: (
         "Stopped",

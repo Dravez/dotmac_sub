@@ -124,6 +124,7 @@ def enforce_single_active_subscription(
     active_statuses = {
         SubscriptionStatus.pending,
         SubscriptionStatus.active,
+        SubscriptionStatus.paused,
         SubscriptionStatus.suspended,
     }
     if status not in active_statuses:

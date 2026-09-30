@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +22,167 @@ from app.models.catalog import BillingMode, Subscription
 from app.services.common import round_money, to_decimal
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class GrantPauseCompensationEntitlementCommand:
+    """Typed request for the exact prepaid interval restored by one pause."""
+
+    pause_episode_id: UUID
+    subscription_id: UUID
+    account_id: UUID
+    pause_effective_at: datetime
+    starts_at: datetime
+    ends_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewPauseCompensationEntitlementQuery:
+    subscription_id: UUID
+    account_id: UUID
+    pause_effective_at: datetime
+    captured_billing_anchor: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewPauseCompensationEntitlementOutcome:
+    eligible: bool
+    blocking_reasons: tuple[str, ...]
+
+
+def preview_pause_compensation_entitlement(
+    db: Session,
+    query: PreviewPauseCompensationEntitlementQuery,
+) -> PreviewPauseCompensationEntitlementOutcome:
+    """Validate prepaid coverage needed for an exact pause compensation grant."""
+
+    entitlements = tuple(
+        db.scalars(
+            select(ServiceEntitlement).where(
+                ServiceEntitlement.subscription_id == query.subscription_id,
+                ServiceEntitlement.account_id == query.account_id,
+                ServiceEntitlement.status == ServiceEntitlementStatus.active,
+            )
+        ).all()
+    )
+    effective_at = _ensure_utc(query.pause_effective_at)
+    anchor = _ensure_utc(query.captured_billing_anchor)
+    covering = tuple(
+        item
+        for item in entitlements
+        if _ensure_utc(item.starts_at) <= effective_at < _ensure_utc(item.ends_at)
+    )
+    blocking: list[str] = []
+    if len(covering) != 1:
+        blocking.append("prepaid_pause_coverage_ambiguous")
+    if (
+        not entitlements
+        or max(_ensure_utc(item.ends_at) for item in entitlements) != anchor
+    ):
+        blocking.append("prepaid_pause_anchor_mismatch")
+    return PreviewPauseCompensationEntitlementOutcome(
+        eligible=not blocking,
+        blocking_reasons=tuple(blocking),
+    )
+
+
+def grant_pause_compensation_entitlement(
+    db: Session,
+    command: GrantPauseCompensationEntitlementCommand,
+) -> ServiceEntitlement:
+    """Stage an idempotent zero-value entitlement for unused prepaid time.
+
+    The original paid entitlement and invoice periods remain immutable. The
+    pause episode is the typed non-cash authority for this additional interval.
+    """
+
+    boundaries = (
+        command.pause_effective_at,
+        command.starts_at,
+        command.ends_at,
+    )
+    if any(value.tzinfo is None or value.utcoffset() is None for value in boundaries):
+        raise ValueError("Pause compensation boundaries must be timezone-aware")
+    if command.ends_at <= command.starts_at:
+        raise ValueError("Pause compensation must grant a positive interval")
+
+    existing = db.scalar(
+        select(ServiceEntitlement)
+        .where(
+            ServiceEntitlement.source_pause_episode_id == command.pause_episode_id,
+            ServiceEntitlement.status == ServiceEntitlementStatus.active,
+        )
+        .with_for_update()
+    )
+    if existing is not None:
+        if (
+            existing.subscription_id != command.subscription_id
+            or existing.account_id != command.account_id
+            or _ensure_utc(existing.starts_at) != _ensure_utc(command.starts_at)
+            or _ensure_utc(existing.ends_at) != _ensure_utc(command.ends_at)
+        ):
+            raise ValueError("Pause compensation replay conflicts with prior evidence")
+        return existing
+
+    subscription = db.scalar(
+        select(Subscription)
+        .where(Subscription.id == command.subscription_id)
+        .with_for_update()
+    )
+    if (
+        subscription is None
+        or subscription.subscriber_id != command.account_id
+        or subscription.billing_mode != BillingMode.prepaid
+    ):
+        raise ValueError(
+            "Pause compensation requires the matching prepaid subscription"
+        )
+
+    active_entitlements = tuple(
+        db.scalars(
+            select(ServiceEntitlement)
+            .where(
+                ServiceEntitlement.subscription_id == command.subscription_id,
+                ServiceEntitlement.account_id == command.account_id,
+                ServiceEntitlement.status == ServiceEntitlementStatus.active,
+            )
+            .with_for_update()
+        ).all()
+    )
+    covering = tuple(
+        entitlement
+        for entitlement in active_entitlements
+        if _ensure_utc(entitlement.starts_at)
+        <= _ensure_utc(command.pause_effective_at)
+        < _ensure_utc(entitlement.ends_at)
+    )
+    if len(covering) != 1:
+        raise ValueError(
+            "Prepaid pause compensation requires exactly one entitlement at pause time"
+        )
+    latest_end = max(_ensure_utc(item.ends_at) for item in active_entitlements)
+    if latest_end != _ensure_utc(command.starts_at):
+        raise ValueError(
+            "Prepaid entitlement evidence does not match the captured billing anchor"
+        )
+
+    entitlement = ServiceEntitlement(
+        account_id=command.account_id,
+        subscription_id=command.subscription_id,
+        source_pause_episode_id=command.pause_episode_id,
+        starts_at=command.starts_at,
+        ends_at=command.ends_at,
+        amount_funded=0,
+        currency=covering[0].currency,
+        status=ServiceEntitlementStatus.active,
+        metadata_={
+            "source": "subscription_pause_compensation",
+            "pause_episode_id": str(command.pause_episode_id),
+        },
+    )
+    db.add(entitlement)
+    db.flush()
+    return entitlement
 
 
 def ensure_prepaid_entitlements_for_paid_invoice(

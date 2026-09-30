@@ -109,6 +109,7 @@ _WRITE_TIER_VERBS = frozenset(
         "redrive",
         "retire",
         "reverse",
+        "resume",
         "review",
         "self_assign",
         "send",

@@ -510,7 +510,13 @@ class SubscriptionBase(BaseModel):
 
 
 class SubscriptionCreate(SubscriptionBase):
-    pass
+    @model_validator(mode="after")
+    def _reject_owner_only_pause(self) -> SubscriptionCreate:
+        if self.status is SubscriptionStatus.paused:
+            raise ValueError(
+                "A paused subscription requires an authoritative pause episode"
+            )
+        return self
 
 
 class SubscriptionUpdate(BaseModel):

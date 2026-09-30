@@ -2779,6 +2779,7 @@
                     <div class="mt-2 space-y-2">
                         <p class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedTemplate().label || selectedTemplate().name"></p>
                         <p class="text-xs text-slate-500 dark:text-slate-400" x-text="selectedTemplate().code"></p>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 capitalize" x-text="'Purpose: ' + (selectedTemplate().purpose || 'general').replace('_', ' ')"></p>
                         <p class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300" x-show="selectedTemplate().subject" x-text="selectedTemplate().subject"></p>
                     </div>
                 </template>

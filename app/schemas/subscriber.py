@@ -213,6 +213,10 @@ class SubscriberCreate(SubscriberBase):
 
     @model_validator(mode="after")
     def _require_identity_when_creating_new(self) -> SubscriberCreate:
+        if self.status is SubscriberStatus.paused:
+            raise ValueError(
+                "Paused account status must be derived from a subscription pause"
+            )
         if self.person_id:
             return self
         if not self.first_name or not self.last_name or not self.email:

@@ -148,6 +148,16 @@ poetry run python -m scripts.billing.reconstruct_reviewed_prepaid_invoice_sequen
 
 The owner locks and re-previews all evidence. A stale fingerprint, permission
 failure, or participant mismatch rolls back every document and allocation.
+Apply-time typed owner failures are emitted as JSON on stderr with a stable
+error code and safe message. For
+`financial.prepaid_draft_reconciliation.incomplete_repair`,
+the adapter includes only the allowlisted postcondition values:
+`remaining_credit`, `expected_remaining_credit`,
+`authoritative_prepaid_funding`, `expected_authoritative_prepaid_funding`,
+`customer_position_delta`, and `service_period_end`. These values diagnose the
+failed invariant; they do not authorize bypassing it. When this owner
+postcondition error is reported, the owner transaction has rolled back: stop,
+preserve the error JSON, and investigate before any new apply attempt.
 
 ## Verify
 

@@ -37,6 +37,7 @@ _LIVE_SUBSCRIPTION_STATUSES = (
     SubscriptionStatus.pending,
     SubscriptionStatus.active,
     SubscriptionStatus.blocked,
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
     SubscriptionStatus.stopped,
 )

@@ -846,6 +846,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -858,6 +859,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -897,6 +899,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "persisted recipient, event, category, status, and "
                             "creation time used by the dedupe window"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected template purpose category",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "purpose persisted on the selected NotificationTemplate "
+                            "for manual customer-page sends"
                         ),
                     ),
                     AuthorityInput(
@@ -1026,6 +1037,7 @@ DOMAIN = DomainSOT(
             module="app.services.notification",
             owns=(
                 "notification template lifecycle and activation validity",
+                "notification-template purpose for customer-page sends",
                 "notification row lifecycle",
                 "delivery state",
                 "notification delivery latency class enforcement",
@@ -1043,7 +1055,10 @@ DOMAIN = DomainSOT(
                 "An explicit send_at always remains authoritative; otherwise "
                 "immediate delivery bypasses quiet-hours deferral while normal "
                 "and batch customer delivery continue to respect it. "
-                "Every web and API template mutation enters this owner. Inactive "
+                "For manual customer-page sends, the selected template's persisted "
+                "purpose supplies the customer-status policy category; automated "
+                "event categories remain owned by EventNotificationSpec. Every web "
+                "and API template mutation enters this owner. Inactive "
                 "drafts may remain incomplete, but activation validates the exact "
                 "renderer vocabulary and event-specific required fields. The "
                 "payment_received contract requires receipt_number and receipt_url "

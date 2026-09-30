@@ -24,6 +24,7 @@ from app.models.subscriber import Subscriber
 _ACTIVE_STATUSES = (
     SubscriptionStatus.active,
     SubscriptionStatus.pending,
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
 )
 

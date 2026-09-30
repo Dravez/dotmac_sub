@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.services.prepaid_calendar_contracts import (
 )
 from app.services.prepaid_draft_reconciliation import (
     REPAIR_SCOPE,
+    PrepaidDraftReconciliationError,
     ReconstructReviewedPrepaidInvoiceSequenceCommand,
     ReviewedPrepaidExistingAllocationEvidence,
     ReviewedPrepaidInvoiceSequenceAllocationSelection,
@@ -40,6 +42,20 @@ from app.services.prepaid_draft_reconciliation import (
 from app.services.system_user_assignments import system_user_role_names
 
 JsonObject: TypeAlias = dict[str, object]
+
+_SEQUENCE_INCOMPLETE_REPAIR_CODE = (
+    "financial.prepaid_draft_reconciliation.incomplete_repair"
+)
+_SAFE_SEQUENCE_POSTCONDITION_DETAILS = frozenset(
+    {
+        "remaining_credit",
+        "expected_remaining_credit",
+        "authoritative_prepaid_funding",
+        "expected_authoritative_prepaid_funding",
+        "customer_position_delta",
+        "service_period_end",
+    }
+)
 
 
 def _uuid(value: object, field: str) -> UUID:
@@ -230,6 +246,27 @@ def _permission_granted(db, actor_system_user_id: UUID) -> bool:  # noqa: ANN001
     return has_permission(auth, db, REPAIR_SCOPE)
 
 
+def _operator_error_payload(
+    error: PrepaidDraftReconciliationError,
+) -> dict[str, object]:
+    """Serialize safe owner error context for this command's operator adapter."""
+
+    details: dict[str, object] = {}
+    if error.code == _SEQUENCE_INCOMPLETE_REPAIR_CODE:
+        details = {
+            key: value
+            for key, value in error.details.items()
+            if key in _SAFE_SEQUENCE_POSTCONDITION_DETAILS and isinstance(value, str)
+        }
+    return {
+        "error": {
+            "code": error.code,
+            "message": error.message,
+            "details": details,
+        }
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -368,24 +405,31 @@ def main() -> int:
     if missing:
         parser.error("--apply requires " + ", ".join(missing))
     assert args.actor_system_user_id is not None
-    with db_session_adapter.owner_command_session() as db:
-        permission_granted = _permission_granted(db, args.actor_system_user_id)
-        db_session_adapter.release_read_transaction(db)
-        result = reconstruct_reviewed_prepaid_invoice_sequence(
-            db,
-            ReconstructReviewedPrepaidInvoiceSequenceCommand(
-                context=CommandContext.system(
-                    actor=args.actor,
-                    scope=REPAIR_SCOPE,
-                    reason=args.reason,
-                    idempotency_key=args.idempotency_key,
+    try:
+        with db_session_adapter.owner_command_session() as db:
+            permission_granted = _permission_granted(db, args.actor_system_user_id)
+            db_session_adapter.release_read_transaction(db)
+            result = reconstruct_reviewed_prepaid_invoice_sequence(
+                db,
+                ReconstructReviewedPrepaidInvoiceSequenceCommand(
+                    context=CommandContext.system(
+                        actor=args.actor,
+                        scope=REPAIR_SCOPE,
+                        reason=args.reason,
+                        idempotency_key=args.idempotency_key,
+                    ),
+                    query=query,
+                    preview_fingerprint=args.fingerprint,
+                    permission_granted=permission_granted,
+                    actor_system_user_id=args.actor_system_user_id,
                 ),
-                query=query,
-                preview_fingerprint=args.fingerprint,
-                permission_granted=permission_granted,
-                actor_system_user_id=args.actor_system_user_id,
-            ),
+            )
+    except PrepaidDraftReconciliationError as exc:
+        print(
+            json.dumps(_operator_error_payload(exc), indent=2, sort_keys=True),
+            file=sys.stderr,
         )
+        return 2
     print(
         json.dumps(
             {

@@ -1372,3 +1372,95 @@ def test_customer_financial_batch_excludes_postpaid_accounts(
     web_customer_details._build_common_financials(db_session, [subscriber])
 
     assert calls == []
+
+
+def test_customer_total_invoiced_uses_canonical_billed_cohort(db_session, subscriber):
+    from app.services import web_customer_details
+
+    subscriber.user_type = UserType.customer
+    invoices = [
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-BILLED-ISSUED",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("100.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("100.00"),
+            balance_due=Decimal("100.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-BILLED-PAID",
+            status=InvoiceStatus.paid,
+            subtotal=Decimal("50.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("50.00"),
+            balance_due=Decimal("0.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-VOID",
+            status=InvoiceStatus.void,
+            subtotal=Decimal("800.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("800.00"),
+            balance_due=Decimal("0.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-DRAFT",
+            status=InvoiceStatus.draft,
+            subtotal=Decimal("900.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("900.00"),
+            balance_due=Decimal("900.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-PROFORMA",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("700.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("700.00"),
+            balance_due=Decimal("700.00"),
+            currency="NGN",
+            is_proforma=True,
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-INACTIVE",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("600.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("600.00"),
+            balance_due=Decimal("600.00"),
+            currency="NGN",
+            is_active=False,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-OTHER-CURRENCY",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("1000.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("1000.00"),
+            balance_due=Decimal("1000.00"),
+            currency="USD",
+            is_active=True,
+        ),
+    ]
+    db_session.add_all(invoices)
+    db_session.commit()
+
+    result = web_customer_details._build_common_financials(db_session, [subscriber])
+
+    assert result["financials"]["total_invoiced"] == Decimal("150.00")

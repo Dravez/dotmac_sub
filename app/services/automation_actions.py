@@ -181,6 +181,58 @@ def _suspend_support_ticket_service_for_sla_breach(
     )
 
 
+def _pause_support_ticket_service_for_sla_breach(
+    db: Session, command: ExecuteAutomationActionCommand
+) -> AutomationActionOutcome:
+    from app.models.subscription_pause import (
+        SubscriptionPauseBillingPolicy,
+        SubscriptionPauseResumePolicy,
+    )
+    from app.services.ticket_sla_service_automation import (
+        PauseTicketServiceForSlaBreachCommand,
+        TicketSlaServiceSelectionPolicy,
+        pause_unique_active_service_for_ticket_sla_breach,
+    )
+
+    if command.target.entity_type != "support.ticket":
+        raise AutomationActionExecutorError(
+            "The ticket SLA service-pause action received the wrong target type."
+        )
+    values = {item.key: item.value for item in command.inputs}
+    try:
+        selection_policy = TicketSlaServiceSelectionPolicy(
+            str(values["service_selection_policy"])
+        )
+        resume_policy = SubscriptionPauseResumePolicy(str(values["resume_policy"]))
+        billing_policy = SubscriptionPauseBillingPolicy(str(values["billing_policy"]))
+    except (KeyError, ValueError) as exc:
+        raise AutomationActionExecutorError(
+            "The ticket SLA service-pause action configuration is invalid."
+        ) from exc
+    outcome = pause_unique_active_service_for_ticket_sla_breach(
+        db,
+        PauseTicketServiceForSlaBreachCommand(
+            ticket_id=command.target.entity_id,
+            event_id=command.event_id,
+            rule_id=command.rule_id,
+            rule_version_id=command.rule_version_id,
+            step_index=command.step_index,
+            selection_policy=selection_policy,
+            resume_policy=resume_policy,
+            billing_policy=billing_policy,
+            context=command.context,
+        ),
+    )
+    return AutomationActionOutcome(
+        disposition=AutomationActionDisposition.succeeded,
+        outcome_code=(
+            "support_ticket_service_pause_replayed"
+            if outcome.replayed
+            else "support_ticket_service_paused"
+        ),
+    )
+
+
 def _set_project_status(
     db: Session, command: ExecuteAutomationActionCommand
 ) -> AutomationActionOutcome:
@@ -484,6 +536,9 @@ _ACTION_EXECUTORS: Mapping[str, AutomationActionExecutor] = MappingProxyType(
         "support.ticket.set_priority": _set_support_ticket_priority,
         "support.ticket.suspend_unique_active_service": (
             _suspend_support_ticket_service_for_sla_breach
+        ),
+        "support.ticket.pause_unique_active_service": (
+            _pause_support_ticket_service_for_sla_breach
         ),
         "operations.project.set_status": _set_project_status,
         "operations.material_request.enqueue_cancellation": _enqueue_material_request_cancellation,

@@ -27,13 +27,16 @@ from app.services.radius_access_state import (
     TERMINATED_STATUSES as RADIUS_TERMINATED_STATUSES,
 )
 
-CUSTOMER_IMPACT_STATUSES = frozenset({SubscriptionStatus.active})
+CUSTOMER_IMPACT_STATUSES = frozenset(
+    {SubscriptionStatus.active, SubscriptionStatus.paused}
+)
 PORTAL_VISIBLE_SERVICE_STATUSES = frozenset(
     {
         SubscriptionStatus.pending,
         SubscriptionStatus.active,
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
     }

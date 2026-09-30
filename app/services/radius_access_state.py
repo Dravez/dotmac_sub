@@ -60,6 +60,7 @@ _ACTIVE_STATUSES: frozenset[SubscriptionStatus] = frozenset(
 _BLOCKED_STATUSES: frozenset[SubscriptionStatus] = frozenset(
     {
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.blocked,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
