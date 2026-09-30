@@ -247,7 +247,7 @@ class AutomationEventHandler:
             processed_script_targets.add((trigger.entity_type, event_name))
             envelope = automation_runtime.AutomationEventEnvelope(
                 event_id=event.event_id,
-                event_type=event.event_type.value,
+                event_type=_event_name(event),
                 trigger_key=trigger.key,
                 tenant_id=tenant_id,
                 target_type=trigger.entity_type,
