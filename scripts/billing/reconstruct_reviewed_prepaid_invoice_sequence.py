@@ -203,9 +203,17 @@ def _manifest(path: Path) -> ReviewedPrepaidInvoiceSequenceQuery:
                 "approval.approver_system_user_id",
             ),
             approver_name=str(approval.get("approver_name") or ""),
-            approved_at=_timestamp(approval.get("approved_at"), "approval.approved_at"),
+            approved_at=(
+                _timestamp(approval["approved_at"], "approval.approved_at")
+                if approval.get("approved_at")
+                else None
+            ),
             ticket_reference=str(approval.get("ticket_reference") or ""),
-            evidence_sha256=str(approval.get("evidence_sha256") or ""),
+            evidence_sha256=(
+                str(approval["evidence_sha256"])
+                if approval.get("evidence_sha256")
+                else None
+            ),
         ),
     )
 
