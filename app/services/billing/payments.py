@@ -5614,32 +5614,51 @@ class PaymentAllocations(ListResponseMixin):
         payment = get_by_id(db, Payment, allocation.payment_id)
         invoice = get_by_id(db, Invoice, allocation.invoice_id)
         if payment is None or invoice is None:
-            raise HTTPException(status_code=409, detail="Allocation evidence is incomplete")
+            raise HTTPException(
+                status_code=409, detail="Allocation evidence is incomplete"
+            )
         if payment.account_id is None:
             raise HTTPException(
                 status_code=409,
                 detail="Reviewed allocation reversal requires a customer payment",
             )
         if not allocation.is_active:
-            raise HTTPException(status_code=409, detail="Payment allocation is already reversed")
-        if allocation.ledger_entry_id is None or allocation.consumption_ledger_entry_id is None:
-            raise HTTPException(status_code=409, detail="Allocation lacks paired ledger evidence")
+            raise HTTPException(
+                status_code=409, detail="Payment allocation is already reversed"
+            )
+        if (
+            allocation.ledger_entry_id is None
+            or allocation.consumption_ledger_entry_id is None
+        ):
+            raise HTTPException(
+                status_code=409, detail="Allocation lacks paired ledger evidence"
+            )
         if invoice.status is not InvoiceStatus.void:
             raise HTTPException(
                 status_code=409,
                 detail="Reviewed allocation reversal is limited to void invoices",
             )
         if payment.status is not PaymentStatus.succeeded or not payment.is_active:
-            raise HTTPException(status_code=409, detail="Payment is not an active succeeded payment")
+            raise HTTPException(
+                status_code=409, detail="Payment is not an active succeeded payment"
+            )
         if payment.refunds or payment.reversal is not None:
-            raise HTTPException(status_code=409, detail="Payment has refund or reversal evidence")
+            raise HTTPException(
+                status_code=409, detail="Payment has refund or reversal evidence"
+            )
         before = round_money(PaymentAllocations.available_amount(db, str(payment.id)))
         amount = round_money(to_decimal(allocation.amount))
         balance_before = round_money(to_decimal(invoice.balance_due))
         values = (
-            str(allocation.id), str(payment.id), str(invoice.id), str(amount),
-            str(allocation.ledger_entry_id), str(allocation.consumption_ledger_entry_id),
-            str(invoice.status.value), str(payment.status.value), str(balance_before),
+            str(allocation.id),
+            str(payment.id),
+            str(invoice.id),
+            str(amount),
+            str(allocation.ledger_entry_id),
+            str(allocation.consumption_ledger_entry_id),
+            str(invoice.status.value),
+            str(payment.status.value),
+            str(balance_before),
         )
         fingerprint = hashlib.sha256("|".join(values).encode()).hexdigest()
         return PaymentAllocationReversalPreviewRead(
@@ -5676,10 +5695,28 @@ class PaymentAllocations(ListResponseMixin):
         )
         if key is not None:
             if key.ref_id != str(payload.allocation_id):
-                raise HTTPException(status_code=409, detail="Idempotency key belongs to another allocation")
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency key belongs to another allocation",
+                )
             allocation = get_by_id(db, PaymentAllocation, payload.allocation_id)
-            if allocation is None or allocation.reversal_preview_fingerprint != payload.preview_fingerprint:
-                raise HTTPException(status_code=409, detail="Idempotency key was used with a different preview")
+            if (
+                allocation is None
+                or allocation.reversal_preview_fingerprint
+                != payload.preview_fingerprint
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency key was used with a different preview",
+                )
+            if (
+                allocation.reversal_ledger_entry_id is None
+                or allocation.reversal_consumption_ledger_entry_id is None
+                or allocation.reversed_at is None
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Reversal evidence is incomplete"
+                )
             return PaymentAllocationReversalRead(
                 allocation_id=allocation.id,
                 payment_id=allocation.payment_id,
@@ -5696,7 +5733,9 @@ class PaymentAllocations(ListResponseMixin):
         payment = lock_for_update(db, Payment, allocation.payment_id)
         invoice = lock_for_update(db, Invoice, allocation.invoice_id)
         if payment is None or invoice is None:
-            raise HTTPException(status_code=409, detail="Allocation evidence is incomplete")
+            raise HTTPException(
+                status_code=409, detail="Allocation evidence is incomplete"
+            )
         if payment.account_id is None:
             raise HTTPException(
                 status_code=409,
@@ -5706,14 +5745,19 @@ class PaymentAllocations(ListResponseMixin):
             db, PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id)
         )
         if preview.fingerprint != payload.preview_fingerprint:
-            raise HTTPException(status_code=409, detail="Financial state changed after preview; preview again")
+            raise HTTPException(
+                status_code=409,
+                detail="Financial state changed after preview; preview again",
+            )
         reversal_ledger = LedgerEntries.reverse(
-            db, str(allocation.ledger_entry_id),
+            db,
+            str(allocation.ledger_entry_id),
             memo=f"Reviewed payment-allocation reversal: {payload.reason}",
             commit=False,
         )
         reversal_consumption = LedgerEntries.reverse(
-            db, str(allocation.consumption_ledger_entry_id),
+            db,
+            str(allocation.consumption_ledger_entry_id),
             memo=f"Reviewed payment-allocation reversal: {payload.reason}",
             commit=False,
         )
@@ -5751,14 +5795,18 @@ class PaymentAllocations(ListResponseMixin):
                     "preview_fingerprint": payload.preview_fingerprint,
                     "idempotency_key": payload.idempotency_key,
                     "reversal_ledger_entry_id": str(reversal_ledger.id),
-                    "reversal_consumption_ledger_entry_id": str(reversal_consumption.id),
+                    "reversal_consumption_ledger_entry_id": str(
+                        reversal_consumption.id
+                    ),
                 },
             ),
         )
         db.flush()
         db.commit()
         if allocation.reversed_at is None:
-            raise HTTPException(status_code=500, detail="Reversal timestamp was not recorded")
+            raise HTTPException(
+                status_code=500, detail="Reversal timestamp was not recorded"
+            )
         return PaymentAllocationReversalRead(
             allocation_id=allocation.id,
             payment_id=allocation.payment_id,

@@ -1718,6 +1718,7 @@ class TestPaymentWithAllocations:
         invoice = _make_invoice(
             db_session,
             subscriber.id,
+            currency="NGN",
             subtotal=Decimal("15.00"),
             total=Decimal("15.00"),
             balance_due=Decimal("15.00"),
@@ -1731,7 +1732,9 @@ class TestPaymentWithAllocations:
                 currency="NGN",
                 status=PaymentStatus.succeeded,
                 allocations=[
-                    PaymentAllocationApply(invoice_id=invoice.id, amount=Decimal("15.00"))
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
                 ],
             ),
         )
@@ -1762,6 +1765,7 @@ class TestPaymentWithAllocations:
         invoice = _make_invoice(
             db_session,
             subscriber.id,
+            currency="NGN",
             subtotal=Decimal("15.00"),
             total=Decimal("15.00"),
             balance_due=Decimal("15.00"),
@@ -1775,7 +1779,9 @@ class TestPaymentWithAllocations:
                 currency="NGN",
                 status=PaymentStatus.succeeded,
                 allocations=[
-                    PaymentAllocationApply(invoice_id=invoice.id, amount=Decimal("15.00"))
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
                 ],
             ),
         )

@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "629_reviewed_payment_allocation_reversal"
-down_revision: str | None = "628_widen_subscription_change_confirmation_origin"
+revision: str = "632_reviewed_payment_allocation_reversal"
+down_revision: str | None = "631_merge_open_pr_consolidation_heads"
 branch_labels = None
 depends_on = None
 
