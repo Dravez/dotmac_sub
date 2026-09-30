@@ -97,7 +97,7 @@ def test_pause_and_resume_preserve_exact_unused_service_time(
     cause = db_session.get(SubscriptionPauseCause, paused.cause_id)
 
     assert resumed.paused_seconds == expected_seconds
-    assert resumed.resulting_next_billing_at == expected_anchor
+    assert _as_utc(resumed.resulting_next_billing_at) == expected_anchor
     assert active_subscription.status is SubscriptionStatus.active
     assert _as_utc(active_subscription.next_billing_at) == expected_anchor
     assert subscriber.status is SubscriberStatus.active
