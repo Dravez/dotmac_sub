@@ -52,6 +52,7 @@ LOCATIONS_CACHE_TTL_SECONDS = 30
 _MISSING = object()
 _SUSPENDED_STATUSES = {
     SubscriptionStatus.suspended,
+    SubscriptionStatus.paused,
     SubscriptionStatus.blocked,
     SubscriptionStatus.stopped,
 }

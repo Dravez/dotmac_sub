@@ -88,6 +88,7 @@ _RETAINING_STATUSES = frozenset(
         SubscriptionStatus.disabled,
         SubscriptionStatus.hidden,
         SubscriptionStatus.pending,
+        SubscriptionStatus.paused,
         SubscriptionStatus.suspended,
         SubscriptionStatus.stopped,
     }

@@ -373,6 +373,7 @@ def reconcile_account_billing_approval(
                 SubscriptionStatus.pending,
                 SubscriptionStatus.active,
                 SubscriptionStatus.blocked,
+                SubscriptionStatus.paused,
                 SubscriptionStatus.suspended,
                 SubscriptionStatus.stopped,
                 SubscriptionStatus.disabled,

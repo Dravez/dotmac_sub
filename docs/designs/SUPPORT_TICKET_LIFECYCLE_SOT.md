@@ -351,6 +351,28 @@ resolves membership, normalizes the shared changes, previews eligibility, binds
 the preview to a deterministic scope token, and detects drift. Confirmed
 mutations delegate to `support.ticket_lifecycle`; there is no second bulk writer.
 
+## Resolution-SLA pause consequence
+
+The SLA clock owner stages `support.ticket.sla_breached` only after it records
+an actual breach for a still-applicable Ticket. A published Automation Center
+rule may select `support.ticket.pause_unique_active_service`; the timer-due
+event alone is never sufficient. The consequence coordinator locks and
+revalidates the event, SLA clock, breach row, Ticket status, canonical customer
+link, and unique active subscription before delegating the pause.
+
+If the Ticket has already reached `pending_confirmation`, `closed`, or
+`canceled`, the queued consequence is a fail-closed no-op. Zero or multiple
+active services are retained as explicit automation-step failures. The pause
+starts at the effective lifecycle commit time, not at Ticket creation or the
+start of the SLA window.
+
+The linked cause becomes administratively resume-eligible only while the
+Ticket is `pending_confirmation` or `closed`. Resume uses a fingerprinted
+preview and remains a subscription-lifecycle command; changing the Ticket,
+pause, billing anchor, or restriction evidence makes the preview stale. A
+reopened, disputed, or otherwise unresolved Ticket cannot be resumed through
+this path.
+
 ## Cutover and repair
 
 The migration is complete only while architecture guards prove that:

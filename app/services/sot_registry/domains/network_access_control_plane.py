@@ -37,6 +37,9 @@ DOMAIN = DomainSOT(
                 "enforcement lock lifecycle",
                 "persisted access restriction intent",
                 "subscription access-status transitions",
+                "subscription pause episodes and independently releasable causes",
+                "prepaid pause-compensation entitlement evidence",
+                "exact pause-duration billing-anchor adjustment",
                 "subscription billing-anchor projection",
                 "active subscription billing-anchor invariant",
                 "subscriber access-status projection",
@@ -65,7 +68,13 @@ DOMAIN = DomainSOT(
                 "historical only after its explicit end instant has passed. This "
                 "read classification never transitions lifecycle state. Pending-to-active "
                 "transitions invoke the typed PPPoE credential participant before the "
-                "active status and activation event are staged."
+                "active status and activation event are staged. A pause preserves "
+                "service configuration while denying access; resume releases one "
+                "cause at a time and moves the billing anchor by the exact effective "
+                "pause interval only after the final cause is released. For prepaid "
+                "service it first stages one zero-value ServiceEntitlement linked "
+                "uniquely to the pause episode, preserving paid invoice periods and "
+                "failing closed when canonical coverage evidence is ambiguous."
             ),
         ),
         SOTService(

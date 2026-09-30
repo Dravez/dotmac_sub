@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 _SERVICEABLE_STATUSES = {SubscriptionStatus.active, SubscriptionStatus.pending}
 # ...and any of these means the subscriber should NOT be able to use service.
 _NON_SERVICEABLE_STATUSES = {
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
     SubscriptionStatus.blocked,
     SubscriptionStatus.stopped,

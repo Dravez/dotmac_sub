@@ -683,6 +683,30 @@ def _seed_missing_notification_templates(db: Session) -> int:
             ),
         },
         {
+            "code": "subscription_paused",
+            "name": "Subscription Paused",
+            "channel": NotificationChannel.email,
+            "subject": "Your service has been paused",
+            "body": (
+                "Dear {subscriber_name},\n\n"
+                "Your {offer_name} service has been paused while support resolves "
+                "the linked issue. You will not lose the unused part of your "
+                "service period.\n\n"
+                "We will let you know when service resumes."
+            ),
+        },
+        {
+            "code": "subscription_paused",
+            "name": "Subscription Paused SMS",
+            "channel": NotificationChannel.sms,
+            "subject": None,
+            "body": (
+                "Hi {subscriber_name}, your {offer_name} service has been paused "
+                "while support resolves the linked issue. Unused service time is "
+                "preserved."
+            ),
+        },
+        {
             "code": "subscription_resumed",
             "name": "Subscription Resumed",
             "channel": NotificationChannel.email,
@@ -702,6 +726,27 @@ def _seed_missing_notification_templates(db: Session) -> int:
             "body": (
                 "Hi {subscriber_name}, your {offer_name} service has been resumed. "
                 "You can now use your service as normal."
+            ),
+        },
+        {
+            "code": "subscription_pause_resumed",
+            "name": "Paused Subscription Resumed",
+            "channel": NotificationChannel.email,
+            "subject": "Your paused service has resumed",
+            "body": (
+                "Dear {subscriber_name},\n\n"
+                "Your {offer_name} service has resumed. The effective pause "
+                "duration has been added to your service period."
+            ),
+        },
+        {
+            "code": "subscription_pause_resumed",
+            "name": "Paused Subscription Resumed SMS",
+            "channel": NotificationChannel.sms,
+            "subject": None,
+            "body": (
+                "Hi {subscriber_name}, your {offer_name} service has resumed and "
+                "the effective pause duration has been added to your service period."
             ),
         },
         {

@@ -2428,6 +2428,17 @@ class ServiceEntitlement(Base):
                 "status = 'active' AND source_billing_grant_id IS NOT NULL"
             ),
         ),
+        Index(
+            "uq_service_entitlements_active_pause_episode",
+            "source_pause_episode_id",
+            unique=True,
+            postgresql_where=text(
+                "status = 'active' AND source_pause_episode_id IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "status = 'active' AND source_pause_episode_id IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2451,6 +2462,10 @@ class ServiceEntitlement(Base):
     source_billing_grant_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("subscription_billing_grants.id", ondelete="RESTRICT"),
+    )
+    source_pause_episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("subscription_pause_episodes.id", ondelete="RESTRICT"),
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -2479,6 +2494,7 @@ class ServiceEntitlement(Base):
     source_billing_grant = relationship(
         "SubscriptionBillingGrant", back_populates="entitlement"
     )
+    source_pause_episode = relationship("SubscriptionPauseEpisode")
 
 
 class TaxRate(Base):

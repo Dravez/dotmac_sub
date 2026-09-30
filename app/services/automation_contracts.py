@@ -126,6 +126,9 @@ class AutomationActionCapability:
     author_permission: str
     runtime_scope: str
     idempotency: str
+    #: Declarative mutually-exclusive consequence family. Publication rejects
+    #: overlapping rules with the same trigger and conflict scope.
+    conflict_scope: str | None = None
     #: An action may be admitted for draft authoring before its runtime
     #: event-to-command adapter is ready. Publication must reject it until this
     #: flag is enabled in a later reviewed slice.

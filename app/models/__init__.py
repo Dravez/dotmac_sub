@@ -1024,6 +1024,16 @@ from app.models.subscription_lifecycle_schedule import (  # noqa: F401
     SubscriptionLifecycleSchedule,
     SubscriptionLifecycleScheduleStatus,
 )
+from app.models.subscription_pause import (  # noqa: F401
+    SubscriptionPauseBillingPolicy,
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+    SubscriptionPauseReason,
+    SubscriptionPauseResumePolicy,
+    SubscriptionPauseSource,
+)
 from app.models.support import (  # noqa: F401
     Ticket,
     TicketAccessToken,
