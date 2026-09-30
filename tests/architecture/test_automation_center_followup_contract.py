@@ -52,6 +52,18 @@ def test_focused_workspaces_and_lifecycle_actions_are_reachable() -> None:
     assert "return_to" in route
 
 
+def test_workflow_workspace_keeps_filters_aligned_and_actions_visible() -> None:
+    workflows = _source("templates/admin/automation/workflows.html")
+
+    assert 'class="flex flex-nowrap items-center gap-3 overflow-x-auto' in workflows
+    assert 'class="min-w-64 flex-1"' in workflows
+    assert 'class="w-44 shrink-0"' in workflows
+    assert 'class="w-56 shrink-0"' in workflows
+    assert "border border-white bg-primary-600" in workflows
+    assert "border border-slate-400 bg-white" in workflows
+    assert "border border-primary-700 bg-primary-600" in workflows
+
+
 def test_customer_and_support_event_options_are_owner_declared() -> None:
     customer = _source("app/services/sot_registry/domains/customer_context.py")
     support = _source("app/services/sot_registry/domains/support_operations.py")
