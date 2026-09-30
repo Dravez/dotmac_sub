@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from contextlib import nullcontext
+from types import SimpleNamespace
+from uuid import uuid4
+
+from app.services.events.handlers import automation
+from app.services.events.types import Event, EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
+
+
+def test_custom_event_uses_registered_name_for_runtime_trigger(monkeypatch):
+    event_name = "work_order.created"
+    event = Event(
+        event_type=EventType.custom,
+        payload={
+            "name": event_name,
+            "tenant_id": str(OPERATOR_TENANT_ID),
+            "work_order_id": str(uuid4()),
+        },
+    )
+    trigger = SimpleNamespace(
+        key=event_name,
+        event_type=event_name,
+        entity_type="operations.work_order",
+        tenant_id_field="tenant_id",
+        entity_id_field="work_order_id",
+    )
+    prepared_commands = []
+
+    monkeypatch.setattr(
+        automation, "HANDLED_EVENT_TYPES", frozenset({EventType.custom})
+    )
+    monkeypatch.setattr(automation, "_registered_triggers", lambda: (trigger,))
+    monkeypatch.setattr(automation, "_registered_script_targets", lambda: ())
+    monkeypatch.setattr(
+        automation.AutomationEventHandler,
+        "_execute_server_scripts",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(automation, "owner_session", lambda db: nullcontext(db))
+
+    def prepare_event_runs(db, command):
+        prepared_commands.append(command)
+        return ()
+
+    monkeypatch.setattr(
+        automation.automation_runtime, "prepare_event_runs", prepare_event_runs
+    )
+
+    automation.AutomationEventHandler().handle(object(), event)
+
+    assert len(prepared_commands) == 1
+    assert prepared_commands[0].event.event_type == event_name
