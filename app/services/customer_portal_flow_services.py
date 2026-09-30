@@ -1562,10 +1562,18 @@ def get_service_detail(
             .one_or_none()
         )
     customer_ont_is_uisp = bool(customer_ont and customer_ont.uisp_device_id)
-    account_health = build_portal_account_health(
+    account_health_projection = build_portal_account_health(
         db,
         coerce_uuid(account_id),
-    ).for_subscription(subscription.id)
+    )
+    try:
+        account_health = account_health_projection.for_subscription(subscription.id)
+    except ValueError:
+        logger.warning(
+            "portal_service_missing_from_health_projection",
+            extra={"subscription_id": str(subscription.id)},
+        )
+        return None
 
     # Renewal context: show renewal banner when contract nearing expiration
     renewal_context: dict[str, Any] = {"show_renewal": False}
