@@ -365,6 +365,19 @@ No path rounds a shortfall, invents a payment, represents opening funding as a
 Payment, marks an underfunded invoice paid, double-spends an opening baseline,
 or creates a second entitlement.
 
+### Reviewed payment-allocation reversal
+
+`financial.payments` owns a separate, fingerprint-bound correction for an
+evidence-backed allocation whose target invoice was voided. Preview accepts
+only one active allocation with both ledger links, an active succeeded Payment,
+and a void Invoice. Confirmation locks the allocation, Payment, Invoice, and
+both ledger rows; appends one linked reversal for each ledger row; retires only
+the allocation projection; records actor, reason, preview fingerprint, and
+idempotency evidence; and leaves the Payment active for later allocation.
+The original allocation and ledger rows are never edited or deleted. A stale
+preview, refund/reversal evidence, missing ledger pair, non-void invoice, or
+replay with changed inputs fails closed.
+
 ## Atomic mixed-source settlement
 
 The owner locks the customer account, invoice, eligible payment/settlement

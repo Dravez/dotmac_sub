@@ -1521,6 +1521,47 @@ class PaymentAllocationConfirm(PaymentAllocationPreviewRequest):
     idempotency_key: str = Field(min_length=16, max_length=120)
 
 
+class PaymentAllocationReversalPreviewRequest(BaseModel):
+    allocation_id: UUID
+
+
+class PaymentAllocationReversalPreviewRead(BaseModel):
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    invoice_number: str | None = None
+    account_id: UUID
+    amount: Decimal
+    currency: str
+    invoice_status: InvoiceStatus
+    payment_status: PaymentStatus
+    invoice_balance_before: Decimal
+    invoice_balance_after: Decimal
+    payment_available_before: Decimal
+    payment_available_after: Decimal
+    reverses_ledger_entry_id: UUID
+    reverses_consumption_ledger_entry_id: UUID
+    fingerprint: str
+
+
+class PaymentAllocationReversalConfirm(BaseModel):
+    allocation_id: UUID
+    preview_fingerprint: str = Field(min_length=64, max_length=64)
+    idempotency_key: str = Field(min_length=16, max_length=120)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PaymentAllocationReversalRead(BaseModel):
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    amount: Decimal
+    reversal_ledger_entry_id: UUID
+    reversal_consumption_ledger_entry_id: UUID
+    reversed_at: datetime
+    idempotent_replay: bool = False
+
+
 class PaymentAllocationRead(PaymentAllocationBase):
     model_config = ConfigDict(from_attributes=True)
 
