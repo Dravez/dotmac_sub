@@ -210,6 +210,10 @@ def test_migrated_machine_schema_rls_authentication_and_constraints(
         ).one()
         assert posture == ("app_user", False, False)
         with Session(bind=connection, join_transaction_mode="create_savepoint") as db:
+            # Establish the ORM transaction first: Sub's after_begin hook
+            # installs its operator tenant. This isolation canary then sets
+            # each synthetic tenant inside that same active transaction.
+            db.connection()
             for tenant_id, visible in (
                 (first_tenant, {first_id, anonymous_id}),
                 (second_tenant, {second_id}),
