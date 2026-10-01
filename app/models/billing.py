@@ -116,6 +116,7 @@ class TopupIntentPurpose(enum.Enum):
     """Server-owned reason for collecting money through a top-up intent."""
 
     account_credit_deposit = "account_credit_deposit"
+    prepaid_period_purchase = "prepaid_period_purchase"
 
 
 class TopupAllocationPolicy(enum.Enum):
@@ -123,12 +124,14 @@ class TopupAllocationPolicy(enum.Enum):
 
     credit_only = "credit_only"
     invoice_first_then_credit = "invoice_first_then_credit"
+    selected_purchase_invoices_only = "selected_purchase_invoices_only"
 
 
 class AccountCreditApplicationPolicy(enum.Enum):
     """What Sub does with evidenced account credit after settlement."""
 
     pay_eligible_invoices = "pay_eligible_invoices"
+    none = "none"
 
 
 class PaymentRefundOrigin(enum.Enum):
@@ -2003,7 +2006,12 @@ class TopupIntent(Base):
             "allocation_policy = 'credit_only' AND "
             "credit_application_policy = 'pay_eligible_invoices' AND "
             "policy_version = 1 AND preview_fingerprint IS NOT NULL AND "
-            "idempotency_key IS NOT NULL AND channel IS NOT NULL)",
+            "idempotency_key IS NOT NULL AND channel IS NOT NULL) OR ("
+            "purpose = 'prepaid_period_purchase' AND "
+            "allocation_policy = 'selected_purchase_invoices_only' AND "
+            "credit_application_policy = 'none' AND policy_version = 1 AND "
+            "preview_fingerprint IS NOT NULL AND idempotency_key IS NOT NULL "
+            "AND channel IS NOT NULL)",
             name="ck_topup_intents_account_credit_contract",
         ),
     )
