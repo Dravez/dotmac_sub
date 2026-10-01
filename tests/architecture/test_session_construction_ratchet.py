@@ -90,7 +90,10 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
 #: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
 #: isolated like the writer tests (EnforcementApplication carries no FKs).
-TEST_FIXTURE_BASELINE_TOTAL = 146
+#: +1 from test_communication_intent_coverage_pg.py and +9 from
+#: test_payment_email_composition_pg.py: real-role, isolation and concurrency
+#: fixtures. The production construction baseline remains unchanged.
+TEST_FIXTURE_BASELINE_TOTAL = 156
 
 
 def _baseline() -> dict[str, int]:
