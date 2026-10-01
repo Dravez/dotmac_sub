@@ -577,9 +577,7 @@ def test_classified_candidate_event_invokes_typed_sales_handoff(
     assert captured["attribution"].external_ad_id == "ig-ad-1"
 
 
-def test_classified_candidate_event_refuses_another_tenant(
-    db_session, monkeypatch
-):
+def test_classified_candidate_event_refuses_another_tenant(db_session, monkeypatch):
     monkeypatch.setattr(
         lead_intake_event_handler, "finish_read_transaction", lambda _db: None
     )
