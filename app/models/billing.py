@@ -2439,6 +2439,17 @@ class ServiceEntitlement(Base):
                 "status = 'active' AND source_pause_episode_id IS NOT NULL"
             ),
         ),
+        Index(
+            "uq_service_entitlements_active_outage_compensation",
+            "source_outage_compensation_id",
+            unique=True,
+            postgresql_where=text(
+                "status = 'active' AND source_outage_compensation_id IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "status = 'active' AND source_outage_compensation_id IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2466,6 +2477,10 @@ class ServiceEntitlement(Base):
     source_pause_episode_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("subscription_pause_episodes.id", ondelete="RESTRICT"),
+    )
+    source_outage_compensation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("outage_compensation_decisions.id", ondelete="RESTRICT"),
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
