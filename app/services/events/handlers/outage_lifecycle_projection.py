@@ -20,6 +20,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.services.db_session_adapter import db_session_adapter
 from app.services.events.handlers.owner_session import owner_session as _owner_session
 from app.services.events.owner_outputs import require_output_text
 from app.services.events.types import Event, EventType
@@ -148,6 +149,7 @@ class OutageLifecycleProjectionHandler:
                     for row in intervals_for_incident(read_db, coerce_uuid(incident_id))
                 )
             )
+            db_session_adapter.release_read_transaction(read_db)
 
         resolved_at = event.payload.get("resolved_at")
         effective_at = (

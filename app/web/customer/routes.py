@@ -77,6 +77,7 @@ from app.services.customer_portal_context import (
     resolve_customer_subscription,
 )
 from app.services.customer_portal_flow_payments import GatewayPaymentIncomplete
+from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.file_storage import build_content_disposition, file_uploads
 from app.services.nin_matching import mask_nin
@@ -737,7 +738,7 @@ def customer_billing(
         resolve_value(db, SettingDomain.billing, "prepaid_period_purchase_enabled")
         is True
     )
-    finish_read_transaction(db)
+    db_session_adapter.release_read_transaction(db)
 
     from datetime import UTC, datetime
 
@@ -2239,10 +2240,12 @@ def customer_service_period_purchase(
             url="/portal/auth/login?next=/portal/billing/service-periods",
             status_code=303,
         )
-    if (
+    period_purchase_enabled = (
         resolve_value(db, SettingDomain.billing, "prepaid_period_purchase_enabled")
-        is not True
-    ):
+        is True
+    )
+    db_session_adapter.release_read_transaction(db)
+    if not period_purchase_enabled:
         return RedirectResponse(url="/portal/billing", status_code=303)
     return templates.TemplateResponse(
         "customer/billing/service_periods.html",
