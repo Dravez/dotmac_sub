@@ -243,8 +243,9 @@ Migration `333_fiber_topology_staging` adds two evidence tables:
   `(source_system, profile, manifest_sha256)` and it records the raw file hash,
   row counts, blockers, candidates, actor, and normalization metadata. Archive
   metadata or feature ordering cannot create a duplicate normalized batch.
-- `fiber_topology_staged_features` stores each normalized source fact, stable
-  external ID, source properties, GeoJSON, content/geometry hashes, lineage to a
+- `fiber_topology_staged_features` stores each normalized source fact, an
+  external ID when present, a display-name fallback when a mixed map omits its
+  source ID, source properties, GeoJSON, content/geometry hashes, lineage to a
   prior source fact, and a non-authoritative match suggestion.
 
 `network.fiber_source_staging` is the sole writer. Its match states are:
@@ -255,8 +256,10 @@ Migration `333_fiber_topology_staging` adds two evidence tables:
 - `candidate`: content changed, a normalized-name candidate exists, or the
   source has a possible duplicate name/geometry;
 - `ambiguous`: more than one canonical candidate exists;
-- `blocked`: the source row lacks stable identity, valid expected geometry, or
-  valid Nigerian coordinates, or duplicates an external ID inside the batch.
+- `blocked`: a profile-required identity, valid expected geometry, or valid
+  Nigerian coordinates is missing, or an external ID is duplicated inside the
+  batch. Mixed browser-map rows may use a display name as evidence when their
+  source ID is absent; this never approves a canonical asset change.
 
 These states are review evidence, not asset decisions. The staging service only
 constructs `FiberTopologySourceBatch` and `FiberTopologyStagedFeature` rows.
