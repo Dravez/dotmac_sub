@@ -1173,6 +1173,7 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             3,
             permission="support:ticket:create",
         ),
+        _action("transfer-network-map", "Import or export a Network Map file", 4),
     ),
     "olt-operational-health": (
         _action("compare-olts", "Compare OLT health", 0),
