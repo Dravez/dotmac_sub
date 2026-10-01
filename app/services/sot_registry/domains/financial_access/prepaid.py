@@ -21,6 +21,135 @@ from app.services.sot_manifest import (
 
 SERVICES: tuple[SOTService, ...] = (
     SOTService(
+        name="financial.outage_compensation",
+        module="app.services.outage_compensation",
+        owns=("finalized outage service-period compensation",),
+        depends_on=(
+            "access.subscription_lifecycle",
+            "control.settings_spec",
+            "financial.prepaid_service_coverage",
+            "network.customer_outage_accrual",
+        ),
+        notes=(
+            "Consumes each finalized customer-outage interval exactly once, "
+            "measures eligible downtime in exact seconds, caps compensation to "
+            "funded entitlement overlap, and appends the result after the "
+            "current funded tail without changing subscription lifecycle state."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="finalized outage service-period compensation",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "finalized customer outage intervals",
+                        "funded prepaid coverage intervals",
+                        "outage compensation policy",
+                        "compensation evaluation time",
+                    ),
+                    canonical_writer="financial.outage_compensation",
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="finalized customer outage intervals",
+                    owner="network.customer_outage_accrual",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "finalized confirmed_unavailable CustomerOutageInterval "
+                        "rows and explicit planned-maintenance exclusions"
+                    ),
+                ),
+                AuthorityInput(
+                    name="funded prepaid coverage intervals",
+                    owner="financial.prepaid_service_coverage",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "active ServiceEntitlement intervals for the exact "
+                        "subscription and account"
+                    ),
+                ),
+                AuthorityInput(
+                    name="outage compensation policy",
+                    owner="control.settings_spec",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "billing.outage_compensation_enabled and the admin-editable "
+                        "billing.outage_compensation_min_hours threshold"
+                    ),
+                ),
+                AuthorityInput(
+                    name="compensation evaluation time",
+                    owner="external:system_clock",
+                    kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                    source="UTC command effective_at",
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.OWNER_MANAGED,
+                boundary=(
+                    "The owner locks the subscriber account and writes one "
+                    "decision, its consumed interval links, its zero-value exact "
+                    "entitlement, and the billing-anchor projection atomically."
+                ),
+                locking=(
+                    "The canonical account lock serializes coverage-tail changes; "
+                    "a unique interval-consumption key prevents two decisions from "
+                    "using the same outage evidence."
+                ),
+                idempotency=(
+                    "A required idempotency key replays the same preview fingerprint; "
+                    "a changed fingerprint fails closed."
+                ),
+                retries=(
+                    "Transient failures may retry with the same idempotency key. "
+                    "Stale or contradictory evidence requires a fresh preview."
+                ),
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    "financial.outage_compensation.configuration_invalid",
+                    "financial.outage_compensation.feature_disabled",
+                    "financial.outage_compensation.idempotency_conflict",
+                    "financial.outage_compensation.idempotency_required",
+                    "financial.outage_compensation.no_finalized_outage",
+                    "financial.outage_compensation.stale_preview",
+                    "financial.outage_compensation.subscription_not_found",
+                    *owner_command_boundary_error_codes(
+                        "financial.outage_compensation"
+                    ),
+                ),
+                mapping_owner="outage compensation task and administrative adapters",
+                fail_closed_on=(
+                    "missing or invalid policy",
+                    "mutable billing anchor beyond funded coverage evidence",
+                    "stale outage, funding, or tail evidence",
+                ),
+            ),
+            events=EventContract(event_types=()),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="financial.outage_compensation",
+                verification=(
+                    "Exact-second union, funded-overlap, threshold, exclusion, "
+                    "idempotency, and concurrent-tail regression tests."
+                ),
+                cutover_gate=(
+                    "The feature flag remains disabled until migrations, scheduled "
+                    "processing, cancellation rebasing, and customer projections "
+                    "are deployed together."
+                ),
+            ),
+            steward="billing and network operations",
+            design_refs=(
+                "docs/designs/PREPAID_PERIOD_PURCHASE_AND_OUTAGE_COMPENSATION.md",
+                "docs/designs/OUTAGE_SLA_SPINE.md",
+                "docs/SOT_RELATIONSHIP_MAP.md",
+            ),
+            test_refs=("tests/test_outage_compensation.py",),
+        ),
+    ),
+    SOTService(
         name="financial.prepaid_currency",
         module="app.services.prepaid_currency",
         owns=("prepaid enforcement currency policy",),
