@@ -4,9 +4,10 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
@@ -67,6 +68,7 @@ from tests.playwright.helpers.auth import (
 )
 from tests.playwright.helpers.config import E2ESettings
 from tests.playwright.helpers.data import ensure_person_subscriber_account
+from tests.staff_identity_fixtures import add_bound_staff_login
 
 CUSTOMER_PORTAL_PASSWORD = "CustomerPass123!"
 RESELLER_PORTAL_USERNAME = "e2e.reseller@example.com"
@@ -597,20 +599,27 @@ def admin_storage_state(browser, settings: E2ESettings) -> Path:
         context.close()
 
 
-@pytest.fixture(scope="session")
-def agent_storage_state(browser, settings: E2ESettings, agent_token: str) -> Path:
-    # Exercise the staff web-login path: its cookie is intentionally a compact
-    # web session token, while agent_token is an API access token.
-    path = _storage_state_path("agent")
-    path.parent.mkdir(parents=True, exist_ok=True)
+@pytest.fixture()
+def agent_storage_state(
+    browser, settings: E2ESettings, test_identities: dict, e2e_db, tmp_path: Path
+) -> Path:
+    # Admin web login admits a Party-bound staff principal. The API agent in
+    # test_identities is a subscriber and must not be used for this portal.
+    username = f"e2e-support-{uuid4().hex}@example.test"
+    password = token_urlsafe(24)
+    add_bound_staff_login(
+        e2e_db, role_name="support", email=username, password=password
+    )
+    e2e_db.commit()
+    path = tmp_path / "agent.json"
     context = browser.new_context()
     context.set_default_timeout(settings.action_timeout_ms)
     context.set_default_navigation_timeout(settings.navigation_timeout_ms)
     page = context.new_page()
     try:
         page.goto(f"{settings.base_url}/auth/login", wait_until="domcontentloaded")
-        page.get_by_label("Email or Username").fill(settings.agent_username)
-        page.get_by_label("Password").fill(settings.agent_password)
+        page.get_by_label("Email or Username").fill(username)
+        page.get_by_label("Password").fill(password)
         with page.expect_response(
             lambda response: (
                 response.url.endswith("/auth/login")

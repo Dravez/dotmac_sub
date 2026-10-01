@@ -1,54 +1,6 @@
 [
   {
-    "spec": "tests/playwright/e2e/test_billing.py::TestInvoicesList::test_new_invoice_button",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_billing.py::TestBillingWorkflows::test_create_invoice_workflow",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerServices::test_services_shows_details",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerSupport::test_create_ticket_flow[mobile]",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
     "spec": "tests/playwright/e2e/test_e2e_workflows.py::TestSubscriptionActivation::test_phase1_customer_activation_shows_pppoe_and_radius_evidence",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_network.py::TestOLTs::test_new_olt_button",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_network.py::TestONTs::test_new_ont_button",
     "reason": "Page-object drift under investigation; fails with the harness repaired",
     "issue": "#1895",
     "category": "tail",
@@ -80,49 +32,8 @@
     "review_by": "2026-09-30"
   },
   {
-    "spec": "tests/playwright/e2e/test_system.py::TestModuleManager::test_feature_controls_show_tri_state_provenance",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_system.py::TestModuleManager::test_feature_override_persists_and_is_restored",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_system.py::TestSystemNavigation::test_navigate_to_system",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
     "spec": "tests/playwright/e2e/test_workqueue.py::TestNativeAgentWorkqueue::test_admin_can_claim_and_complete_through_native_owner",
     "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerDashboard::test_dashboard_shows_account_summary",
-    "reason": "Intermittent: the account-summary locator (dashboard_page.py:34) is sometimes not visible on first render; passed and failed across identical back-to-back runs",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "flaky"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_subscription_correction.py::test_review_and_apply_exact_subscription_correction",
-    "reason": "Strict-mode violation: get_by_text('Subscription correction applied') resolves to 2 elements on GitHub runners; env-skipped in container runs",
     "issue": "#1895",
     "category": "tail",
     "owner": "unassigned",

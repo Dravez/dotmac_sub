@@ -11,7 +11,6 @@ import re
 import time
 from uuid import uuid4
 
-import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
 
@@ -34,43 +33,53 @@ def _request_with_retry(fn, *, attempts: int = 3, delay_s: float = 1.0):
     raise RuntimeError("request retry exhausted")
 
 
-def _pick_pop_site_with_nas(
-    api_context, admin_token: str | None = None
+def _create_disposable_pop_site_with_nas(
+    api_context, admin_token: str, suffix: str
 ) -> tuple[dict, dict]:
-    headers = bearer_headers(admin_token) if admin_token else None
-    pop_sites_response = _request_with_retry(
-        lambda: api_get(
+    """Give this flow its own active topology without a device endpoint."""
+    headers = bearer_headers(admin_token)
+    pop_response = _request_with_retry(
+        lambda: api_post_json(
             api_context,
-            "/api/v1/pop-sites?is_active=true&limit=100",
+            "/api/v1/pop-sites",
+            {
+                "name": f"E2E PPPoE POP {suffix}",
+                "code": f"E2E-POP-{suffix}",
+                "city": "Lagos",
+                "region": "Lagos",
+                "country_code": "NG",
+                "is_active": True,
+            },
             headers=headers,
         )
     )
-    assert pop_sites_response.status == 200
-    pop_sites = pop_sites_response.json()["items"]
+    assert pop_response.status == 201
+    pop_site = pop_response.json()
 
-    nas_devices_response = _request_with_retry(
-        lambda: api_get(
+    # No IP, management address, shared secret, or API/SSH credentials: this
+    # catalogue NAS can drive POP-based selection without contacting hardware.
+    nas_response = _request_with_retry(
+        lambda: api_post_json(
             api_context,
-            "/api/v1/nas-devices?is_active=true&limit=200",
+            "/api/v1/nas-devices",
+            {
+                "name": f"E2E PPPoE NAS {suffix}",
+                "code": f"E2E-NAS-{suffix}",
+                "vendor": "other",
+                "pop_site_id": pop_site["id"],
+                "supported_connection_types": ["pppoe"],
+                "default_connection_type": "pppoe",
+                "status": "active",
+                "is_active": True,
+                "backup_enabled": False,
+            },
             headers=headers,
         )
     )
-    assert nas_devices_response.status == 200
-    nas_devices = nas_devices_response.json()["items"]
-
-    nas_by_pop = {
-        str(device.get("pop_site_id")): device
-        for device in nas_devices
-        if device.get("pop_site_id")
-    }
-    for pop_site in pop_sites:
-        pop_id = str(pop_site.get("id") or "")
-        if pop_id in nas_by_pop:
-            return pop_site, nas_by_pop[pop_id]
-
-    pytest.skip(
-        "No active POP site with an active NAS device is available for Phase 1 E2E."
-    )
+    assert nas_response.status == 201
+    nas_device = nas_response.json()
+    assert nas_device["pop_site_id"] == pop_site["id"]
+    return pop_site, nas_device
 
 
 def _create_phase1_offer(
@@ -275,7 +284,9 @@ class TestSubscriptionActivation:
         suffix = uuid4().hex[:8].upper()
         customer_email = f"phase1-{suffix.lower()}@example.com"
         _configure_phase1_radius_settings(api_context, admin_token)
-        pop_site, nas_device = _pick_pop_site_with_nas(api_context, admin_token)
+        pop_site, nas_device = _create_disposable_pop_site_with_nas(
+            api_context, admin_token, suffix
+        )
         offer, radius_profile = _create_phase1_offer(api_context, suffix, admin_token)
 
         fresh_context = browser.new_context()
@@ -328,7 +339,7 @@ class TestSubscriptionActivation:
         provisioning_nas_value = page.locator(
             "input[name='provisioning_nas_device_id'][data-typeahead-hidden]"
         )
-        expect(provisioning_nas_value).not_to_have_value("")
+        expect(provisioning_nas_value).to_have_value(str(nas_device["id"]))
         expect(
             page.locator("input#provisioning_nas_device_id[data-typeahead-input]")
         ).not_to_have_value("")
@@ -336,7 +347,7 @@ class TestSubscriptionActivation:
 
         page.get_by_role("button", name="Continue").click()
         page.locator("input[name='activate_immediately']").check()
-        page.locator("input[name='send_welcome_email']").check()
+        page.locator("input[name='send_welcome_email']").uncheck()
         page.get_by_role("button", name="Add Subscription").click(no_wait_after=True)
 
         page.wait_for_url("**/admin/customers/person/**")

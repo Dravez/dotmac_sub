@@ -101,12 +101,17 @@ class TestNativeAgentWorkqueue:
         row.locator("summary").click()
         row.get_by_role("button", name="Claim for me").click()
 
+        # The non-HTMX form redirects to the workqueue's default Right now tab.
+        tickets_tab = admin_page.get_by_role("tab", name="Tickets")
+        tickets_tab.click()
+        expect(tickets_tab).to_have_attribute("aria-selected", "true")
         row = section.locator("article").filter(has_text=workqueue_ticket["title"])
         expect(row).to_have_count(1)
         row.locator("summary").click()
         expect(row.get_by_role("button", name="Claim for me")).to_have_count(0)
         row.locator('input[name="confirmed"]').check()
         row.get_by_role("button", name="Complete through owner").click()
+        admin_page.get_by_role("tab", name="Tickets").click()
         expect(
             section.locator("article").filter(has_text=workqueue_ticket["title"])
         ).to_have_count(0)
