@@ -19,6 +19,7 @@ from app.models.billing import (
     PaymentProvider,
     PaymentStatus,
     ServiceEntitlement,
+    TaxApplication,
     TopupIntent,
 )
 from app.models.billing_contract import (
@@ -684,7 +685,7 @@ def settle_prepaid_period_purchase(
                     unit_price=row.unit_price,
                     amount=row.unit_price,
                     tax_rate_id=row.tax_rate_id,
-                    tax_application=row.tax_application,
+                    tax_application=TaxApplication(row.tax_application),
                     metadata_={
                         "kind": "base_subscription",
                         "billing_period_start": row.starts_at.isoformat(),
