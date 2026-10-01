@@ -4380,7 +4380,9 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
             ),
             steward="billing and finance operations",
-            design_refs=("docs/designs/PREPAID_SERVICE_PERIOD_PURCHASES.md",),
+            design_refs=(
+                "docs/designs/PREPAID_PERIOD_PURCHASE_AND_OUTAGE_COMPENSATION.md",
+            ),
             test_refs=(
                 "tests/test_prepaid_period_purchases.py",
                 "tests/test_gateway_topup_intents.py",

@@ -2059,9 +2059,6 @@ def verify_and_settle_service_period_purchase(
     tx = _observe_gateway_for_customer(
         db, intent=intent, provider_type=provider_type, account_id=account_id
     )
-    metadata_intent_id = str((tx.metadata or {}).get("topup_intent_id") or "")
-    if metadata_intent_id != str(intent.id):
-        raise ValueError("Verified payment did not match the checkout session")
     intent_id = intent.id
     provider_id = intent.provider_id
     db_session_adapter.release_read_transaction(db)

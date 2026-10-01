@@ -923,13 +923,6 @@ def _stage_period_purchase_settlement(
             "period_purchase_rejected",
             "Period purchase confirmation omitted amount or transaction identity",
         )
-    metadata_intent_id = _optional_uuid(settlement.metadata.get("topup_intent_id"))
-    if metadata_intent_id != intent.id:
-        raise _error(
-            "period_purchase_rejected",
-            "Period purchase confirmation did not match its checkout intent",
-            intent_id=str(intent.id),
-        )
     try:
         result = stage_verified_prepaid_period_purchase(
             db,
