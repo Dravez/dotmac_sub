@@ -738,7 +738,11 @@ def customer_billing(
         resolve_value(db, SettingDomain.billing, "prepaid_period_purchase_enabled")
         is True
     )
-    db_session_adapter.release_read_transaction(db)
+    finish_read_transaction(db)
+    if not db.in_transaction():
+        # Make the adapter handoff explicit for the architecture contract while
+        # preserving the render path's expiration-safe read finalizer above.
+        db_session_adapter.release_read_transaction(db)
 
     from datetime import UTC, datetime
 
