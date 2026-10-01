@@ -13,13 +13,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.billing import (
-    Invoice,
     InvoiceDueDateBasis,
-    InvoiceLine,
     InvoiceStatus,
     Payment,
+    PaymentProvider,
     PaymentStatus,
     ServiceEntitlement,
+    TopupIntent,
 )
 from app.models.billing_contract import (
     CadenceAlignment,
@@ -51,9 +51,15 @@ from app.services.billing.invoices import (
     Invoices,
 )
 from app.services.billing.payments import finalize_invoice_application_for_owner
+from app.services.billing.payments import Payments
 from app.services.common import coerce_uuid, round_money
 from app.services.customer_financial_position import get_customer_financial_position
 from app.services.domain_errors import DomainError
+from app.services.owner_commands import (
+    CommandContext,
+    OwnerCommandDefinition,
+    execute_owner_command,
+)
 from app.services.prepaid_service_renewals import (
     PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES,
     PrepaidMonthlyChargeDetail,
@@ -63,12 +69,28 @@ from app.services.prepaid_service_renewals import (
     resolve_prepaid_subscription_settlement_period,
 )
 from app.services.settings_spec import resolve_value
+from app.services.topup_intents import (
+    COMPLETION_SCOPE,
+    CompleteTopupIntentCommand,
+    TopupIntentCompletionSource,
+    stage_topup_intent_completion,
+)
 from app.timezone import APP_TIMEZONE_NAME
 
 _OWNER = "financial.prepaid_period_purchases"
 _POLICY_VERSION = 1
 _QUOTE_TTL = timedelta(minutes=30)
 _HARD_MAX_PERIODS = 12
+_CREATE_COMMAND = OwnerCommandDefinition(
+    owner=_OWNER,
+    concern="prepaid service-period purchase quote persistence",
+    name="create_prepaid_period_purchase",
+)
+_SETTLE_VERIFIED_COMMAND = OwnerCommandDefinition(
+    owner=_OWNER,
+    concern="verified prepaid service-period purchase settlement",
+    name="settle_verified_prepaid_period_purchase",
+)
 
 
 class PrepaidPeriodPurchaseError(DomainError, ValueError):
@@ -156,6 +178,20 @@ class SettlePrepaidPeriodPurchaseCommand:
     payment_id: UUID
     effective_at: datetime
     evidence_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class SettleVerifiedPrepaidPeriodPurchaseCommand:
+    intent_id: UUID
+    provider_id: UUID
+    external_transaction_id: str
+    amount: Decimal
+    provider_fee: Decimal
+    currency: str
+    effective_at: datetime
+    completion_source: TopupIntentCompletionSource = (
+        TopupIntentCompletionSource.provider_webhook
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +395,20 @@ def preview_prepaid_period_purchase(
 
 
 def create_prepaid_period_purchase(
+    db: Session,
+    command: CreatePrepaidPeriodPurchaseCommand,
+    *,
+    context: CommandContext,
+) -> PrepaidPeriodPurchase:
+    return execute_owner_command(
+        db,
+        definition=_CREATE_COMMAND,
+        context=context,
+        operation=lambda: _stage_prepaid_period_purchase(db, command),
+    )
+
+
+def _stage_prepaid_period_purchase(
     db: Session, command: CreatePrepaidPeriodPurchaseCommand
 ) -> PrepaidPeriodPurchase:
     key = command.idempotency_key.strip()
@@ -434,6 +484,98 @@ def create_prepaid_period_purchase(
     db.flush()
     db.refresh(purchase)
     return purchase
+
+
+def stage_verified_prepaid_period_purchase(
+    db: Session,
+    command: SettleVerifiedPrepaidPeriodPurchaseCommand,
+    *,
+    context: CommandContext,
+) -> PrepaidPeriodPurchaseSettlement:
+    intent = db.get(TopupIntent, command.intent_id)
+    if (
+        intent is None
+        or intent.purpose != "prepaid_period_purchase"
+        or intent.account_id is None
+    ):
+        raise _error("intent_invalid", "Payment intent is not a period purchase.")
+    purchase = db.scalar(
+        select(PrepaidPeriodPurchase).where(
+            PrepaidPeriodPurchase.topup_intent_id == intent.id
+        )
+    )
+    provider = db.get(PaymentProvider, command.provider_id)
+    external_id = command.external_transaction_id.strip()
+    amount = round_money(command.amount)
+    fee = round_money(command.provider_fee)
+    currency = command.currency.strip().upper()
+    if (
+        purchase is None
+        or provider is None
+        or not external_id
+        or amount != round_money(purchase.total)
+        or currency != purchase.currency
+    ):
+        raise _error(
+            "provider_evidence_mismatch",
+            "Verified provider evidence does not match the period purchase.",
+        )
+    payment_result = Payments.stage_verified_provider_settlement(
+        db,
+        account_id=purchase.account_id,
+        provider_id=provider.id,
+        external_id=external_id,
+        gross_amount=amount,
+        provider_fee=fee,
+        # Gateway fees are a merchant expense. The customer's full confirmed
+        # charge funds the service periods, matching existing typed top-up
+        # behavior and preventing a fee-sized invoice shortfall.
+        net_amount=round_money(purchase.total),
+        currency=currency,
+        memo=f"Prepaid service-period purchase {purchase.id}",
+        paid_at=_utc(command.effective_at),
+    )
+    settlement = settle_prepaid_period_purchase(
+        db,
+        SettlePrepaidPeriodPurchaseCommand(
+            purchase_id=purchase.id,
+            payment_id=payment_result.payment.id,
+            effective_at=command.effective_at,
+            evidence_ref=f"provider:{provider.id}:{external_id}",
+        ),
+    )
+    stage_topup_intent_completion(
+        db,
+        CompleteTopupIntentCommand(
+            intent_id=intent.id,
+            payment_id=payment_result.payment.id,
+            source=command.completion_source,
+        ),
+        context=CommandContext.system(
+            actor=context.actor,
+            scope=COMPLETION_SCOPE,
+            reason="Complete prepaid service-period purchase intent",
+            correlation_id=context.correlation_id,
+            causation_id=context.command_id,
+        ),
+    )
+    return settlement
+
+
+def settle_verified_prepaid_period_purchase(
+    db: Session,
+    command: SettleVerifiedPrepaidPeriodPurchaseCommand,
+    *,
+    context: CommandContext,
+) -> PrepaidPeriodPurchaseSettlement:
+    return execute_owner_command(
+        db,
+        definition=_SETTLE_VERIFIED_COMMAND,
+        context=context,
+        operation=lambda: stage_verified_prepaid_period_purchase(
+            db, command, context=context
+        ),
+    )
 
 
 def settle_prepaid_period_purchase(
@@ -612,7 +754,10 @@ __all__ = [
     "PrepaidPeriodPurchaseQuote",
     "PrepaidPeriodPurchaseSettlement",
     "SettlePrepaidPeriodPurchaseCommand",
+    "SettleVerifiedPrepaidPeriodPurchaseCommand",
     "create_prepaid_period_purchase",
     "preview_prepaid_period_purchase",
     "settle_prepaid_period_purchase",
+    "settle_verified_prepaid_period_purchase",
+    "stage_verified_prepaid_period_purchase",
 ]
