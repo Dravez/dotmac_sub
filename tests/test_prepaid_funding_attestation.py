@@ -1,15 +1,17 @@
 """Trust-anchor requirements for final prepaid reconstruction.
 
-The anchor decides whether a signed reconstruction manifest is believed. In
-the local-source configuration it is loaded from a root-managed, read-only
-deployment file rather than a database setting or OpenBao reference.
+The anchor decides whether a signed reconstruction manifest is believed. What
+protects it is not confidentiality — it is a public key — but AUTHORITY: only
+someone with OpenBao access may replace it, because replacing it means forged
+manifests verify.
 
 It used to be a `billing` setting holding a `bao://` reference, guarded by
 "must be an OpenBao reference". These tests pinned that guard, and the guard was
 weaker than it looked: it checked the value WAS a reference and never WHICH
 reference, so anyone able to write settings could aim it at a key they
-controlled. The local trust file cannot be selected through the settings
-surface.
+controlled. The anchor is now held from a path named in
+`kernel_secret_source.OPTIONAL_SECRET_REFS`, which the settings surface cannot
+reach at all.
 """
 
 import pytest
@@ -85,77 +87,3 @@ def test_no_settings_row_can_supply_the_anchor(db_session, nothing_held):
 
     with pytest.raises(ValueError, match="no reconstruction attestation public key"):
         prepaid_funding_attestation.resolve_trusted_public_key_pem(db_session)
-
-
-def test_signing_key_must_match_the_configured_public_trust_anchor() -> None:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    signing_key = Ed25519PrivateKey.generate()
-    other_key = Ed25519PrivateKey.generate()
-    private_pem = signing_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("ascii")
-    matching_public_pem = (
-        signing_key.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("ascii")
-    )
-    other_public_pem = (
-        other_key.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("ascii")
-    )
-
-    assert prepaid_funding_attestation.signing_key_matches_public_key(
-        private_pem,
-        matching_public_pem,
-    )
-    assert not prepaid_funding_attestation.signing_key_matches_public_key(
-        private_pem,
-        other_public_pem,
-    )
-
-
-def test_exporter_reads_an_owner_only_file_and_checks_the_matching_anchor(
-    tmp_path,
-) -> None:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    from scripts.one_off.export_prepaid_funding_snapshot import _resolve_signing_key
-
-    signing_key = Ed25519PrivateKey.generate()
-    private_file = tmp_path / "signing.pem"
-    public_file = tmp_path / "trusted-public.pem"
-    private_pem = signing_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("ascii")
-    public_pem = (
-        signing_key.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("ascii")
-    )
-    private_file.write_text(private_pem, encoding="utf-8")
-    public_file.write_text(public_pem, encoding="utf-8")
-    private_file.chmod(0o600)
-    public_file.chmod(0o644)
-
-    assert _resolve_signing_key(private_file, public_file) == private_pem
-
-    private_file.chmod(0o644)
-    with pytest.raises(RuntimeError, match="owner-only"):
-        _resolve_signing_key(private_file, public_file)

@@ -18,8 +18,6 @@ things: the held value is what comes back, and no OpenBao call was attempted.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 from dotmac_kernel.secret_sources import clear_secret_source, install_secret_source
 
@@ -210,12 +208,9 @@ def test_no_source_installed_leaves_every_reader_on_its_environment(
 
 def test_install_is_skipped_when_no_openbao_is_configured(monkeypatch) -> None:
     monkeypatch.setattr(kss, "install", lambda: pytest.fail("should not install"))
-    monkeypatch.setattr(kss, "is_openbao_configured", lambda: False)
-    monkeypatch.setattr(
-        kss,
-        "settings",
-        replace(kss.settings, prepaid_reconstruction_public_key_file=""),
-    )
+    from app.services import secrets as secrets_module
+
+    monkeypatch.setattr(secrets_module, "is_openbao_configured", lambda: False)
     assert kss.install_if_configured() == ()
 
 
@@ -228,12 +223,9 @@ def test_a_configured_but_unreachable_store_fails_the_boot(monkeypatch) -> None:
     configuration, and an unreachable store raises.
     """
 
-    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
-    monkeypatch.setattr(
-        kss,
-        "settings",
-        replace(kss.settings, prepaid_reconstruction_public_key_file=""),
-    )
+    from app.services import secrets as secrets_module
+
+    monkeypatch.setattr(secrets_module, "is_openbao_configured", lambda: True)
 
     class _Unreachable(RuntimeError):
         pass
