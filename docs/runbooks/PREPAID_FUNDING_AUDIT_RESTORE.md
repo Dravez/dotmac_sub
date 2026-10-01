@@ -69,6 +69,14 @@ dump expands to roughly 25 GB with indexes. The script preflights both.
 
 ### 1. Provision
 
+Before export, provision the app trust anchor from the already-approved public
+key into the host's `/etc/dotmac/sub/prepaid-funding-keys/trusted-public.pem`
+file, owned by root and not writable by group or other. The app container mounts
+that directory read-only. Keep the existing Ed25519 private key at its approved
+host location with mode `0400` or `0600`; the export wrapper mounts it read-only
+only into the ephemeral exporter and verifies it matches `trusted-public.pem`.
+Do not copy the private key into the app container or add either key to `.env`.
+
 ```bash
 scripts/one_off/prepaid_funding_audit_restore.sh provision
 ```
@@ -85,7 +93,9 @@ early `pg_isready` from the temporary bootstrap server is not accepted.
 ```bash
 scripts/one_off/prepaid_funding_audit_restore.sh export \
   --snapshot-at 2026-07-26T00:00:00+00:00 \
-  --source funding-gap-survey-2026-07-26
+  --source funding-gap-survey-2026-07-26 \
+  --signing-key-file /approved/location/prepaid-reconstruction-signing.pem \
+  --trusted-public-key-file /etc/dotmac/sub/prepaid-funding-keys/trusted-public.pem
 ```
 
 For a bounded, separately reviewed repair, add the exact newline-delimited
@@ -176,12 +186,19 @@ data), and the network. Exported artifacts are kept.
 
 1. `export_prepaid_funding_snapshot.py` — resolves the complete frozen history
    plus canonical Sub-native facts in the lawful interval for each provenance
-   disposition and emits a signed exact-cohort artifact.
+   disposition and emits a signed exact-cohort artifact. The host wrapper
+   requires owner-only `--signing-key-file` and `--trusted-public-key-file`
+   paths, mounts both read-only into the one-shot exporter, and verifies that
+   the Ed25519 pair matches before it writes a manifest.
 2. **Correct the source snapshot, then rerun.** An integrity error clears only
    when the resolver proves the complete source; never edit a generated target.
 3. `materialize_prepaid_funding_reconstruction.py` — verifies the Ed25519
-   signature against the public key at billing setting
-   `prepaid_reconstruction_attestation_public_key_ref`, then applies. Dry-run
+   signature against the public key held at boot from the read-only file
+   `/run/secrets/prepaid-funding/trusted-public.pem`, then applies. The host
+   directory is `/etc/dotmac/sub/prepaid-funding-keys` by default and can be
+   set with `PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_HOST_DIR`. Keep the
+   existing approved public key in `trusted-public.pem`; do not replace or
+   rotate it during reconciliation. Dry-run
    by default; apply requires `--reviewed-sha256`, `--evidence-ref`,
    `--approved-by`, and `--confirm-final-cutover`.
 

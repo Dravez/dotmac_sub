@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from app.services.kernel_key_provider import KEYRING_REF
-from app.services.kernel_secret_source import OPTIONAL_SECRET_REFS, SECRET_REFS
+from app.services.kernel_secret_source import (
+    OPTIONAL_SECRET_REFS,
+    PREPAID_TRUST_PUBLIC_KEY_FILE_ENV,
+    SECRET_REFS,
+    load_prepaid_trust_public_key_file,
+)
+from app.services.prepaid_funding_attestation import TRUST_KEY_NAME
 from app.services.secrets import resolve_openbao_ref
 
 #: Material required by every deployed settings-write surface.
@@ -20,6 +27,18 @@ REQUIRED_REFS: Mapping[str, str] = {
 OPTIONAL_REFS: Mapping[str, str] = {
     **OPTIONAL_SECRET_REFS,
 }
+
+
+def optional_refs_for_preflight() -> Mapping[str, str]:
+    """Do not resolve the legacy trust ref when the local file is selected."""
+
+    if not os.getenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "").strip():
+        return OPTIONAL_REFS
+    return {
+        name: reference
+        for name, reference in OPTIONAL_REFS.items()
+        if name != TRUST_KEY_NAME
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +108,18 @@ def main() -> int:
         "OpenBao boot-secret preflight passed for "
         f"{len(result.checked_names)} required fields."
     )
-    absent = report_optional_boot_material()
+    if os.getenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "").strip():
+        try:
+            trust_key = load_prepaid_trust_public_key_file()
+        except RuntimeError:
+            print("Prepaid trust-key file preflight failed.")
+            return 1
+        if not trust_key:
+            print("Prepaid trust-key file preflight failed: file is not configured.")
+            return 1
+        print("Local prepaid trust-key file preflight passed.")
+
+    absent = report_optional_boot_material(optional_refs_for_preflight())
     if absent:
         print(
             "Optional boot material not provisioned (features using it will "

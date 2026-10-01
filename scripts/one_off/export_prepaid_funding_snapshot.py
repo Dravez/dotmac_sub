@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -64,8 +65,8 @@ from app.services.prepaid_funding_attestation import (
     candidate_cohort_sha256,
     canonical_payload_sha256,
     sign_prepaid_funding_manifest,
+    signing_key_matches_public_key,
 )
-from app.services.secrets import is_openbao_ref, resolve_secret
 from scripts.one_off.adjudicate_prepaid_funding_gaps import (
     ACTION_PLAN_SCHEMA,
     NO_PAID_THROUGH_DUE_IMMEDIATELY,
@@ -465,16 +466,49 @@ def _parse_timestamp(value: str) -> datetime:
     return _as_utc(parsed)
 
 
-def _resolve_signing_key(reference: str | None) -> str:
-    normalized = str(reference or "").strip()
-    if not is_openbao_ref(normalized):
+def _read_key_file(path: Path | None, *, private: bool) -> str:
+    if path is None or not path.is_absolute():
         raise RuntimeError(
-            "ready export requires --signing-key-ref with an OpenBao reference"
+            "ready export requires absolute signer and trust-key file paths"
         )
-    resolved = str(resolve_secret(normalized) or "").strip()
-    if not resolved:
-        raise RuntimeError("prepaid reconstruction signing key is empty")
-    return resolved
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError("prepaid reconstruction key file is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("prepaid reconstruction key must be a regular file")
+        restricted_bits = 0o077 if private else 0o022
+        if metadata.st_mode & restricted_bits:
+            raise RuntimeError(
+                "private signing key permissions must be owner-only"
+                if private
+                else "trust public key must not be group/world writable"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            value = stream.read().strip()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not value:
+        raise RuntimeError("prepaid reconstruction key file is empty")
+    return value
+
+
+def _resolve_signing_key(
+    signing_key_file: Path | None,
+    trusted_public_key_file: Path | None,
+) -> str:
+    private_key_pem = _read_key_file(signing_key_file, private=True)
+    trusted_public_key_pem = _read_key_file(trusted_public_key_file, private=False)
+    if not signing_key_matches_public_key(private_key_pem, trusted_public_key_pem):
+        raise RuntimeError(
+            "prepaid funding signing key does not match the configured trust key"
+        )
+    return private_key_pem
 
 
 def main() -> int:
@@ -493,8 +527,14 @@ def main() -> int:
         help="required acknowledgement when a bounded reviewed scope is supplied",
     )
     parser.add_argument(
-        "--signing-key-ref",
-        help="OpenBao reference to the Ed25519 private signing key",
+        "--signing-key-file",
+        type=Path,
+        help="mounted owner-only Ed25519 private key file in the isolated audit job",
+    )
+    parser.add_argument(
+        "--trusted-public-key-file",
+        type=Path,
+        help="mounted read-only trust key file used to verify the signer before export",
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -551,7 +591,10 @@ def main() -> int:
             print("BLOCKED - no sealed funding reconstruction was written")
             return 2
         sealed = export.sealed_funding_payload(
-            private_key_pem=_resolve_signing_key(args.signing_key_ref),
+            private_key_pem=_resolve_signing_key(
+                args.signing_key_file,
+                args.trusted_public_key_file,
+            ),
         )
         _write_json(args.out, sealed, overwrite=args.overwrite)
         print(f"Sealed funding reconstruction written: {args.out}")

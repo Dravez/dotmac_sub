@@ -568,9 +568,13 @@ deleted.
 ## One-time funding reconstruction
 
 The baseline materializer accepts an Ed25519-sealed exact-cohort manifest. The
-trusted public key setting must be an OpenBao reference. The signing private key
-belongs to the isolated audit environment and must never be copied into Sub,
-Git, logs, reports, or durable knowledge.
+trusted public key is loaded at app boot from the root-managed, read-only file
+`/run/secrets/prepaid-funding/trusted-public.pem`. The signing private key is
+mounted read-only into the one-shot isolated audit exporter from an owner-only
+host file. The exporter verifies that the private key matches the existing
+trust public key before signing. Key contents are not placed in Git, settings,
+command arguments, environment variables, reports, or the production database;
+this workflow does not retrieve either key from OpenBao.
 
 The manifest binds currency, timestamp, complete source-history fingerprint,
 account targets, payload/cohort hashes, signer fingerprint, approving actor, and
@@ -591,7 +595,8 @@ python scripts/one_off/export_prepaid_funding_snapshot.py \
   --source REVIEWED_SOURCE_LABEL \
   --out /approved/prepaid-funding-sealed.json \
   --blockers-out /approved/prepaid-funding-blockers.json \
-  --signing-key-ref bao://secret/audit/prepaid-reconstruction-signer#private_key_pem
+  --signing-key-file /run/secrets/prepaid-signing-key.pem \
+  --trusted-public-key-file /run/secrets/prepaid-trust-public.pem
 
 python scripts/one_off/materialize_prepaid_funding_reconstruction.py \
   --manifest /approved/prepaid-funding-sealed.json

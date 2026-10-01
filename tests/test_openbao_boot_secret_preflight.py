@@ -70,3 +70,15 @@ def test_the_optional_set_is_the_one_the_application_holds_optionally() -> None:
     assert REQUIRED_REFS["settings_encryption_keyring"].endswith(
         "settings/crypto#settings_encryption_keyring"
     )
+
+
+def test_local_prepaid_trust_file_omits_the_openbao_trust_reference(
+    monkeypatch,
+) -> None:
+    from app.services.kernel_secret_source import PREPAID_TRUST_PUBLIC_KEY_FILE_ENV
+    from app.services.prepaid_funding_attestation import TRUST_KEY_NAME
+    from scripts.setup.verify_openbao_boot_secrets import optional_refs_for_preflight
+
+    monkeypatch.setenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "/run/secrets/trusted.pem")
+
+    assert TRUST_KEY_NAME not in optional_refs_for_preflight()
