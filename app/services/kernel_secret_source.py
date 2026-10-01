@@ -168,11 +168,11 @@ def load_prepaid_public_key_file() -> str | None:
             )
         with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
             descriptor = -1
-            value = stream.read()
+            value = stream.read().strip()
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not value.strip():
+    if not value:
         raise RuntimeError("prepaid reconstruction public key file is empty")
     return value
 
