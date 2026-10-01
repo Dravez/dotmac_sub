@@ -243,7 +243,7 @@ def payment_email_composition_pause(
             context=CommandContext.system(
                 actor=f"system_user:{principal_id}",
                 scope=str(operator_tenant_id()),
-                reason="Reviewed payment email composition rollback",
+                reason="Reviewed payment email composition pause",
             ),
         )
     except DomainError as exc:
