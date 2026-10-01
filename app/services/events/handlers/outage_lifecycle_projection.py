@@ -122,9 +122,7 @@ class OutageLifecycleProjectionHandler:
                 context=context,
             )
 
-    def _apply_compensation(
-        self, db: Session, event: Event, incident_id: str
-    ) -> None:
+    def _apply_compensation(self, db: Session, event: Event, incident_id: str) -> None:
         from app.models.domain_settings import SettingDomain
         from app.services.common import coerce_uuid
         from app.services.network.customer_outage_accrual import (
@@ -147,9 +145,7 @@ class OutageLifecycleProjectionHandler:
             subscription_ids = tuple(
                 dict.fromkeys(
                     row.subscription_id
-                    for row in intervals_for_incident(
-                        read_db, coerce_uuid(incident_id)
-                    )
+                    for row in intervals_for_incident(read_db, coerce_uuid(incident_id))
                 )
             )
 

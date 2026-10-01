@@ -766,9 +766,7 @@ def test_outage_compensation_rebases_next_cycle_cancellation(
         ),
         now=datetime(2026, 7, 14, tzinfo=UTC),
     )
-    schedule = db_session.get(
-        SubscriptionLifecycleSchedule, outcome.artifact_ids[0]
-    )
+    schedule = db_session.get(SubscriptionLifecycleSchedule, outcome.artifact_ids[0])
     assert schedule is not None
     previous = datetime(2026, 8, 1, tzinfo=UTC)
     extended = previous + timedelta(hours=7)
@@ -785,9 +783,10 @@ def test_outage_compensation_rebases_next_cycle_cancellation(
     assert changed == 1
     assert schedule.effective_at.replace(tzinfo=UTC) == extended
     assert schedule.next_attempt_at.replace(tzinfo=UTC) == extended
-    assert schedule.reviewed_head == resolve_subscription_lifecycle(
-        db_session, str(subscription.id)
-    ).head
+    assert (
+        schedule.reviewed_head
+        == resolve_subscription_lifecycle(db_session, str(subscription.id)).head
+    )
 
 
 def test_outage_compensation_preserves_explicit_date_cancellation(
@@ -809,9 +808,7 @@ def test_outage_compensation_preserves_explicit_date_cancellation(
         ),
         now=datetime(2026, 7, 14, tzinfo=UTC),
     )
-    schedule = db_session.get(
-        SubscriptionLifecycleSchedule, outcome.artifact_ids[0]
-    )
+    schedule = db_session.get(SubscriptionLifecycleSchedule, outcome.artifact_ids[0])
     assert schedule is not None
     subscription.next_billing_at = explicit_date + timedelta(hours=7)
 
