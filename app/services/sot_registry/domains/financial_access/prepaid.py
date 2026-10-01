@@ -27,7 +27,8 @@ SERVICES: tuple[SOTService, ...] = (
         depends_on=(
             "access.subscription_lifecycle",
             "control.settings_spec",
-            "financial.prepaid_service_coverage",
+            "events.owner_outputs",
+            "financial.prepaid_service_renewals",
             "network.customer_outage_accrual",
         ),
         notes=(
@@ -46,11 +47,21 @@ SERVICES: tuple[SOTService, ...] = (
                         "funded prepaid coverage intervals",
                         "outage compensation policy",
                         "compensation evaluation time",
+                        "receipted outage lifecycle output",
                     ),
                     canonical_writer="financial.outage_compensation",
                 ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="receipted outage lifecycle output",
+                    owner="events.owner_outputs",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "unique consumer and outage-event receipt committed with "
+                        "the compensation consequence"
+                    ),
+                ),
                 AuthorityInput(
                     name="finalized customer outage intervals",
                     owner="network.customer_outage_accrual",
@@ -62,7 +73,7 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 AuthorityInput(
                     name="funded prepaid coverage intervals",
-                    owner="financial.prepaid_service_coverage",
+                    owner="financial.prepaid_service_renewals",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
                     source=(
                         "active ServiceEntitlement intervals for the exact "
@@ -113,20 +124,35 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.outage_compensation.idempotency_conflict",
                     "financial.outage_compensation.idempotency_required",
                     "financial.outage_compensation.no_finalized_outage",
+                    "financial.outage_compensation.review_required",
                     "financial.outage_compensation.stale_preview",
                     "financial.outage_compensation.subscription_not_found",
                     *owner_command_boundary_error_codes(
                         "financial.outage_compensation"
                     ),
                 ),
-                mapping_owner="outage compensation task and administrative adapters",
+                mapping_owner=(
+                    "outage lifecycle projection and administrative adapters"
+                ),
                 fail_closed_on=(
                     "missing or invalid policy",
                     "mutable billing anchor beyond funded coverage evidence",
                     "stale outage, funding, or tail evidence",
                 ),
             ),
-            events=EventContract(event_types=()),
+            events=EventContract(
+                event_types=("outage.discarded", "outage.resolved"),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility=(
+                    "Consumes the version-1 outage lifecycle incident identity and "
+                    "resolution timestamp additively."
+                ),
+                replay=(
+                    "A per-subscription owner-output receipt and unique interval "
+                    "consumption make redelivery an exact no-op."
+                ),
+            ),
             migration=MigrationContract(
                 state=AuthorityMigrationState.NATIVE,
                 new_owner="financial.outage_compensation",
@@ -135,8 +161,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "idempotency, and concurrent-tail regression tests."
                 ),
                 cutover_gate=(
-                    "The feature flag remains disabled until migrations, scheduled "
-                    "processing, cancellation rebasing, and customer projections "
+                    "The feature flag remains disabled until migrations, event "
+                    "consumption, cancellation rebasing, and customer projections "
                     "are deployed together."
                 ),
             ),
