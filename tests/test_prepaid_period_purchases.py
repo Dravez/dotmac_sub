@@ -4,16 +4,18 @@ from uuid import uuid4
 
 from app.models.billing import TaxApplication
 from app.models.catalog import BillingCycle
+from app.services.billing.cadence import service_period
 from app.services.prepaid_period_purchases import (
     _line_fingerprint,
     _monthly_cadence,
     _quote_fingerprint,
 )
 from app.services.prepaid_service_renewals import PrepaidMonthlyChargeDetail
-from app.services.billing.cadence import service_period
 
 
-def _charge(*, tax: str = "562.50", total: str = "8062.50") -> PrepaidMonthlyChargeDetail:
+def _charge(
+    *, tax: str = "562.50", total: str = "8062.50"
+) -> PrepaidMonthlyChargeDetail:
     return PrepaidMonthlyChargeDetail(
         subscription_id=uuid4(),
         unit_price=Decimal("7500.00"),

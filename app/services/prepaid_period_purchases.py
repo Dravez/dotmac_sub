@@ -13,9 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.billing import (
-    Invoice,
     InvoiceDueDateBasis,
-    InvoiceLine,
     InvoiceStatus,
     Payment,
     PaymentStatus,
@@ -29,8 +27,12 @@ from app.models.billing_contract import (
     ProrationPolicy,
     RateBasis,
 )
-from app.models.catalog import BillingCycle, BillingMode, Subscription, SubscriptionAddOn
-from app.models.domain_settings import SettingDomain
+from app.models.catalog import (
+    BillingCycle,
+    BillingMode,
+    Subscription,
+    SubscriptionAddOn,
+)
 from app.models.network_monitoring import CustomerOutageInterval
 from app.models.service_period_purchase import (
     PrepaidPeriodPurchase,
@@ -62,13 +64,15 @@ from app.services.prepaid_service_renewals import (
     resolve_prepaid_monthly_charge_detail,
     resolve_prepaid_subscription_settlement_period,
 )
-from app.services.settings_spec import resolve_value
+from app.services.service_period_policy import (
+    PrepaidPeriodPurchasePolicy,
+    resolve_prepaid_period_purchase_policy,
+)
 from app.timezone import APP_TIMEZONE_NAME
 
 _OWNER = "financial.prepaid_period_purchases"
 _POLICY_VERSION = 1
 _QUOTE_TTL = timedelta(minutes=30)
-_HARD_MAX_PERIODS = 12
 
 
 class PrepaidPeriodPurchaseError(DomainError, ValueError):
@@ -85,28 +89,13 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _enabled(db: Session) -> bool:
-    return resolve_value(
-        db, SettingDomain.billing, "prepaid_period_purchase_enabled"
-    ) is True
-
-
-def _configured_max(db: Session) -> int:
-    raw = resolve_value(
-        db, SettingDomain.billing, "prepaid_period_purchase_max_months"
-    )
-    if isinstance(raw, bool):
-        raise _error("configuration_invalid", "Purchase period limit is invalid.")
+def _policy(db: Session) -> PrepaidPeriodPurchasePolicy:
     try:
-        value = int(raw)
+        return resolve_prepaid_period_purchase_policy(db)
     except (TypeError, ValueError) as exc:
-        raise _error("configuration_invalid", "Purchase period limit is invalid.") from exc
-    if value < 1 or value > _HARD_MAX_PERIODS:
         raise _error(
-            "configuration_invalid",
-            "Purchase period limit must remain between 1 and 12.",
-        )
-    return value
+            "configuration_invalid", "Purchase period limit is invalid."
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +175,11 @@ def _monthly_cadence() -> BillingCadence:
 
 
 def _line_fingerprint(
-    *, ordinal: int, starts_at: datetime, ends_at: datetime, charge: PrepaidMonthlyChargeDetail
+    *,
+    ordinal: int,
+    starts_at: datetime,
+    ends_at: datetime,
+    charge: PrepaidMonthlyChargeDetail,
 ) -> str:
     payload = {
         "ordinal": ordinal,
@@ -218,9 +211,13 @@ def _eligible_subscription(
     if subscription is None or subscription.subscriber_id != account_id:
         raise _error("subscription_not_found", "Subscription was not found.")
     if subscription.billing_mode is not BillingMode.prepaid:
-        raise _error("billing_mode_ineligible", "Only prepaid service can be purchased.")
+        raise _error(
+            "billing_mode_ineligible", "Only prepaid service can be purchased."
+        )
     if subscription.status not in PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES:
-        raise _error("subscription_ineligible", "Subscription is not eligible for renewal.")
+        raise _error(
+            "subscription_ineligible", "Subscription is not eligible for renewal."
+        )
     position = get_customer_financial_position(db, account_id)
     if position.open_invoice_balance > Decimal("0.00"):
         raise _error(
@@ -242,8 +239,14 @@ def _eligible_subscription(
     active_add_on = db.scalar(
         select(SubscriptionAddOn.id).where(
             SubscriptionAddOn.subscription_id == subscription_id,
-            or_(SubscriptionAddOn.start_at.is_(None), SubscriptionAddOn.start_at <= effective_at),
-            or_(SubscriptionAddOn.end_at.is_(None), SubscriptionAddOn.end_at > effective_at),
+            or_(
+                SubscriptionAddOn.start_at.is_(None),
+                SubscriptionAddOn.start_at <= effective_at,
+            ),
+            or_(
+                SubscriptionAddOn.end_at.is_(None),
+                SubscriptionAddOn.end_at > effective_at,
+            ),
         )
     )
     if active_add_on is not None:
@@ -262,9 +265,10 @@ def preview_prepaid_period_purchase(
     period_count: int,
     effective_at: datetime,
 ) -> PrepaidPeriodPurchaseQuote:
-    if not _enabled(db):
+    policy = _policy(db)
+    if not policy.enabled:
         raise _error("feature_disabled", "Service-period purchase is not enabled.")
-    maximum = _configured_max(db)
+    maximum = policy.max_months
     if isinstance(period_count, bool) or period_count < 1 or period_count > maximum:
         raise _error(
             "period_count_invalid",
@@ -310,7 +314,9 @@ def preview_prepaid_period_purchase(
             or charge.billing_cycle is not BillingCycle.monthly
             or charge.currency != first_charge.currency
         ):
-            raise _error("price_changed", "Monthly price evidence changed during quote creation.")
+            raise _error(
+                "price_changed", "Monthly price evidence changed during quote creation."
+            )
         fingerprint = _line_fingerprint(
             ordinal=index + 1, starts_at=starts_at, ends_at=ends_at, charge=charge
         )
@@ -378,7 +384,9 @@ def create_prepaid_period_purchase(
             or existing.period_count != command.period_count
             or existing.preview_fingerprint != command.expected_fingerprint
         ):
-            raise _error("idempotency_conflict", "Purchase key already names another quote.")
+            raise _error(
+                "idempotency_conflict", "Purchase key already names another quote."
+            )
         return existing
     quote = preview_prepaid_period_purchase(
         db,
@@ -403,7 +411,7 @@ def create_prepaid_period_purchase(
         preview_fingerprint=quote.fingerprint,
         policy_version=_POLICY_VERSION,
         policy_snapshot={
-            "max_periods": _configured_max(db),
+            "max_periods": _policy(db).max_months,
             "vat_rounding": "per_period",
             "debt_policy": "any_open_invoice_blocks",
             "add_on_policy": "base_subscription_only",
@@ -458,12 +466,16 @@ def settle_prepaid_period_purchase(
         if purchase.payment_id != command.payment_id or any(
             row.invoice_id is None or row.entitlement_id is None for row in rows
         ):
-            raise _error("idempotency_conflict", "Completed purchase evidence is incomplete.")
+            raise _error(
+                "idempotency_conflict", "Completed purchase evidence is incomplete."
+            )
         return PrepaidPeriodPurchaseSettlement(
             purchase_id=purchase.id,
             payment_id=command.payment_id,
             invoice_ids=tuple(row.invoice_id for row in rows if row.invoice_id),
-            entitlement_ids=tuple(row.entitlement_id for row in rows if row.entitlement_id),
+            entitlement_ids=tuple(
+                row.entitlement_id for row in rows if row.entitlement_id
+            ),
             coverage_ends_at=purchase.coverage_ends_at,
             replayed=True,
         )
@@ -471,7 +483,9 @@ def settle_prepaid_period_purchase(
         PrepaidPeriodPurchaseStatus.quoted,
         PrepaidPeriodPurchaseStatus.payment_pending,
     }:
-        raise _error("purchase_ineligible", "Purchase cannot be settled in its current state.")
+        raise _error(
+            "purchase_ineligible", "Purchase cannot be settled in its current state."
+        )
     observed_at = _utc(command.effective_at)
     if purchase.expires_at < observed_at:
         purchase.status = PrepaidPeriodPurchaseStatus.expired
@@ -564,7 +578,9 @@ def settle_prepaid_period_purchase(
                 payment_id=payment.id,
                 expected_amount=row.total,
             )
-            finalize_invoice_application_for_owner(db, invoice, effective_at=observed_at)
+            finalize_invoice_application_for_owner(
+                db, invoice, effective_at=observed_at
+            )
             entitlement = db.scalar(
                 select(ServiceEntitlement).where(
                     ServiceEntitlement.source_invoice_line_id == line.id
