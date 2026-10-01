@@ -1233,18 +1233,13 @@ def _seed_missing_notification_templates(db: Session) -> int:
     )
 
     bind = db.get_bind()
-    insert_factory = None
-    if bind.dialect.name == "postgresql":
-        insert_factory = postgresql_insert
-    elif bind.dialect.name == "sqlite":
-        insert_factory = sqlite_insert
-
     changed = 0
     for tmpl_data in templates:
         existing = None
-        if insert_factory is not None:
+        inserted_id = None
+        if bind.dialect.name == "postgresql":
             inserted_id = db.scalar(
-                insert_factory(NotificationTemplate)
+                postgresql_insert(NotificationTemplate)
                 .values(**tmpl_data)
                 .on_conflict_do_nothing(
                     index_elements=[
@@ -1254,9 +1249,18 @@ def _seed_missing_notification_templates(db: Session) -> int:
                 )
                 .returning(NotificationTemplate.id)
             )
-            if inserted_id is not None:
-                changed += 1
-                logger.info("Seeded notification template: %s", tmpl_data["code"])
+        elif bind.dialect.name == "sqlite":
+            inserted_id = db.scalar(
+                sqlite_insert(NotificationTemplate)
+                .values(**tmpl_data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        NotificationTemplate.code,
+                        NotificationTemplate.channel,
+                    ]
+                )
+                .returning(NotificationTemplate.id)
+            )
         else:  # pragma: no cover - production/tests use PostgreSQL/SQLite
             existing = db.scalars(
                 sa_select(NotificationTemplate).where(
@@ -1270,6 +1274,9 @@ def _seed_missing_notification_templates(db: Session) -> int:
                 changed += 1
                 logger.info("Seeded notification template: %s", tmpl_data["code"])
                 continue
+        if inserted_id is not None:
+            changed += 1
+            logger.info("Seeded notification template: %s", tmpl_data["code"])
 
         if tmpl_data["code"] != PAYMENT_RECEIPT_TEMPLATE_CODE:
             continue
