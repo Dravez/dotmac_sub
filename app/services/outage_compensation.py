@@ -42,6 +42,11 @@ _APPLY_COMMAND = OwnerCommandDefinition(
     concern="finalized outage service-period compensation",
     name="apply_outage_compensation",
 )
+_CONSUME_COMMAND = OwnerCommandDefinition(
+    owner=_OWNER,
+    concern="finalized outage service-period compensation",
+    name="consume_outage_compensation_event",
+)
 
 
 class OutageCompensationError(DomainError, ValueError):
@@ -430,6 +435,17 @@ def _stage_outage_compensation(
                 evidence_ref=f"outage-compensation:{decision.id}",
             ),
         )
+        from app.services.subscription_lifecycle_schedules import (
+            stage_rebase_funded_tail_termination_schedules,
+        )
+
+        stage_rebase_funded_tail_termination_schedules(
+            db,
+            subscription_id=subscription.id,
+            previous_tail=preview.tail_before,
+            extended_tail=preview.tail_after,
+            evidence_ref=f"outage-compensation:{decision.id}",
+        )
     db.flush()
     return OutageCompensationResult(
         decision_id=decision.id,
@@ -441,6 +457,74 @@ def _stage_outage_compensation(
     )
 
 
+def consume_outage_compensation_event(
+    db: Session,
+    *,
+    subscription_id: UUID,
+    event_id: UUID,
+    event_type: str,
+    effective_at: datetime,
+    context: CommandContext,
+) -> str:
+    """Consume one resolved/discarded outage output for one subscription."""
+    from app.services.events.owner_outputs import consume_owner_output
+
+    def _consume() -> str:
+        def _effect() -> str:
+            outcomes: list[str] = []
+            sequence = 0
+            while True:
+                try:
+                    preview = preview_outage_compensation(
+                        db,
+                        subscription_id=subscription_id,
+                        effective_at=effective_at,
+                    )
+                except OutageCompensationError as exc:
+                    if exc.code == f"{_OWNER}.no_finalized_outage":
+                        break
+                    raise
+                if preview.status is OutageCompensationDecisionStatus.review_required:
+                    raise _error(
+                        "review_required",
+                        "Outage compensation cannot move an unresolved billing anchor.",
+                        subscription_id=str(subscription_id),
+                    )
+                result = _stage_outage_compensation(
+                    db,
+                    ApplyOutageCompensationCommand(
+                        subscription_id=subscription_id,
+                        expected_fingerprint=preview.fingerprint,
+                        idempotency_key=(
+                            f"outage-event:{event_id}:{subscription_id}:{sequence}"
+                        ),
+                        effective_at=effective_at,
+                        context=context,
+                    ),
+                )
+                outcomes.append(result.status.value)
+                sequence += 1
+            return ",".join(outcomes) or "noop"
+
+        outcome, _receipt = consume_owner_output(
+            db,
+            consumer=f"financial.outage_compensation:{subscription_id}",
+            event_id=event_id,
+            event_type=event_type,
+            producer_owner="network.outage_lifecycle",
+            context=context,
+            operation=_effect,
+        )
+        return outcome or "replayed"
+
+    return execute_owner_command(
+        db,
+        definition=_CONSUME_COMMAND,
+        context=context,
+        operation=_consume,
+    )
+
+
 __all__ = [
     "ApplyOutageCompensationCommand",
     "OutageCompensationError",
@@ -448,6 +532,7 @@ __all__ = [
     "OutageCompensationResult",
     "TimeInterval",
     "apply_outage_compensation",
+    "consume_outage_compensation_event",
     "intersect_seconds",
     "merge_intervals",
     "preview_outage_compensation",

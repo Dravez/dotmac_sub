@@ -40,6 +40,15 @@ does not rewrite purchased invoices, VAT, or service periods.
   entitlement coverage for the affected subscription.
 - A qualifying decision appends one zero-value entitlement to the then-current
   funded tail. A consumed interval cannot be reused by another decision.
+- Resolved/discarded outage events trigger the compensation owner after the
+  downtime ledger commits. Per-subscription owner-output receipts make event
+  replay an exact no-op; no whole-customer financial sweep is introduced.
+- Pending `next_cycle` cancellation/expiry schedules that target the old funded
+  tail are rebased atomically to the compensated tail. Explicit calendar-date
+  schedules are preserved as deliberate customer/operator decisions.
+- The customer service page projects an active network interruption without
+  mutating subscription lifecycle status. Checkout remains blocked by the
+  open outage interval until recovery is finalized.
 - Planned-maintenance exclusions and ambiguous evidence are recorded as
   explicit decisions; they are never silently discarded.
 

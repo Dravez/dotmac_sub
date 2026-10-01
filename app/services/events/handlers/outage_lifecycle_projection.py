@@ -66,6 +66,11 @@ class OutageLifecycleProjectionHandler:
         # restoration message can quote the ledger's measured downtime rather
         # than recomputing it.
         self._apply_communications(db, event, incident_id)
+        if event.event_type in {
+            EventType.outage_discarded,
+            EventType.outage_resolved,
+        }:
+            self._apply_compensation(db, event, incident_id)
 
     def _apply_accrual(self, db: Session, event: Event, incident_id: str) -> None:
         from app.services.common import coerce_uuid
@@ -116,6 +121,65 @@ class OutageLifecycleProjectionHandler:
                 event_type=event.event_type.value,
                 context=context,
             )
+
+    def _apply_compensation(
+        self, db: Session, event: Event, incident_id: str
+    ) -> None:
+        from app.models.domain_settings import SettingDomain
+        from app.services.common import coerce_uuid
+        from app.services.network.customer_outage_accrual import (
+            intervals_for_incident,
+        )
+        from app.services.outage_compensation import (
+            consume_outage_compensation_event,
+        )
+        from app.services.owner_commands import CommandContext
+        from app.services.settings_spec import resolve_value
+
+        with _owner_session(db) as read_db:
+            if (
+                resolve_value(
+                    read_db, SettingDomain.billing, "outage_compensation_enabled"
+                )
+                is not True
+            ):
+                return
+            subscription_ids = tuple(
+                dict.fromkeys(
+                    row.subscription_id
+                    for row in intervals_for_incident(
+                        read_db, coerce_uuid(incident_id)
+                    )
+                )
+            )
+
+        resolved_at = event.payload.get("resolved_at")
+        effective_at = (
+            datetime.fromisoformat(str(resolved_at))
+            if resolved_at
+            else event.occurred_at
+        )
+        for subscription_id in subscription_ids:
+            context = CommandContext.system(
+                actor=str(event.actor or "system:outage_lifecycle_projection"),
+                scope=str(subscription_id),
+                reason=event.event_type.value,
+                command_id=event.event_id,
+                correlation_id=event.event_id,
+                causation_id=event.event_id,
+                idempotency_key=(
+                    f"event:{event.event_id}:outage-compensation:{subscription_id}"
+                ),
+            )
+            with _owner_session(db) as owner_db:
+                consume_outage_compensation_event(
+                    owner_db,
+                    subscription_id=subscription_id,
+                    event_id=event.event_id,
+                    event_type=event.event_type.value,
+                    effective_at=effective_at,
+                    context=context,
+                )
 
     @staticmethod
     def _context(event: Event, incident_id: str):
