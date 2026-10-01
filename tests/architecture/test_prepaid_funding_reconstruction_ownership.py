@@ -143,10 +143,9 @@ def test_materializer_owner_requires_a_config_trusted_clean_replay_seal() -> Non
     attestation = _read("app/services/prepaid_funding_attestation.py")
     settings = _read("app/services/settings_spec.py")
 
-    assert "--signing-key-file" in exporter
-    assert "--trusted-public-key-file" in exporter
+    assert "--signing-key-ref" in exporter
     assert "sealed_funding_payload" in exporter
-    assert "signing_key_matches_public_key" in exporter
+    assert "is_openbao_ref" in exporter
     assert "required_balance" not in exporter
     assert "resolve_prepaid_thresholds" not in exporter
     assert "verify_prepaid_funding_manifest" in owner
@@ -175,33 +174,13 @@ def test_materializer_owner_requires_a_config_trusted_clean_replay_seal() -> Non
     # The proxy was also weaker than the property. `is_openbao_ref` asserted
     # the stored value WAS a reference and never WHICH reference, so anyone
     # able to write settings could aim the anchor at a key they controlled.
-    # What replaces it is the stronger statement: the anchor is held from a
-    # root-managed, read-only local file, and the settings resolver is not on
-    # that path at all.
+    # What replaces it is the stronger statement: the anchor is read from the
+    # held set by name, and the settings resolver is not on that path at all.
     assert "get_secret(TRUST_KEY_NAME)" in attestation
-    secret_source = _read("app/services/kernel_secret_source.py")
-    assert "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE" in secret_source
-    assert '"prepaid_attestation_public_key"' in secret_source
-    assert '"prepaid_attestation_public_key": (' not in secret_source
+    assert "prepaid_attestation_public_key" in _read(
+        "app/services/kernel_secret_source.py"
+    )
     assert "prepaid_reconstruction_attestation_public_key_ref" not in settings
-
-    compose = _read("docker-compose.yml")
-    app_service = compose[compose.index("  app:") : compose.index("  redis-local:")]
-    assert "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE" in app_service
-    assert ":/run/secrets/prepaid-funding:ro" in app_service
-
-    restore = _read("scripts/one_off/prepaid_funding_audit_restore.sh")
-    export_command = restore[
-        restore.index("cmd_export()") : restore.index("cmd_status()")
-    ]
-    assert "--signing-key-ref" not in exporter
-    assert "--env-file <(sed -E" in export_command
-    for secret_env_name in ("OPENBAO_TOKEN", "VAULT_TOKEN"):
-        assert secret_env_name in export_command
-
-    preflight = _read("scripts/setup/verify_openbao_boot_secrets.py")
-    assert "report_optional_boot_material(OPTIONAL_REFS)" in preflight
-    assert "load_prepaid_public_key_file()" in preflight
 
 
 def test_source_identity_blocker_is_written_before_the_blocked_exit() -> None:

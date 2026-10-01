@@ -24,8 +24,7 @@
 #
 # Usage:
 #   prepaid_funding_audit_restore.sh provision [--dump PATH] [--recreate]
-#   prepaid_funding_audit_restore.sh export --snapshot-at ISO8601 --source TEXT \
-#     --signing-key-file PRIVATE_PEM --trusted-public-key-file PUBLIC_PEM
+#   prepaid_funding_audit_restore.sh export --snapshot-at ISO8601 --source TEXT
 #   prepaid_funding_audit_restore.sh status
 #   prepaid_funding_audit_restore.sh destroy
 #
@@ -182,33 +181,16 @@ cmd_provision() {
 cmd_export() {
   require_audit_up
 
-  local snapshot_at="" source_label="" signing_key_file="" trusted_public_key_file="" extra=()
+  local snapshot_at="" source_label="" extra=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --snapshot-at) snapshot_at="${2:-}"; shift 2 ;;
       --source) source_label="${2:-}"; shift 2 ;;
-      --signing-key-file) signing_key_file="${2:-}"; shift 2 ;;
-      --trusted-public-key-file) trusted_public_key_file="${2:-}"; shift 2 ;;
       *) extra+=("$1"); shift ;;
     esac
   done
   [[ -n "${snapshot_at}" ]] || die "--snapshot-at is required (ISO-8601 with offset)"
   [[ -n "${source_label}" ]] || die "--source is required (a traceable label)"
-  [[ -n "${signing_key_file}" ]] || die "--signing-key-file is required for a ready export"
-  [[ -n "${trusted_public_key_file}" ]] || die "--trusted-public-key-file is required for a ready export"
-
-  for key_file in "${signing_key_file}" "${trusted_public_key_file}"; do
-    [[ -f "${key_file}" && ! -L "${key_file}" && -r "${key_file}" ]] ||
-      die "key source must be a readable regular non-symlink file: ${key_file}"
-  done
-  local private_mode
-  private_mode=$(stat -c '%a' "${signing_key_file}")
-  (( (8#${private_mode} & 077) == 0 )) ||
-    die "private signing key file must be owner-only (mode 0400 or 0600)"
-  local public_mode
-  public_mode=$(stat -c '%a' "${trusted_public_key_file}")
-  (( (8#${public_mode} & 022) == 0 )) ||
-    die "trust public key file must not be group/world writable"
 
   container_exists "${APP_CONTAINER}" ||
     die "app container ${APP_CONTAINER} not found - needed for its image"
@@ -223,22 +205,24 @@ cmd_export() {
   log "Exporter image: ${image}"
   log "Output:         ${OUT_DIR} (blockers_${stamp}.json)"
 
+  # No --signing-key-ref: without one the exporter reaches the signing step
+  # only if the cohort is fully reconstructable, and refuses there rather than
+  # writing anything. That is what we want for a survey run - the blockers
+  # file is written BEFORE that point. Exit 2 means "blocked, nothing sealed",
+  # which is the expected outcome while accounts remain quarantined.
+  #
   # --allow-primary is required and correct here: the audit restore is its own
   # primary. That flag never authorises the production primary, because
   # _require_ephemeral_postgres has already rejected any non-_audit database.
-  # Filter OpenBao and Vault connection material from the env file: this export
-  # uses only the mounted Ed25519 files and never contacts a secret service.
   set +e
   docker run --rm \
     --network "${AUDIT_NETWORK}" \
-    --env-file <(sed -E '/^(OPENBAO_ADDR|OPENBAO_TOKEN|OPENBAO_TOKEN_FILE|OPENBAO_NAMESPACE|VAULT_ADDR|VAULT_TOKEN|VAULT_TOKEN_FILE|VAULT_NAMESPACE)=/d' "${ENV_FILE}") \
+    --env-file "${ENV_FILE}" \
     --env BILLING_AUDIT_EPHEMERAL=1 \
     --env REPO_DIR=/app \
     --env PYTHON_BIN=python \
     --env "DATABASE_URL=postgresql+psycopg://postgres@${AUDIT_CONTAINER}:5432/${AUDIT_DB}" \
     --volume "${OUT_DIR}:/out" \
-    --volume "${signing_key_file}:/run/secrets/prepaid-signing-key.pem:ro" \
-    --volume "${trusted_public_key_file}:/run/secrets/prepaid-trust-public.pem:ro" \
     --workdir /app \
     "${image}" \
     bash /app/scripts/run_repo_module.sh \
@@ -247,8 +231,6 @@ cmd_export() {
       --source "${source_label}" \
       --out "/out/manifest_${stamp}.json" \
       --blockers-out "/out/blockers_${stamp}.json" \
-      --signing-key-file /run/secrets/prepaid-signing-key.pem \
-      --trusted-public-key-file /run/secrets/prepaid-trust-public.pem \
       --allow-primary \
       "${extra[@]}"
   local rc=$?

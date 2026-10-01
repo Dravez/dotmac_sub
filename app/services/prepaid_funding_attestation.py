@@ -131,19 +131,6 @@ def public_key_pem(private_key_pem: str) -> str:
     ).decode("ascii")
 
 
-def signing_key_matches_public_key(
-    private_key_pem: str,
-    trusted_public_key_pem: str,
-) -> bool:
-    """Check that the supplied signer is the configured Ed25519 authority."""
-
-    private_key = _load_private_key(private_key_pem)
-    public_key = _load_public_key(trusted_public_key_pem)
-    return _public_key_fingerprint(private_key.public_key()) == _public_key_fingerprint(
-        public_key
-    )
-
-
 def sign_prepaid_funding_manifest(
     manifest: dict[str, Any],
     *,
@@ -183,11 +170,18 @@ def sign_prepaid_funding_manifest(
 def resolve_trusted_public_key_pem(db: Session) -> str:
     """The trust anchor, from material held at boot rather than a settings row.
 
-    This anchor decides whether a signed reconstruction manifest is believed.
-    It is loaded at boot from the read-only deployment file, whose authority is
-    controlled by the host deployment account.
+    This anchor decides whether a signed reconstruction manifest is believed,
+    so what protects it is not confidentiality — it is a public key — but
+    AUTHORITY: only someone with OpenBao access may replace it, because
+    replacing it means forged manifests verify.
 
-    The settings surface cannot replace it.
+    It used to be a `billing` setting holding a `bao://` reference, guarded by
+    "must be an OpenBao reference". That guard checked the value WAS a
+    reference and never WHICH reference, so anyone able to write settings could
+    repoint it at a key they controlled — the protection it appeared to give
+    was not there. It is now held from a path named in
+    `kernel_secret_source.OPTIONAL_SECRET_REFS`, which the settings surface
+    cannot reach at all.
 
     `db` is kept in the signature: every caller has one, the change is not
     theirs to care about, and a later anchor that IS per-something will need it.
@@ -202,7 +196,7 @@ def resolve_trusted_public_key_pem(db: Session) -> str:
         # deployment not using this feature never had.
         raise PrepaidFundingAttestationError(
             "no reconstruction attestation public key is held — provision "
-            "the read-only deployment trust-key file"
+            "the OpenBao path in kernel_secret_source.OPTIONAL_SECRET_REFS"
         )
     return public_key
 
@@ -213,7 +207,7 @@ def verify_prepaid_funding_manifest(
     *,
     now: datetime | None = None,
 ) -> tuple[dict[str, Any], VerifiedPrepaidFundingAttestation]:
-    """Verify the sealed manifest against the held deployment trust anchor."""
+    """Verify the sealed manifest against the configured OpenBao trust anchor."""
     if set(sealed_payload) != _SEALED_FIELDS:
         raise PrepaidFundingAttestationError(
             "sealed reconstruction manifest must contain schema, manifest, and "
