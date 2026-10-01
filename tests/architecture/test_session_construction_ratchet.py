@@ -93,7 +93,14 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +1 from test_communication_intent_coverage_pg.py and +9 from
 #: test_payment_email_composition_pg.py: real-role, isolation and concurrency
 #: fixtures. The production construction baseline remains unchanged.
-TEST_FIXTURE_BASELINE_TOTAL = 156
+#: +3 from the Kernel a97 machine alignment proof: one disposable SQLite
+#: engine and Session in tests/test_machine_kernel_alignment.py, plus one
+#: Connection-bound Session in tests/integration/test_machine_kernel_alignment_pg.py
+#: for a real app_user/RLS read. Exact AST count: 2 + 1.
+#: +1 from tests/integration/machine_cli_probe.py: a standalone, explicitly
+#: marked disposable-cluster probe constructs its oracle engine before it
+#: launches a child process that uses the actual app.db.SessionLocal.
+TEST_FIXTURE_BASELINE_TOTAL = 160
 
 
 def _baseline() -> dict[str, int]:
