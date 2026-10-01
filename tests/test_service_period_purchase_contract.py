@@ -1,11 +1,11 @@
 from app.models.billing import ServiceEntitlement
+from app.models.domain_settings import SettingDomain
 from app.models.service_period_purchase import (
     OutageCompensationDecision,
     OutageCompensationDecisionInterval,
     PrepaidPeriodPurchase,
     PrepaidPeriodPurchasePeriod,
 )
-from app.models.domain_settings import SettingDomain
 from app.services.settings_spec import get_spec
 
 
@@ -16,14 +16,18 @@ def test_purchase_contract_has_structural_uniqueness_and_month_cap() -> None:
     assert "uq_prepaid_period_purchase_intent" in constraint_names
     assert "ck_prepaid_period_purchase_count" in constraint_names
 
-    period_names = {item.name for item in PrepaidPeriodPurchasePeriod.__table__.constraints}
+    period_names = {
+        item.name for item in PrepaidPeriodPurchasePeriod.__table__.constraints
+    }
     assert "uq_prepaid_purchase_period_ordinal" in period_names
     assert "uq_prepaid_purchase_period_invoice" in period_names
     assert "uq_prepaid_purchase_period_entitlement" in period_names
 
 
 def test_outage_interval_can_be_consumed_only_once() -> None:
-    decision_names = {item.name for item in OutageCompensationDecision.__table__.constraints}
+    decision_names = {
+        item.name for item in OutageCompensationDecision.__table__.constraints
+    }
     interval_names = {
         item.name for item in OutageCompensationDecisionInterval.__table__.constraints
     }
