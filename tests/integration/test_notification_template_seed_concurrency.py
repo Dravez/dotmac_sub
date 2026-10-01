@@ -13,7 +13,7 @@ from app.services.settings_seed import seed_notification_templates
 def test_concurrent_startup_seeders_create_each_default_once(
     cloned_database,
 ) -> None:
-    database_url = cloned_database("head")
+    database_url = cloned_database("heads")
     engine = create_engine(database_url)
     session_factory = sessionmaker(
         bind=engine,
