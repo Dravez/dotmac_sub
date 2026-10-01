@@ -6,11 +6,13 @@ handler. Merely installing the distribution or adopting content enables neither.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 from dotmac_template_studio import service as studio
 from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.notification import NotificationChannel, NotificationTemplate
@@ -37,6 +39,91 @@ _COMMAND = OwnerCommandDefinition(
     concern="reviewed payment email authority cutover",
     name="activate_payment_email_cutover",
 )
+
+
+@dataclass(frozen=True)
+class RollbackCatalogObservation:
+    """Actual catalog shape, independent of cutover-row tenant visibility."""
+
+    legacy_table: bool
+    legacy_columns: int
+    cutover_relation: bool
+    seal_column: bool
+
+
+def legacy_image_rollback_allowed(observation: RollbackCatalogObservation) -> bool:
+    """Only a complete pre-installation legacy catalog admits an old image."""
+    return (
+        observation.legacy_table
+        and observation.legacy_columns == 5
+        and not observation.cutover_relation
+        and not observation.seal_column
+    )
+
+
+def read_legacy_image_rollback_floor(db: Session) -> RollbackCatalogObservation:
+    """Read the operational installation floor under the actual runtime login."""
+    refused = DomainError(
+        code="payment_email_cutover.rollback_floor_unknown",
+        message="Payment email rollback floor could not be proved",
+        retryable=False,
+    )
+    if db.get_bind().dialect.name != "postgresql":
+        raise refused
+    try:
+        identity = db.execute(
+            text(
+                "SELECT session_user, current_user, rolcanlogin, rolsuper, "
+                "rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = session_user"
+            )
+        ).one_or_none()
+        if (
+            identity is None
+            or identity[:2] != ("app_user", "app_user")
+            or (identity[2], identity[3], identity[4]) != (True, False, False)
+        ):
+            raise refused
+        catalog = db.execute(
+            text(
+                "WITH relations AS ("
+                " SELECT c.oid, c.relname, c.relkind"
+                " FROM pg_catalog.pg_class AS c"
+                " JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = 'public'"
+                " AND c.relname IN ('notification_templates', 'payment_email_cutovers')"
+                "), legacy AS ("
+                " SELECT oid FROM relations"
+                " WHERE relname = 'notification_templates' AND relkind IN ('r', 'p')"
+                ") SELECT"
+                " EXISTS (SELECT 1 FROM legacy) AS legacy_table,"
+                " (SELECT count(*) FROM pg_catalog.pg_attribute AS a"
+                " JOIN legacy AS l ON l.oid = a.attrelid"
+                " WHERE a.attname IN ('id', 'code', 'channel', 'subject', 'body')"
+                " AND a.attnum > 0 AND NOT a.attisdropped) AS legacy_columns,"
+                " EXISTS (SELECT 1 FROM relations"
+                " WHERE relname = 'payment_email_cutovers') AS cutover_relation,"
+                " EXISTS (SELECT 1 FROM pg_catalog.pg_attribute AS a"
+                " JOIN relations AS r ON r.oid = a.attrelid"
+                " WHERE r.relname = 'notification_templates'"
+                " AND a.attname = 'studio_content_sealed'"
+                " AND a.attnum > 0 AND NOT a.attisdropped) AS seal_column"
+            )
+        ).one_or_none()
+    except SQLAlchemyError:
+        raise refused from None
+    if (
+        catalog is None
+        or len(catalog) != 4
+        or any(type(catalog[index]) is not bool for index in (0, 2, 3))
+        or type(catalog[1]) is not int
+    ):
+        raise refused
+    return RollbackCatalogObservation(
+        legacy_table=catalog[0] is True,
+        legacy_columns=catalog[1],
+        cutover_relation=catalog[2] is True,
+        seal_column=catalog[3] is True,
+    )
 
 
 def active_cutover(db: Session) -> PaymentEmailCutover | None:

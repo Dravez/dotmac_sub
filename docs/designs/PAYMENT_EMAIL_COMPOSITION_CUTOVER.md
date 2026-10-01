@@ -332,3 +332,25 @@ limited grant does not resolve the separate ownership, remaining application
 grants, migration credential, or deployed-role blockers above. Downgrading the
 episode schema does not revoke pre-existing application prerequisites; the
 operational rollback remains the one-way composition pause.
+
+### Automatic image rollback floor
+
+The deploy adapter may restore a previous application image only while the
+actual PostgreSQL catalog proves the pre-installation legacy shape. The
+candidate image reads the catalog under its actual `app_user` login before any
+previous-image repin or recreation, using Sub's read-only snapshot seam before
+the transaction begins. A `payment_email_cutovers` relation **or**
+the `notification_templates.studio_content_sealed` column closes the automatic
+image rollback path, even with no activation row or after composition is paused.
+Both absent permits rollback only when the expected legacy template relation
+and columns are present. Missing, partial, unreadable, or failed catalog or role
+proof refuses; an old image must never interpret installed seals or create
+uncovered notifications. This installation floor does not claim adoption.
+
+On floor refusal the deploy leaves the current pin and any healthy warm
+candidate in place instead of restarting the old image. If repinning,
+recreation, or restored health fails, the candidate remains available and the
+operator must inspect both pin values before repair. Repair forward with the
+current image;
+the one-way composition pause remains the operational behavior rollback after
+activation. Database migrations are never automatically reversed.
