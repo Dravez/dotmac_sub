@@ -4340,6 +4340,28 @@ SERVICES: tuple[SOTService, ...] = (
                     "payment, provider, invoice, allocation, or entitlement mismatch",
                 ),
             ),
+            events=EventContract(
+                event_types=(
+                    "topup_intent.gateway_created",
+                    "payment.received",
+                    "invoice.created",
+                    "invoice.paid",
+                    "topup_intent.completed",
+                ),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility=(
+                    "The gateway, payment, invoice, and top-up intent participant "
+                    "owners retain their existing version-1 event contracts. "
+                    "Purchase and period identities remain carried by typed intent "
+                    "fields and invoice metadata rather than a second transport."
+                ),
+                replay=(
+                    "The purchase idempotency key, selected payment, ordered period "
+                    "rows, exact invoice-line keys, and entitlement links reconstruct "
+                    "the completed result without allocating or invoicing twice."
+                ),
+            ),
             migration=MigrationContract(
                 state=AuthorityMigrationState.NATIVE,
                 new_owner="financial.prepaid_period_purchases",

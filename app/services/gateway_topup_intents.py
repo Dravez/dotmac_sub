@@ -95,6 +95,10 @@ def _error(suffix: str, message: str, **details: object) -> GatewayTopupIntentEr
     )
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class CreateCustomerGatewayTopupIntentCommand:
     """Authenticated customer checkout request admitted by an adapter."""
@@ -456,7 +460,7 @@ def _create_customer_gateway_topup_intent(
                 capability_binding_id=command.capability_binding_id,
                 currency=purchase.currency,
                 requested_amount=purchase.total,
-                expires_at=min(expires_at, purchase.expires_at),
+                expires_at=min(expires_at, _utc(purchase.expires_at)),
                 payment_method_id=command.payment_method_id,
                 channel=topup_intents.TopupIntentChannel.customer_selfcare,
                 created_by=created_by,
