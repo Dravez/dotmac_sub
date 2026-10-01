@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from app.models.billing import ServiceEntitlement, ServiceEntitlementStatus
 from app.models.catalog import Subscription
-from app.models.domain_settings import SettingDomain
 from app.models.network_monitoring import CustomerOutageInterval
 from app.models.service_period_purchase import (
     OutageCompensationDecision,
@@ -33,7 +32,10 @@ from app.services.owner_commands import (
     OwnerCommandDefinition,
     execute_owner_command,
 )
-from app.services.settings_spec import resolve_value
+from app.services.service_period_policy import (
+    OutageCompensationPolicy,
+    resolve_outage_compensation_policy,
+)
 
 _OWNER = "financial.outage_compensation"
 _POLICY_VERSION = 1
@@ -120,7 +122,9 @@ def merge_intervals(intervals: list[TimeInterval]) -> tuple[TimeInterval, ...]:
 
 
 def interval_seconds(intervals: tuple[TimeInterval, ...]) -> int:
-    return sum(int((item.ends_at - item.starts_at).total_seconds()) for item in intervals)
+    return sum(
+        int((item.ends_at - item.starts_at).total_seconds()) for item in intervals
+    )
 
 
 def intersect_seconds(
@@ -141,17 +145,11 @@ def intersect_seconds(
     return total
 
 
-def _threshold_seconds(db: Session) -> int:
-    raw = resolve_value(db, SettingDomain.billing, "outage_compensation_min_hours")
-    if isinstance(raw, bool):
-        raise _error("configuration_invalid", "Outage threshold is invalid.")
+def _policy(db: Session) -> OutageCompensationPolicy:
     try:
-        hours = int(raw)
+        return resolve_outage_compensation_policy(db)
     except (TypeError, ValueError) as exc:
         raise _error("configuration_invalid", "Outage threshold is invalid.") from exc
-    if hours < 1 or hours > 168:
-        raise _error("configuration_invalid", "Outage threshold must be 1–168 hours.")
-    return hours * 3600
 
 
 def _pending_cluster(
@@ -193,7 +191,8 @@ def _pending_cluster(
 def preview_outage_compensation(
     db: Session, *, subscription_id: UUID, effective_at: datetime
 ) -> OutageCompensationPreview:
-    if resolve_value(db, SettingDomain.billing, "outage_compensation_enabled") is not True:
+    policy = _policy(db)
+    if not policy.enabled:
         raise _error("feature_disabled", "Outage compensation is not enabled.")
     subscription = db.get(Subscription, subscription_id)
     if subscription is None:
@@ -201,7 +200,7 @@ def preview_outage_compensation(
     rows = _pending_cluster(db, subscription_id)
     if not rows:
         raise _error("no_finalized_outage", "No finalized outage awaits a decision.")
-    threshold = _threshold_seconds(db)
+    threshold = policy.minimum_seconds
     eligible = merge_intervals(
         [
             TimeInterval(row.started_at, row.ended_at)
@@ -264,7 +263,11 @@ def preview_outage_compensation(
             for row in rows
         ],
         "funded": [
-            (str(row.id), _utc(row.starts_at).isoformat(), _utc(row.ends_at).isoformat())
+            (
+                str(row.id),
+                _utc(row.starts_at).isoformat(),
+                _utc(row.ends_at).isoformat(),
+            )
             for row in funded_rows
         ],
         "status": status.value,
@@ -390,15 +393,18 @@ def _stage_outage_compensation(
     entitlement_id: UUID | None = None
     if preview.status is OutageCompensationDecisionStatus.compensated:
         assert preview.tail_before is not None and preview.tail_after is not None
-        tail_currency = db.scalar(
-            select(ServiceEntitlement.currency)
-            .where(
-                ServiceEntitlement.subscription_id == subscription.id,
-                ServiceEntitlement.status == ServiceEntitlementStatus.active,
-                ServiceEntitlement.ends_at == preview.tail_before,
+        tail_currency = (
+            db.scalar(
+                select(ServiceEntitlement.currency)
+                .where(
+                    ServiceEntitlement.subscription_id == subscription.id,
+                    ServiceEntitlement.status == ServiceEntitlementStatus.active,
+                    ServiceEntitlement.ends_at == preview.tail_before,
+                )
+                .order_by(ServiceEntitlement.created_at.desc())
             )
-            .order_by(ServiceEntitlement.created_at.desc())
-        ) or "NGN"
+            or "NGN"
+        )
         entitlement = ServiceEntitlement(
             account_id=subscription.subscriber_id,
             subscription_id=subscription.id,

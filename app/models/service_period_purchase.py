@@ -69,10 +69,14 @@ class PrepaidPeriodPurchase(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("subscribers.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("subscribers.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     subscription_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("subscriptions.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     topup_intent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("topup_intents.id", ondelete="RESTRICT")
@@ -87,8 +91,12 @@ class PrepaidPeriodPurchase(Base):
     )
     period_count: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    coverage_starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    coverage_ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    coverage_starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    coverage_ends_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     tax_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -97,7 +105,9 @@ class PrepaidPeriodPurchase(Base):
     policy_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     created_by: Mapped[str] = mapped_column(String(160), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(
@@ -123,20 +133,36 @@ class PrepaidPeriodPurchasePeriod(Base):
 
     __tablename__ = "prepaid_period_purchase_periods"
     __table_args__ = (
-        UniqueConstraint("purchase_id", "ordinal", name="uq_prepaid_purchase_period_ordinal"),
+        UniqueConstraint(
+            "purchase_id", "ordinal", name="uq_prepaid_purchase_period_ordinal"
+        ),
         UniqueConstraint("invoice_id", name="uq_prepaid_purchase_period_invoice"),
-        UniqueConstraint("entitlement_id", name="uq_prepaid_purchase_period_entitlement"),
-        CheckConstraint("ordinal >= 1 AND ordinal <= 12", name="ck_prepaid_purchase_period_ordinal"),
-        CheckConstraint("ends_at > starts_at", name="ck_prepaid_purchase_period_positive"),
-        Index("ix_prepaid_purchase_period_subscription", "subscription_id", "starts_at"),
+        UniqueConstraint(
+            "entitlement_id", name="uq_prepaid_purchase_period_entitlement"
+        ),
+        CheckConstraint(
+            "ordinal >= 1 AND ordinal <= 12", name="ck_prepaid_purchase_period_ordinal"
+        ),
+        CheckConstraint(
+            "ends_at > starts_at", name="ck_prepaid_purchase_period_positive"
+        ),
+        Index(
+            "ix_prepaid_purchase_period_subscription", "subscription_id", "starts_at"
+        ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     purchase_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("prepaid_period_purchases.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("prepaid_period_purchases.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     subscription_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("subscriptions.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -170,17 +196,31 @@ class OutageCompensationDecision(Base):
     __tablename__ = "outage_compensation_decisions"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_outage_compensation_decision_key"),
-        CheckConstraint("eligible_seconds >= 0", name="ck_outage_compensation_eligible_seconds"),
-        CheckConstraint("funded_overlap_seconds >= 0", name="ck_outage_compensation_funded_seconds"),
-        Index("ix_outage_compensation_subscription_created", "subscription_id", "created_at"),
+        CheckConstraint(
+            "eligible_seconds >= 0", name="ck_outage_compensation_eligible_seconds"
+        ),
+        CheckConstraint(
+            "funded_overlap_seconds >= 0", name="ck_outage_compensation_funded_seconds"
+        ),
+        Index(
+            "ix_outage_compensation_subscription_created",
+            "subscription_id",
+            "created_at",
+        ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("subscribers.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("subscribers.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     subscription_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("subscriptions.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     status: Mapped[OutageCompensationDecisionStatus] = mapped_column(
         Enum(OutageCompensationDecisionStatus, native_enum=False, length=32),
@@ -216,19 +256,31 @@ class OutageCompensationDecisionInterval(Base):
             "customer_outage_interval_id",
             name="uq_outage_compensation_consumed_interval",
         ),
-        CheckConstraint("included_seconds >= 0", name="ck_outage_compensation_included_seconds"),
-        CheckConstraint("excluded_seconds >= 0", name="ck_outage_compensation_excluded_seconds"),
+        CheckConstraint(
+            "included_seconds >= 0", name="ck_outage_compensation_included_seconds"
+        ),
+        CheckConstraint(
+            "excluded_seconds >= 0", name="ck_outage_compensation_excluded_seconds"
+        ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     decision_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("outage_compensation_decisions.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("outage_compensation_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     customer_outage_interval_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("customer_outage_intervals.id", ondelete="RESTRICT"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("customer_outage_intervals.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     incident_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     included_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     excluded_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
