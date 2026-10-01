@@ -1,13 +1,5 @@
 [
   {
-    "spec": "tests/playwright/e2e/test_e2e_workflows.py::TestSubscriptionActivation::test_phase1_customer_activation_shows_pppoe_and_radius_evidence",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
-  },
-  {
     "spec": "tests/playwright/e2e/test_ont_device_config.py::test_ont_apply_device_config_save_push_and_actions",
     "reason": "Page-object drift under investigation; fails with the harness repaired",
     "issue": "#1895",
