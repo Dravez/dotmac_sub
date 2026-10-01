@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 54928)
-Total output lines: 6130
-
 import json
 import logging
 from dataclasses import dataclass
@@ -2854,7 +2851,547 @@ SETTINGS_SPECS: list[SettingSpec] = [
         value_type=SettingValueType.string,
         default="SUB-",
     ),
-    Sett…4928 tokens truncated…nv_var="OUTAGE_AUTO_NOTIFY_SETTLE_MINUTES",
+    SettingSpec(
+        domain=SettingDomain.subscriber,
+        key="subscriber_number_padding",
+        env_var="SUBSCRIBER_NUMBER_PADDING",
+        value_type=SettingValueType.integer,
+        default=6,
+        min_value=0,
+    ),
+    SettingSpec(
+        domain=SettingDomain.subscriber,
+        key="subscriber_number_start",
+        env_var="SUBSCRIBER_NUMBER_START",
+        value_type=SettingValueType.integer,
+        default=1,
+        min_value=1,
+    ),
+    SettingSpec(
+        domain=SettingDomain.subscriber,
+        key="account_number_prefix",
+        env_var="SUBSCRIBER_ACCOUNT_NUMBER_PREFIX",
+        value_type=SettingValueType.string,
+        default="ACC-",
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="default_charge_status",
+        env_var="USAGE_DEFAULT_CHARGE_STATUS",
+        value_type=SettingValueType.string,
+        default="staged",
+        allowed={"staged", "posted", "needs_review", "skipped"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="default_rating_run_status",
+        env_var="USAGE_DEFAULT_RATING_RUN_STATUS",
+        value_type=SettingValueType.string,
+        default="running",
+        allowed={"running", "success", "failed"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="usage_warning_enabled",
+        env_var="USAGE_WARNING_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=True,
+        label="Enable Usage Warning Events",
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="usage_warning_thresholds",
+        env_var="USAGE_WARNING_THRESHOLDS",
+        value_type=SettingValueType.string,
+        default="0.8,0.9",
+        label="Usage Warning Thresholds",
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="fup_throttle_radius_profile_id",
+        env_var="USAGE_FUP_THROTTLE_RADIUS_PROFILE_ID",
+        value_type=SettingValueType.string,
+        default=None,
+        label="FUP Throttle RADIUS Profile ID",
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="fup_submonthly_rules_enabled",
+        env_var="USAGE_FUP_SUBMONTHLY_RULES_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=False,
+        label=(
+            "Allow daily/weekly FUP rules (sub-monthly usage is samples-derived, "
+            "not billing-grade — enable only after validating the metrics source)"
+        ),
+    ),
+    SettingSpec(
+        domain=SettingDomain.usage,
+        key="fup_action",
+        env_var="USAGE_FUP_ACTION",
+        value_type=SettingValueType.string,
+        default="throttle",
+        allowed={"throttle", "suspend", "block", "none"},
+        label="FUP Exhaustion Action",
+    ),
+    # Router REST connection tunables (previously hardcoded module constants in
+    # router_management.connection). Read by _rest_tunables() so operators can
+    # tune WAN/high-latency plant without a code change.
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="router_rest_connect_timeout_seconds",
+        env_var="NETWORK_ROUTER_REST_CONNECT_TIMEOUT_SECONDS",
+        value_type=SettingValueType.integer,
+        default=10,
+        label="Router REST connect timeout (s)",
+        min_value=1,
+        max_value=60,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="router_rest_read_timeout_seconds",
+        env_var="NETWORK_ROUTER_REST_READ_TIMEOUT_SECONDS",
+        value_type=SettingValueType.integer,
+        default=30,
+        label="Router REST read timeout (s)",
+        min_value=5,
+        max_value=180,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="router_rest_max_retries",
+        env_var="NETWORK_ROUTER_REST_MAX_RETRIES",
+        value_type=SettingValueType.integer,
+        default=3,
+        label="Router REST max retries",
+        min_value=1,
+        max_value=10,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="router_rest_retry_backoff_base",
+        env_var="NETWORK_ROUTER_REST_RETRY_BACKOFF_BASE",
+        value_type=SettingValueType.string,
+        default="2.0",
+        label="Router REST retry backoff base (wait = base^attempt)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="olt_mac_harvest_age_out_hours",
+        env_var="NETWORK_OLT_MAC_HARVEST_AGE_OUT_HOURS",
+        value_type=SettingValueType.integer,
+        default=6,
+        label="OLT MAC-forwarding observation age-out (hours)",
+        min_value=1,
+        max_value=168,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="coa_negative_cache_ttl_minutes",
+        env_var="NETWORK_COA_NEGATIVE_CACHE_TTL_MINUTES",
+        value_type=SettingValueType.integer,
+        default=15,
+        label="CoA negative-cache TTL (min) — skip CoA on a NAS that timed out",
+        min_value=1,
+        max_value=120,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="mikrotik_session_kill_enabled",
+        env_var="NETWORK_MIKROTIK_SESSION_KILL_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=True,
+        label="Enable MikroTik Session Kill",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="mikrotik_api_session_kick_enabled",
+        env_var="NETWORK_MIKROTIK_API_SESSION_KICK_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=True,
+        label="Enable MikroTik API Session Kick",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="address_list_block_enabled",
+        env_var="NETWORK_ADDRESS_LIST_BLOCK_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=True,
+        label="Enable Address List Blocking",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_mikrotik_address_list",
+        env_var="NETWORK_DEFAULT_MIKROTIK_ADDRESS_LIST",
+        value_type=SettingValueType.string,
+        default=None,
+        label="Default MikroTik Address List",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="customer_ont_reboot_cooldown_seconds",
+        env_var="NETWORK_CUSTOMER_ONT_REBOOT_COOLDOWN_SECONDS",
+        value_type=SettingValueType.integer,
+        default=300,
+        min_value=0,
+        label="Customer ONT Reboot Cooldown (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.collections,
+        key="default_dunning_case_status",
+        env_var="COLLECTIONS_DEFAULT_DUNNING_CASE_STATUS",
+        value_type=SettingValueType.string,
+        default="open",
+        allowed={"open", "paused", "resolved", "closed"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.collections,
+        key="throttle_radius_profile_id",
+        env_var="COLLECTIONS_THROTTLE_RADIUS_PROFILE_ID",
+        value_type=SettingValueType.string,
+        default=None,
+        label="Throttle RADIUS Profile ID",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="default_auth_provider",
+        env_var="AUTH_DEFAULT_AUTH_PROVIDER",
+        value_type=SettingValueType.string,
+        default="local",
+        allowed={"local", "sso", "radius"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="default_session_status",
+        env_var="AUTH_DEFAULT_SESSION_STATUS",
+        value_type=SettingValueType.string,
+        default="active",
+        allowed={"active", "revoked", "expired"},
+    ),
+    # --- Field-mobile OIDC federation (docs/designs/OIDC_MOBILE_FEDERATION.md).
+    #
+    # Every identifier below declares `inherits=False`: a platform row must not
+    # answer "which issuer" or "which redirect URI" for the operator tenant,
+    # because a less-specific answer here names the WRONG identity rather than a
+    # weaker one.
+    #
+    # None declares `required=True`, deliberately and against the shape it
+    # looks like it wants. The kernel's `required_at` is unconditional — it
+    # fails the DEPLOYMENT's boot — and OIDC is off by default and unreachable
+    # until the Keycloak client is enabled, so an unconditional requirement
+    # would refuse to start every deployment that will never federate. The
+    # requirement is CONDITIONAL and enforced where the condition is legible:
+    # `app.services.oidc_mobile_config.require_federation_config` refuses to
+    # build a configuration with any identifier missing, and
+    # `app.main._startup_preflight` calls it whenever the control is on. Missing
+    # configuration is therefore loud at boot for a deployment that has turned
+    # the mechanism on, and silent for one that has not.
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_issuer",
+        env_var="OIDC_MOBILE_ISSUER",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC issuer",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_client_id",
+        env_var="OIDC_MOBILE_CLIENT_ID",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC client id",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # The permanent, fleet-owned callback. It is deliberately not derived
+        # from Sub's own hostname: the mobile artifact's identity must not
+        # depend on where Sub happens to be deployed. Compared for EXACT
+        # equality at exchange — no prefix, wildcard, trailing-slash or scheme
+        # tolerance anywhere on the path.
+        key="oidc_mobile_redirect_uri",
+        env_var="OIDC_MOBILE_REDIRECT_URI",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC redirect URI",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # The ID token audience: the mobile application's identity, not the
+        # OAuth client id, which is why it is configured separately.
+        key="oidc_mobile_audience",
+        env_var="OIDC_MOBILE_AUDIENCE",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC audience",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # Which installed verifier row (`authentication_bindings.binding_key`,
+        # mechanism `oidc`) this deployment federates through. Two issuers are
+        # two bindings, so this is what selects between them.
+        key="oidc_mobile_binding_key",
+        env_var="OIDC_MOBILE_BINDING_KEY",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC verifier binding key",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # The trusted deployment identity a ceremony is bound to. Selected from
+        # configuration, never from a request body or a token claim.
+        key="oidc_mobile_deployment_id",
+        env_var="OIDC_MOBILE_DEPLOYMENT_ID",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC deployment id",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # Where the signing keys come from. `discovery` derives the JWKS URI
+        # from the issuer's well-known document; `static_uri` uses the URI
+        # below verbatim and contacts no discovery endpoint.
+        key="oidc_mobile_jwks_source",
+        env_var="OIDC_MOBILE_JWKS_SOURCE",
+        value_type=SettingValueType.string,
+        default="discovery",
+        allowed={"discovery", "static_uri"},
+        string_normalization=SettingStringNormalization.LOWERCASE,
+        label="Field mobile OIDC JWKS source",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_jwks_uri",
+        env_var="OIDC_MOBILE_JWKS_URI",
+        value_type=SettingValueType.string,
+        default=None,
+        inherits=False,
+        label="Field mobile OIDC JWKS URI",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # The bound on JWKS refresh. An unknown `kid` triggers AT MOST one
+        # refresh, and only if this many seconds have passed since the last
+        # attempt — so a flood of assertions carrying unknown key ids cannot
+        # amplify into per-request requests to the identity provider.
+        key="oidc_mobile_jwks_min_refresh_seconds",
+        env_var="OIDC_MOBILE_JWKS_MIN_REFRESH_SECONDS",
+        value_type=SettingValueType.integer,
+        default=300,
+        min_value=30,
+        max_value=86400,
+        label="Field mobile OIDC JWKS minimum refresh interval (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_jwks_timeout_seconds",
+        env_var="OIDC_MOBILE_JWKS_TIMEOUT_SECONDS",
+        value_type=SettingValueType.integer,
+        default=5,
+        min_value=1,
+        max_value=30,
+        label="Field mobile OIDC JWKS fetch timeout (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_ceremony_ttl_seconds",
+        env_var="OIDC_MOBILE_CEREMONY_TTL_SECONDS",
+        value_type=SettingValueType.integer,
+        default=300,
+        min_value=30,
+        max_value=900,
+        label="Field mobile OIDC ceremony lifetime (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        key="oidc_mobile_clock_skew_seconds",
+        env_var="OIDC_MOBILE_CLOCK_SKEW_SECONDS",
+        value_type=SettingValueType.integer,
+        default=60,
+        min_value=0,
+        max_value=300,
+        label="Field mobile OIDC accepted clock skew (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.auth,
+        # How old an assertion's `iat` may be. Separate from `exp`: an identity
+        # provider may issue long-lived ID tokens, and Sub still refuses one
+        # that was minted long before this ceremony's exchange.
+        key="oidc_mobile_max_assertion_age_seconds",
+        env_var="OIDC_MOBILE_MAX_ASSERTION_AGE_SECONDS",
+        value_type=SettingValueType.integer,
+        default=300,
+        min_value=30,
+        max_value=3600,
+        label="Field mobile OIDC maximum assertion age (seconds)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.provisioning,
+        key="default_service_order_status",
+        env_var="PROVISIONING_DEFAULT_SERVICE_ORDER_STATUS",
+        value_type=SettingValueType.string,
+        default="draft",
+        allowed={
+            "draft",
+            "submitted",
+            "scheduled",
+            "provisioning",
+            "active",
+            "canceled",
+            "failed",
+        },
+    ),
+    SettingSpec(
+        domain=SettingDomain.provisioning,
+        key="default_appointment_status",
+        env_var="PROVISIONING_DEFAULT_APPOINTMENT_STATUS",
+        value_type=SettingValueType.string,
+        default="proposed",
+        allowed={"proposed", "confirmed", "completed", "no_show", "canceled"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.provisioning,
+        key="default_task_status",
+        env_var="PROVISIONING_DEFAULT_TASK_STATUS",
+        value_type=SettingValueType.string,
+        default="pending",
+        allowed={"pending", "in_progress", "blocked", "completed", "failed"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.provisioning,
+        key="default_vendor",
+        env_var="PROVISIONING_DEFAULT_VENDOR",
+        value_type=SettingValueType.string,
+        default="other",
+        allowed={"mikrotik", "huawei", "zte", "nokia", "genieacs", "other"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.provisioning,
+        key="default_workflow_id",
+        env_var="PROVISIONING_DEFAULT_WORKFLOW_ID",
+        value_type=SettingValueType.string,
+        default=None,
+        label="Default Provisioning Workflow ID",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_device_type",
+        env_var="NETWORK_DEFAULT_DEVICE_TYPE",
+        value_type=SettingValueType.string,
+        default="other",
+        allowed={"ont", "router", "modem", "cpe", "access_point", "bridge", "other"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_device_status",
+        env_var="NETWORK_DEFAULT_DEVICE_STATUS",
+        value_type=SettingValueType.string,
+        default="active",
+        allowed={"active", "inactive", "retired"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_port_type",
+        env_var="NETWORK_DEFAULT_PORT_TYPE",
+        value_type=SettingValueType.string,
+        default="ethernet",
+        allowed={"pon", "ethernet", "wifi", "mgmt"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_port_status",
+        env_var="NETWORK_DEFAULT_PORT_STATUS",
+        value_type=SettingValueType.string,
+        default="down",
+        allowed={"up", "down", "disabled"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_ip_version",
+        env_var="NETWORK_DEFAULT_IP_VERSION",
+        value_type=SettingValueType.string,
+        default="ipv4",
+        allowed={"ipv4", "ipv6"},
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="default_fiber_strand_status",
+        env_var="NETWORK_DEFAULT_FIBER_STRAND_STATUS",
+        value_type=SettingValueType.string,
+        default="available",
+        allowed={
+            "available",
+            "in_use",
+            "reserved",
+            "damaged",
+            "retired",
+        },
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="internet_service_vlans",
+        env_var="NETWORK_INTERNET_SERVICE_VLANS",
+        value_type=SettingValueType.string,
+        default="203",
+        label="Internet Service VLANs",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="speedtest_sla_ratio",
+        env_var="NETWORK_SPEEDTEST_SLA_RATIO",
+        value_type=SettingValueType.string,
+        default="0.8",
+        label="Speedtest SLA Ratio",
+    ),
+    # Fiber installation planning cost rates
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="olt_profile_sync_worker_enabled",
+        env_var="OLT_PROFILE_SYNC_WORKER_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=False,
+        label="OLT Profile Sync Worker Enabled",
+    ),
+    SettingSpec(
+        domain=SettingDomain.network,
+        key="olt_profile_sync_interval_seconds",
+        env_var="OLT_PROFILE_SYNC_INTERVAL_SECONDS",
+        value_type=SettingValueType.integer,
+        default=300,
+        min_value=60,
+        label="OLT Profile Sync Interval (seconds)",
+    ),
+    # Automated customer outage notification (ADR 0004). Database-authoritative
+    # so an operator can arm, disarm or re-tighten automation from the admin UI
+    # during an incident. An env-var-only flag would need a deploy to flip,
+    # which is the wrong control for something that contacts customers.
+    SettingSpec(
+        domain=SettingDomain.network_monitoring,
+        key="outage_auto_notify_enabled",
+        label="Automated Outage Notification",
+        env_var="OUTAGE_AUTO_NOTIFY_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=False,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network_monitoring,
+        key="outage_auto_notify_dry_run",
+        label="Automated Outage Notification: Dry Run",
+        env_var="OUTAGE_AUTO_NOTIFY_DRY_RUN",
+        value_type=SettingValueType.boolean,
+        default=True,
+    ),
+    SettingSpec(
+        domain=SettingDomain.network_monitoring,
+        key="outage_auto_notify_settle_minutes",
+        label="Automated Outage Notification: Settling Window (minutes)",
+        env_var="OUTAGE_AUTO_NOTIFY_SETTLE_MINUTES",
         value_type=SettingValueType.integer,
         default=15,
         min_value=1,
