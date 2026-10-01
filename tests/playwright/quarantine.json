@@ -22,13 +22,5 @@
     "category": "tail",
     "owner": "unassigned",
     "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_workqueue.py::TestNativeAgentWorkqueue::test_admin_can_claim_and_complete_through_native_owner",
-    "reason": "Page-object drift under investigation; fails with the harness repaired",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
   }
 ]

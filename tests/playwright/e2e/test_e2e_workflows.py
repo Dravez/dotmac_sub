@@ -507,7 +507,9 @@ class TestSubscriptionActivation:
         )
         expect(page.get_by_text("Provisioning Evidence", exact=True)).to_be_visible()
         page.get_by_role("button", name="Toggle Provisioning Evidence").click()
-        credential_card = page.locator("text=Access Credential").locator("..")
+        credential_card = page.get_by_text("Access Credential", exact=True).locator(
+            "xpath=.."
+        )
         expect(credential_card).to_contain_text(re.compile(r"1050\d+"))
         expect(credential_card).to_contain_text("PPPOE")
         username_match = re.search(r"\b1050\d+\b", credential_card.inner_text())
