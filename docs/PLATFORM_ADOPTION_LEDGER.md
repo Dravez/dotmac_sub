@@ -1000,19 +1000,18 @@ ADR-0009 drew the second line for the boot five; this states the reason, so the
 next secret-shaped setting is classified rather than argued about.
 
 **`billing/prepaid_reconstruction_attestation_public_key_ref` moved by that
-rule.** It is a public key, so confidentiality buys nothing; what it needed was
-that only OpenBao access can replace it, since replacing it means forged
-funding manifests verify. Its guard — "must be an OpenBao reference" — looked
-like that protection and was not: it checked the value WAS a reference and
-never WHICH reference, so settings-write could aim it at any key. It is now
-`prepaid_attestation_public_key` in `OPTIONAL_SECRET_REFS`.
+rule.** The value is a public key; its security property is that only the
+root-managed deployment account can replace the key that verifies funding
+manifests. The old `bao://` guard checked only that the value was a reference,
+not which key it resolved to. The boot-held value is now read from the
+read-only `PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE` path; it is not an OpenBao
+reference or a writable settings row.
 
-`OPTIONAL_SECRET_REFS` exists for exactly that shape: material needed by ONE
-feature, where a deployment not using the feature has nothing to provision and
-must still boot. The strict distinction survives — a missing PATH means not
-provisioned, while an unreachable store, a bad token or a missing field still
-raise (`secrets.resolve_openbao_ref_optional`). The required five stay
-all-or-nothing.
+The public key is optional at boot because a deployment may not run this
+reconstruction workflow. When configured, the file must be absolute, regular,
+non-symlinked, and not writable by group or other. When absent, manifest
+verification fails closed if invoked. Other optional boot material remains in
+`OPTIONAL_SECRET_REFS`; the required five stay all-or-nothing.
 
 The three settings modules were added 2026-08-10 for the settings cutover:
 `settings_resolver` (resolution, and `register_specs` so Sub's 560 specs are

@@ -5,8 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from app.config import settings
 from app.services.kernel_key_provider import KEYRING_REF
-from app.services.kernel_secret_source import OPTIONAL_SECRET_REFS, SECRET_REFS
+from app.services.kernel_secret_source import (
+    OPTIONAL_SECRET_REFS,
+    SECRET_REFS,
+    load_prepaid_public_key_file,
+)
 from app.services.secrets import resolve_openbao_ref
 
 #: Material required by every deployed settings-write surface.
@@ -89,7 +94,18 @@ def main() -> int:
         "OpenBao boot-secret preflight passed for "
         f"{len(result.checked_names)} required fields."
     )
-    absent = report_optional_boot_material()
+    if settings.prepaid_reconstruction_public_key_file:
+        try:
+            public_key = load_prepaid_public_key_file()
+        except RuntimeError:
+            print("Prepaid public-key file preflight failed.")
+            return 1
+        if not public_key:
+            print("Prepaid public-key file preflight failed: file is not configured.")
+            return 1
+        print("Local prepaid public-key file preflight passed.")
+
+    absent = report_optional_boot_material(OPTIONAL_REFS)
     if absent:
         print(
             "Optional boot material not provisioned (features using it will "

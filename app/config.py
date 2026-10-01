@@ -26,6 +26,11 @@ def _env_bool(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower()
+    # Root-managed public authority key for reviewed prepaid reconstruction.
+    # The private signer is supplied only to the isolated audit exporter.
+    prepaid_reconstruction_public_key_file: str = os.getenv(
+        "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE", ""
+    ).strip()
     database_url: str = os.getenv(
         "DATABASE_URL",
         "postgresql+psycopg://postgres:postgres@localhost:5434/dotmac_sub",

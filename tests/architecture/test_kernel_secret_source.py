@@ -14,6 +14,7 @@ convenient one would be the bug.
 from __future__ import annotations
 
 import pathlib
+from dataclasses import replace
 
 import pytest
 
@@ -52,14 +53,13 @@ def test_the_optional_set_holds_only_approved_feature_scoped_material() -> None:
     `test_machine_key_is_optional_only_while_the_legacy_verifier_exists`.
 
     `conversion_ingest_api_key` belongs only to the optional Fiber acquisition
-    projection, and `prepaid_attestation_public_key` belongs only to prepaid
-    reconstruction.
+    projection. The prepaid verification key comes only from a local deployment
+    file and is not an OpenBao field.
     """
 
     assert set(kss.OPTIONAL_SECRET_REFS) == {
         "conversion_ingest_api_key",
         "machine_credential_hmac_key",
-        "prepaid_attestation_public_key",
     }
 
 
@@ -135,6 +135,7 @@ def stub_openbao(monkeypatch):
     stubbed only the required reader would reach the real client."""
 
     def _stub(optional=lambda ref: f"value-for::{ref}"):
+        monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
         monkeypatch.setattr(kss, "resolve_openbao_ref", lambda ref: f"value-for::{ref}")
         monkeypatch.setattr(kss, "resolve_openbao_ref_optional", optional)
 
@@ -176,6 +177,7 @@ def test_an_optional_secret_still_fails_the_load_when_the_store_errors(
     """
 
     monkeypatch.setattr(kss, "resolve_openbao_ref", lambda ref: "ok")
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
 
     def _unreachable(_ref: str) -> str:
         raise _Boom("openbao unreachable")
@@ -193,6 +195,7 @@ def test_an_unreachable_store_RAISES_rather_than_returning_empty(monkeypatch) ->
     def _unreachable(reference: str) -> str:
         raise _Boom("openbao unreachable")
 
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
     monkeypatch.setattr(kss, "resolve_openbao_ref", _unreachable)
     monkeypatch.setattr(kss, "resolve_openbao_ref_optional", lambda _ref: None)
     with pytest.raises(_Boom):
@@ -209,6 +212,7 @@ def test_one_missing_secret_fails_the_whole_load(monkeypatch) -> None:
         return "ok"
 
     monkeypatch.setattr(kss, "resolve_openbao_ref", _one_missing)
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
     monkeypatch.setattr(kss, "resolve_openbao_ref_optional", lambda _ref: None)
     with pytest.raises(_Boom):
         kss.OpenBaoSecretSource().load()
@@ -234,6 +238,7 @@ def test_load_never_logs_a_secret_value(monkeypatch, caplog) -> None:
     import logging
 
     secret = "AAAA-actual-secret-material-AAAA"
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
     monkeypatch.setattr(kss, "resolve_openbao_ref", lambda ref: secret)
     monkeypatch.setattr(kss, "resolve_openbao_ref_optional", lambda _ref: secret)
     with caplog.at_level(logging.DEBUG, logger=kss.__name__):
@@ -241,7 +246,90 @@ def test_load_never_logs_a_secret_value(monkeypatch, caplog) -> None:
     assert secret not in caplog.text
 
 
+def test_prepaid_trust_anchor_loads_from_local_file_without_openbao(
+    monkeypatch, tmp_path
+) -> None:
+    trust_file = tmp_path / "trusted-public.pem"
+    trust_file.write_text("public trust material\n", encoding="utf-8")
+    trust_file.chmod(0o444)
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: False)
+
+    loaded = kss.LocalPrepaidTrustAnchorSource().load()
+
+    assert loaded == {"prepaid_attestation_public_key": "public trust material"}
+
+
+def test_local_public_key_is_loaded_alongside_openbao_material(
+    monkeypatch, tmp_path
+) -> None:
+    trust_file = tmp_path / "trusted-public.pem"
+    trust_file.write_text("local public trust material\n", encoding="utf-8")
+    trust_file.chmod(0o444)
+    requested_optional_refs: list[str] = []
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
+    monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
+    monkeypatch.setattr(kss, "resolve_openbao_ref", lambda reference: "required")
+
+    def resolve_optional(reference: str) -> str:
+        requested_optional_refs.append(reference)
+        return f"value-for::{reference}"
+
+    monkeypatch.setattr(kss, "resolve_openbao_ref_optional", resolve_optional)
+    loaded = kss.OpenBaoSecretSource().load()
+
+    assert loaded["prepaid_attestation_public_key"] == "local public trust material"
+    assert all(
+        "prepaid_reconstruction_attestation_public_key" not in reference
+        for reference in requested_optional_refs
+    )
+
+
+def test_local_trust_anchor_rejects_relative_or_writable_files(
+    monkeypatch, tmp_path
+) -> None:
+    trust_file = tmp_path / "trusted-public.pem"
+    trust_file.write_text("public trust material\n", encoding="utf-8")
+    trust_file.chmod(0o666)
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="non-group/world-writable"):
+        kss.LocalPrepaidTrustAnchorSource().load()
+
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file="relative/key.pem",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="absolute file path"):
+        kss.LocalPrepaidTrustAnchorSource().load()
+
+
 def test_it_satisfies_the_kernel_protocol() -> None:
     from dotmac_kernel.secret_sources import SecretSource
 
     assert isinstance(kss.OpenBaoSecretSource(), SecretSource)
+    assert isinstance(kss.LocalPrepaidTrustAnchorSource(), SecretSource)

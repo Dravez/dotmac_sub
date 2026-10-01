@@ -70,3 +70,10 @@ def test_the_optional_set_is_the_one_the_application_holds_optionally() -> None:
     assert REQUIRED_REFS["settings_encryption_keyring"].endswith(
         "settings/crypto#settings_encryption_keyring"
     )
+
+
+def test_prepaid_public_key_is_not_an_openbao_optional_field() -> None:
+    from app.services.kernel_secret_source import OPTIONAL_SECRET_REFS
+    from app.services.prepaid_funding_attestation import TRUST_KEY_NAME
+
+    assert TRUST_KEY_NAME not in OPTIONAL_SECRET_REFS
