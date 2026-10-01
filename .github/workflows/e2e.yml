@@ -114,10 +114,17 @@ jobs:
             --email e2e.admin@example.com --first-name E2E --last-name Admin \
             --username e2e.admin@example.com --password "E2eAdminPass123!"
 
+      - name: Prepare synthetic RADIUS fixture directory
+        run: |
+          fixture_dir="$RUNNER_TEMP/dotmac-sub-e2e-radius-fixtures"
+          mkdir -p "$fixture_dir"
+          chmod 0755 "$fixture_dir"
+
       - name: Start application
         run: |
           E2E_JWT_SECRET="$(openssl rand -hex 32)"
           docker run -d --name e2e-app --network e2e-net -p 8001:8001 \
+            -v "$RUNNER_TEMP/dotmac-sub-e2e-radius-fixtures:$RUNNER_TEMP/dotmac-sub-e2e-radius-fixtures:ro" \
             -e DATABASE_URL=postgresql+psycopg://postgres@e2e-db:5432/dotmac_sub_e2e \
             -e SECRET_KEY=e2e-test-secret-key-not-for-production \
             -e JWT_SECRET="$E2E_JWT_SECRET" \
@@ -154,6 +161,7 @@ jobs:
           # writes to the poisoned root-conftest Redis URL and every portal
           # spec bounces to the login page.
           E2E_REDIS_URL: "redis://127.0.0.1:56379/0"
+          E2E_RADIUS_FIXTURE_DIR: ${{ runner.temp }}/dotmac-sub-e2e-radius-fixtures
           E2E_ADMIN_USERNAME: "e2e.admin@example.com"
           E2E_ADMIN_PASSWORD: "E2eAdminPass123!"
         run: |

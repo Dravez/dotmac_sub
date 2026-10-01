@@ -67,7 +67,7 @@ def workqueue_ticket(e2e_db, settings):
     return {
         "ticket_id": ticket.id,
         "title": ticket.title,
-        "assignee_person_id": system_user.person_party_id,
+        "claim_actor_system_user_id": system_user.id,
     }
 
 
@@ -119,7 +119,10 @@ class TestNativeAgentWorkqueue:
         e2e_db.expire_all()
         ticket = e2e_db.get(Ticket, workqueue_ticket["ticket_id"])
         assert ticket is not None
-        assert ticket.assigned_to_person_id == workqueue_ticket["assignee_person_id"]
+        assert (
+            ticket.assigned_to_person_id
+            == workqueue_ticket["claim_actor_system_user_id"]
+        )
         assert ticket.status == TicketStatus.closed.value
 
     def test_narrow_view_keeps_filters_and_primary_action_usable(

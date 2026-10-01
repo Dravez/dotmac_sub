@@ -6,14 +6,23 @@ pages and systems.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import re
+import sqlite3
 import time
+from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
+import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
+from sqlalchemy import text
 
+from app.models.connector import ConnectorAuthType, ConnectorConfig, ConnectorType
+from app.models.radius import RadiusServer, RadiusSyncJob
 from tests.playwright.helpers.api import api_get, api_post_json, bearer_headers
 from tests.playwright.pages.admin.login_page import AdminLoginPage
 
@@ -191,6 +200,119 @@ def _configure_phase1_radius_settings(
     assert current_prefix["value_text"] == "1050"
 
 
+def _is_loopback_host(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture()
+def phase1_external_radius_source(e2e_db, settings, tmp_path):
+    """Expose read-only synthetic RADIUS rows to the disposable E2E web app."""
+    configured_dir = os.getenv("E2E_RADIUS_FIXTURE_DIR")
+    if configured_dir:
+        runner_temp = os.getenv("RUNNER_TEMP")
+        fixture_dir = Path(configured_dir)
+        if (
+            not runner_temp
+            or fixture_dir != Path(runner_temp) / "dotmac-sub-e2e-radius-fixtures"
+            or not fixture_dir.is_absolute()
+            or not fixture_dir.is_dir()
+            or fixture_dir.is_symlink()
+        ):
+            raise RuntimeError("E2E RADIUS fixture directory is not the runner mount")
+        db_path = fixture_dir / f"phase1_radius_{uuid4().hex}.sqlite"
+    else:
+        db_path = tmp_path / "phase1_radius.sqlite"
+    created_ids = None
+
+    def create(username: str, suffix: str) -> tuple[str, str]:
+        nonlocal created_ids
+        bind = e2e_db.get_bind()
+        if (
+            not _is_loopback_host(urlsplit(settings.base_url).hostname)
+            or bind.dialect.name != "postgresql"
+            or not _is_loopback_host(bind.url.host)
+            or bind.url.database != "dotmac_sub_e2e"
+        ):
+            raise RuntimeError(
+                "Phase1 external rows require a loopback disposable E2E target"
+            )
+        if e2e_db.scalar(text("SELECT current_database()")) != "dotmac_sub_e2e":
+            raise RuntimeError(
+                "Phase1 external rows require the disposable E2E database"
+            )
+
+        pool = f"e2e-pool-{suffix.lower()}"
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "CREATE TABLE radcheck (username TEXT, attribute TEXT, op TEXT, value TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE radreply (username TEXT, attribute TEXT, op TEXT, value TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE radusergroup (username TEXT, groupname TEXT, priority INTEGER)"
+            )
+            connection.execute(
+                "INSERT INTO radcheck VALUES (?, 'Simultaneous-Use', ':=', '1')",
+                (username,),
+            )
+            connection.execute(
+                "INSERT INTO radreply VALUES (?, 'Framed-Pool', ':=', ?)",
+                (username, pool),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        db_path.chmod(0o444)
+
+        server = RadiusServer(
+            name=f"E2E RADIUS server {suffix}",
+            host=f"e2e-radius-{suffix.lower()}.invalid",
+        )
+        connector = ConnectorConfig(
+            name=f"E2E external RADIUS {suffix}",
+            connector_type=ConnectorType.custom,
+            auth_type=ConnectorAuthType.none,
+            base_url=f"sqlite:///{db_path}",
+            is_active=True,
+        )
+        e2e_db.add_all((server, connector))
+        e2e_db.flush()
+        job = RadiusSyncJob(
+            name=f"E2E external RADIUS {suffix}",
+            server_id=server.id,
+            connector_config_id=connector.id,
+            sync_users=True,
+            sync_nas_clients=False,
+            is_active=True,
+        )
+        e2e_db.add(job)
+        e2e_db.commit()
+        created_ids = (job.id, connector.id, server.id)
+        return job.name, pool
+
+    yield create
+
+    try:
+        e2e_db.rollback()
+        if created_ids is not None:
+            for model, identifier in zip(
+                (RadiusSyncJob, ConnectorConfig, RadiusServer), created_ids, strict=True
+            ):
+                row = e2e_db.get(model, identifier)
+                if row is not None:
+                    e2e_db.delete(row)
+            e2e_db.commit()
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
 class TestCustomerListFilters:
     """Tests for customer-list filter guidance."""
 
@@ -279,6 +401,7 @@ class TestSubscriptionActivation:
         settings,
         api_context,
         admin_token,
+        phase1_external_radius_source,
     ):
         """Create customer and active subscription, then verify PPPoE and RADIUS evidence in UI."""
         suffix = uuid4().hex[:8].upper()
@@ -327,9 +450,16 @@ class TestSubscriptionActivation:
         expect(page).to_have_url(re.compile(r".*/admin/customers/person/[^/?#]+"))
         expect(page.get_by_text(customer_email).first).to_be_visible()
 
-        page.get_by_role("button", name=re.compile(r"Subscriptions")).click()
-        expect(page.get_by_role("link", name="Add Subscription")).to_be_visible()
-        page.get_by_role("link", name="Add Subscription").click()
+        page.get_by_role("navigation", name="Tabs").get_by_role(
+            "button", name=re.compile(r"^Service\s*\d*$")
+        ).click()
+        new_subscription = (
+            page.get_by_role("heading", name="All Subscriptions")
+            .locator("..")
+            .get_by_role("link", name="New Subscription")
+        )
+        expect(new_subscription).to_be_visible()
+        new_subscription.click()
 
         page.wait_for_url("**/admin/catalog/subscriptions/new**")
         expect(
@@ -337,6 +467,7 @@ class TestSubscriptionActivation:
         ).to_be_visible()
 
         page.locator("#offer_id").select_option(str(offer["id"]))
+        page.locator("#status").select_option("active")
         page.get_by_role("button", name="Continue").click()
 
         provisioning_nas_value = page.locator(
@@ -349,7 +480,6 @@ class TestSubscriptionActivation:
         page.locator("#ipv4_method").select_option("dynamic")
 
         page.get_by_role("button", name="Continue").click()
-        page.locator("input[name='activate_immediately']").check()
         page.locator("input[name='send_welcome_email']").uncheck()
         page.get_by_role("button", name="Add Subscription").click(no_wait_after=True)
 
@@ -376,9 +506,12 @@ class TestSubscriptionActivation:
             wait_until="domcontentloaded",
         )
         expect(page.get_by_text("Provisioning Evidence", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Toggle Provisioning Evidence").click()
         credential_card = page.locator("text=Access Credential").locator("..")
         expect(credential_card).to_contain_text(re.compile(r"1050\d+"))
         expect(credential_card).to_contain_text("PPPOE")
+        username_match = re.search(r"\b1050\d+\b", credential_card.inner_text())
+        assert username_match is not None
 
         expect(
             page.get_by_text("Resolved RADIUS Reply Attributes", exact=True)
@@ -391,10 +524,28 @@ class TestSubscriptionActivation:
         expect(
             page.get_by_text("Delegated-IPv6-Prefix-Pool", exact=False)
         ).to_be_visible()
+
+        external_job_name, external_pool = phase1_external_radius_source(
+            username_match.group(), suffix
+        )
+        page.reload(wait_until="domcontentloaded")
         expect(page.get_by_text("External FreeRADIUS Rows", exact=True)).to_be_visible()
-        expect(page.get_by_text("radcheck", exact=False)).to_be_visible()
-        expect(page.get_by_text("radreply", exact=False)).to_be_visible()
+        page.get_by_role("button", name="Toggle External FreeRADIUS Rows").click()
+        external_rows = page.get_by_role(
+            "heading", name="External FreeRADIUS Rows"
+        ).locator("xpath=ancestor::div[@x-data][1]")
+        source_card = external_rows.get_by_text(external_job_name, exact=True).locator(
+            "xpath=ancestor::div[contains(@class, 'rounded-lg') "
+            "and contains(@class, 'border-slate-200')][1]"
+        )
+        expect(source_card.get_by_text("radcheck", exact=True)).to_be_visible()
+        expect(source_card.get_by_text("Simultaneous-Use := 1")).to_be_visible()
+        expect(source_card.get_by_text("radreply", exact=True)).to_be_visible()
+        expect(
+            source_card.get_by_text(f"Framed-Pool := {external_pool}")
+        ).to_be_visible()
         events_section = page.get_by_text("Domain Events", exact=True).locator("../..")
+        page.get_by_role("button", name="Toggle Domain Events").click()
         for attempt in range(5):
             created_event = events_section.get_by_text(
                 "subscription.created", exact=True
@@ -411,6 +562,7 @@ class TestSubscriptionActivation:
             events_section = page.get_by_text("Domain Events", exact=True).locator(
                 "../.."
             )
+            page.get_by_role("button", name="Toggle Domain Events").click()
             time.sleep(1)
         expect(
             events_section.get_by_text("subscription.created", exact=True)
