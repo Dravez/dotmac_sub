@@ -34,7 +34,9 @@ class OLTsPage(BasePage):
 
     def click_new_olt(self) -> None:
         """Click new OLT button."""
-        self.page.get_by_role("link", name="Add OLT").click()
+        self.page.locator(
+            'a[href="/admin/network/olts/new"]', has_text="Add OLT"
+        ).first.click()
 
     def click_olt_row(self, olt_name: str) -> None:
         """Click on an OLT row."""
