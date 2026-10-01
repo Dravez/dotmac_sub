@@ -54,6 +54,7 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 
+from app.config import settings
 from app.services.secrets import (
     is_openbao_configured,
     resolve_openbao_ref,
@@ -75,8 +76,8 @@ SECRET_REFS: Mapping[str, str] = {
     "radius_auth_shared_secret": "bao://secret/settings/radius#auth_shared_secret",
 }
 
-#: OpenBao material that is held the same way but whose ABSENCE is a legitimate state,
-#: so a missing path must not fail the boot.
+#: OpenBao material that is held the same way but whose ABSENCE is a legitimate
+#: state, so a missing path must not fail the boot.
 #:
 #: The required set above is all-or-nothing on purpose: those five are needed by
 #: every process, so a partial load is a reason to stop. These are needed by ONE
@@ -87,12 +88,6 @@ SECRET_REFS: Mapping[str, str] = {
 #: The distinction is still the strict one: a MISSING path means not
 #: provisioned; an unreachable store, a bad token or a missing field on a path
 #: that does exist all still raise — see `secrets.resolve_openbao_ref_optional`.
-#:
-#: **`prepaid_attestation_public_key`** — the public trust anchor may use the
-#: legacy optional OpenBao reference on deployments that have not selected a
-#: local file. When `PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_FILE` is set, that
-#: root-managed, read-only file is authoritative and the OpenBao reference is
-#: not resolved.
 #:
 #: **`machine_credential_hmac_key`** — what `dotmac_kernel.machine_auth` hashes
 #: every presented key with. It belongs with the three encryption keys above by
@@ -132,19 +127,16 @@ OPTIONAL_SECRET_REFS: Mapping[str, str] = {
     "machine_credential_hmac_key": (
         "bao://secret/settings/machine_auth#machine_credential_hmac_key"
     ),
-    "prepaid_attestation_public_key": (
-        "bao://secret/settings/billing#prepaid_reconstruction_attestation_public_key"
-    ),
     "conversion_ingest_api_key": (
         "bao://secret/settings/marketing#conversion_ingest_api_key"
     ),
 }
 
-PREPAID_TRUST_PUBLIC_KEY_FILE_ENV = "PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_FILE"
+PREPAID_PUBLIC_KEY_FILE_ENV = "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE"
 
 
-def load_prepaid_trust_public_key_file() -> str | None:
-    """Read the deployment-mounted prepaid trust anchor, if configured.
+def load_prepaid_public_key_file() -> str | None:
+    """Read the configured deployment public authority key, if present.
 
     The path is deployment-owned and the file is mounted read-only into app
     containers. Refuse relative paths, symlinks, non-regular files and files
@@ -152,41 +144,41 @@ def load_prepaid_trust_public_key_file() -> str | None:
     manifests the application accepts.
     """
 
-    raw_path = os.getenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "").strip()
+    raw_path = settings.prepaid_reconstruction_public_key_file
     if not raw_path:
         return None
     path = Path(raw_path)
     if not path.is_absolute():
         raise RuntimeError(
-            f"{PREPAID_TRUST_PUBLIC_KEY_FILE_ENV} must be an absolute file path"
+            f"{PREPAID_PUBLIC_KEY_FILE_ENV} must be an absolute file path"
         )
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
         raise RuntimeError(
-            "prepaid reconstruction trust key file is unavailable"
+            "prepaid reconstruction public key file is unavailable"
         ) from exc
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022:
             raise RuntimeError(
-                "prepaid reconstruction trust key must be a regular, "
+                "prepaid reconstruction public key must be a regular, "
                 "non-group/world-writable file"
             )
         with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
             descriptor = -1
-            value = stream.read().strip()
+            value = stream.read()
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not value:
-        raise RuntimeError("prepaid reconstruction trust key file is empty")
+    if not value.strip():
+        raise RuntimeError("prepaid reconstruction public key file is empty")
     return value
 
 
 class OpenBaoSecretSource:
-    """Loads boot-time OpenBao material and the optional local trust anchor.
+    """Loads OpenBao boot material and the optional local public authority key.
 
     Satisfies `dotmac_kernel.secret_sources.SecretSource` structurally — the
     kernel declares the protocol and holds the result; it never learns what
@@ -217,29 +209,24 @@ class OpenBaoSecretSource:
         provisioned".
         """
         loaded: dict[str, str] = {}
-        local_trust_path_selected = bool(
-            os.getenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "").strip()
-        )
         for name, reference in self._refs.items():
             # `resolve_openbao_ref` raises; `get_secret` would swallow and
             # return a default, which the kernel would install as success.
             loaded[name] = resolve_openbao_ref(reference)
         skipped: list[str] = []
         for name, reference in self._optional_refs.items():
-            if local_trust_path_selected and name == "prepaid_attestation_public_key":
-                continue
             value = resolve_openbao_ref_optional(reference)
             if value is None:
                 skipped.append(name)
                 continue
             loaded[name] = value
-        trust_key = load_prepaid_trust_public_key_file()
-        if trust_key is not None:
-            loaded["prepaid_attestation_public_key"] = trust_key
+        public_key = load_prepaid_public_key_file()
+        if public_key is not None:
+            loaded["prepaid_attestation_public_key"] = public_key
         logger.info(
-            "Loaded %d boot secret(s) from OpenBao; local prepaid trust key %s%s",
+            "Loaded %d boot secret(s) from OpenBao; local prepaid public key %s%s",
             len(loaded),
-            "loaded" if trust_key is not None else "not provisioned",
+            "loaded" if public_key is not None else "not provisioned",
             f"; optional OpenBao material absent: {', '.join(sorted(skipped))}"
             if skipped
             else "",
@@ -251,12 +238,12 @@ class LocalPrepaidTrustAnchorSource:
     """Install only the prepaid verification key from its mounted local file."""
 
     def load(self) -> Mapping[str, str]:
-        trust_key = load_prepaid_trust_public_key_file()
-        if trust_key is None:
+        public_key = load_prepaid_public_key_file()
+        if public_key is None:
             raise RuntimeError(
-                f"{PREPAID_TRUST_PUBLIC_KEY_FILE_ENV} is required for local trust"
+                f"{PREPAID_PUBLIC_KEY_FILE_ENV} is required for local authority"
             )
-        return {"prepaid_attestation_public_key": trust_key}
+        return {"prepaid_attestation_public_key": public_key}
 
 
 def install() -> tuple[str, ...]:
@@ -269,7 +256,7 @@ def install() -> tuple[str, ...]:
 
 
 def install_if_configured() -> tuple[str, ...]:
-    """Install held boot material when OpenBao or the local trust file is set.
+    """Install held boot material when OpenBao or the local public key is set.
 
     The OpenBao gate reads configuration and performs no I/O — it does not
     probe reachability. A configured but unreachable OpenBao still fails boot;
@@ -282,7 +269,7 @@ def install_if_configured() -> tuple[str, ...]:
 
     if (
         not is_openbao_configured()
-        and not os.getenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "").strip()
+        and not settings.prepaid_reconstruction_public_key_file
     ):
         logger.info(
             "No OpenBao configured; holding no boot secrets "

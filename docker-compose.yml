@@ -44,7 +44,7 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       OPENBAO_ADDR: ${OPENBAO_ADDR}
       OPENBAO_TOKEN: ${OPENBAO_TOKEN}
-      PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_FILE: /run/secrets/prepaid-funding/trusted-public.pem
+      PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE: /run/secrets/prepaid-funding/trusted-public.pem
       APP_URL: ${APP_URL:-}
       APP_RELEASE: ${APP_RELEASE:-}
       GIT_SHA: ${GIT_SHA:-}
@@ -63,7 +63,7 @@ services:
     volumes:
     - /etc/wireguard:/etc/wireguard
     - /var/run/docker.sock:/var/run/docker.sock:ro
-    - ${PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_HOST_DIR:-/etc/dotmac/sub/prepaid-funding-keys}:/run/secrets/prepaid-funding:ro
+    - ${PREPAID_RECONSTRUCTION_PUBLIC_KEY_HOST_DIR:-/etc/dotmac/sub/prepaid-funding-keys}:/run/secrets/prepaid-funding:ro
     - ./uploads:/app/uploads
     # Migrations are NOT run on boot: a half-applied / multi-head migration
     # state must never crash-loop the live app. Apply them as a controlled,

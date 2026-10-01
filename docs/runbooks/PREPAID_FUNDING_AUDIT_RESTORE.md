@@ -196,7 +196,7 @@ data), and the network. Exported artifacts are kept.
    signature against the public key held at boot from the read-only file
    `/run/secrets/prepaid-funding/trusted-public.pem`, then applies. The host
    directory is `/etc/dotmac/sub/prepaid-funding-keys` by default and can be
-   set with `PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_HOST_DIR`. Keep the
+   set with `PREPAID_RECONSTRUCTION_PUBLIC_KEY_HOST_DIR`. Keep the
    existing approved public key in `trusted-public.pem`; do not replace or
    rotate it during reconciliation. Dry-run
    by default; apply requires `--reviewed-sha256`, `--evidence-ref`,

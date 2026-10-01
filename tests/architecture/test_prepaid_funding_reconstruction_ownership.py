@@ -180,16 +180,14 @@ def test_materializer_owner_requires_a_config_trusted_clean_replay_seal() -> Non
     # that path at all.
     assert "get_secret(TRUST_KEY_NAME)" in attestation
     secret_source = _read("app/services/kernel_secret_source.py")
-    assert "PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_FILE" in secret_source
+    assert "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE" in secret_source
     assert '"prepaid_attestation_public_key"' in secret_source
-    assert 'local_trust_path_selected and name == "prepaid_attestation_public_key"' in (
-        secret_source
-    )
+    assert '"prepaid_attestation_public_key": (' not in secret_source
     assert "prepaid_reconstruction_attestation_public_key_ref" not in settings
 
     compose = _read("docker-compose.yml")
     app_service = compose[compose.index("  app:") : compose.index("  redis-local:")]
-    assert "PREPAID_RECONSTRUCTION_TRUST_PUBLIC_KEY_FILE" in app_service
+    assert "PREPAID_RECONSTRUCTION_PUBLIC_KEY_FILE" in app_service
     assert ":/run/secrets/prepaid-funding:ro" in app_service
 
     restore = _read("scripts/one_off/prepaid_funding_audit_restore.sh")
@@ -202,8 +200,8 @@ def test_materializer_owner_requires_a_config_trusted_clean_replay_seal() -> Non
         assert secret_env_name in export_command
 
     preflight = _read("scripts/setup/verify_openbao_boot_secrets.py")
-    assert "optional_refs_for_preflight()" in preflight
-    assert "load_prepaid_trust_public_key_file()" in preflight
+    assert "report_optional_boot_material(OPTIONAL_REFS)" in preflight
+    assert "load_prepaid_public_key_file()" in preflight
 
 
 def test_source_identity_blocker_is_written_before_the_blocked_exit() -> None:

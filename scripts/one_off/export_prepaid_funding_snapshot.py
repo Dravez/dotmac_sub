@@ -489,11 +489,11 @@ def _read_key_file(path: Path | None, *, private: bool) -> str:
             )
         with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
             descriptor = -1
-            value = stream.read().strip()
+            value = stream.read()
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not value:
+    if not value.strip():
         raise RuntimeError("prepaid reconstruction key file is empty")
     return value
 

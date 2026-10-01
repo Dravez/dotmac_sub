@@ -72,13 +72,8 @@ def test_the_optional_set_is_the_one_the_application_holds_optionally() -> None:
     )
 
 
-def test_local_prepaid_trust_file_omits_the_openbao_trust_reference(
-    monkeypatch,
-) -> None:
-    from app.services.kernel_secret_source import PREPAID_TRUST_PUBLIC_KEY_FILE_ENV
+def test_prepaid_public_key_is_not_an_openbao_optional_field() -> None:
+    from app.services.kernel_secret_source import OPTIONAL_SECRET_REFS
     from app.services.prepaid_funding_attestation import TRUST_KEY_NAME
-    from scripts.setup.verify_openbao_boot_secrets import optional_refs_for_preflight
 
-    monkeypatch.setenv(PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "/run/secrets/trusted.pem")
-
-    assert TRUST_KEY_NAME not in optional_refs_for_preflight()
+    assert TRUST_KEY_NAME not in OPTIONAL_SECRET_REFS

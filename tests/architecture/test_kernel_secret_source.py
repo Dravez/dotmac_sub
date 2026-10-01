@@ -14,6 +14,7 @@ convenient one would be the bug.
 from __future__ import annotations
 
 import pathlib
+from dataclasses import replace
 
 import pytest
 
@@ -52,14 +53,13 @@ def test_the_optional_set_holds_only_approved_feature_scoped_material() -> None:
     `test_machine_key_is_optional_only_while_the_legacy_verifier_exists`.
 
     `conversion_ingest_api_key` belongs only to the optional Fiber acquisition
-    projection. The prepaid trust anchor uses a local file when configured;
-    other installations retain the existing optional OpenBao source.
+    projection. The prepaid verification key comes only from a local deployment
+    file and is not an OpenBao field.
     """
 
     assert set(kss.OPTIONAL_SECRET_REFS) == {
         "conversion_ingest_api_key",
         "machine_credential_hmac_key",
-        "prepaid_attestation_public_key",
     }
 
 
@@ -252,7 +252,14 @@ def test_prepaid_trust_anchor_loads_from_local_file_without_openbao(
     trust_file = tmp_path / "trusted-public.pem"
     trust_file.write_text("public trust material\n", encoding="utf-8")
     trust_file.chmod(0o444)
-    monkeypatch.setenv(kss.PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, str(trust_file))
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
     monkeypatch.setattr(kss, "is_openbao_configured", lambda: False)
 
     loaded = kss.LocalPrepaidTrustAnchorSource().load()
@@ -260,14 +267,21 @@ def test_prepaid_trust_anchor_loads_from_local_file_without_openbao(
     assert loaded == {"prepaid_attestation_public_key": "public trust material"}
 
 
-def test_local_trust_anchor_skips_openbao_lookup_when_both_sources_exist(
+def test_local_public_key_is_loaded_alongside_openbao_material(
     monkeypatch, tmp_path
 ) -> None:
     trust_file = tmp_path / "trusted-public.pem"
     trust_file.write_text("local public trust material\n", encoding="utf-8")
     trust_file.chmod(0o444)
     requested_optional_refs: list[str] = []
-    monkeypatch.setenv(kss.PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, str(trust_file))
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
     monkeypatch.setattr(kss, "is_openbao_configured", lambda: True)
     monkeypatch.setattr(kss, "resolve_openbao_ref", lambda reference: "required")
 
@@ -291,14 +305,27 @@ def test_local_trust_anchor_rejects_relative_or_writable_files(
     trust_file = tmp_path / "trusted-public.pem"
     trust_file.write_text("public trust material\n", encoding="utf-8")
     trust_file.chmod(0o666)
-    monkeypatch.setattr(kss, "is_openbao_configured", lambda: False)
-    monkeypatch.setenv(kss.PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, str(trust_file))
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file=str(trust_file),
+        ),
+    )
     with pytest.raises(RuntimeError, match="non-group/world-writable"):
-        kss.OpenBaoSecretSource().load()
+        kss.LocalPrepaidTrustAnchorSource().load()
 
-    monkeypatch.setenv(kss.PREPAID_TRUST_PUBLIC_KEY_FILE_ENV, "relative/key.pem")
+    monkeypatch.setattr(
+        kss,
+        "settings",
+        replace(
+            kss.settings,
+            prepaid_reconstruction_public_key_file="relative/key.pem",
+        ),
+    )
     with pytest.raises(RuntimeError, match="absolute file path"):
-        kss.OpenBaoSecretSource().load()
+        kss.LocalPrepaidTrustAnchorSource().load()
 
 
 def test_it_satisfies_the_kernel_protocol() -> None:
