@@ -14,15 +14,18 @@ import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
 from sqlalchemy import text
 
+from app.models.catalog import Subscription
 from app.models.connector import ConnectorAuthType, ConnectorConfig, ConnectorType
 from app.models.radius import RadiusServer, RadiusSyncJob
+from app.models.subscriber import Subscriber
+from app.services.customer_identifiers import pppoe_username_from_subscriber_number
 from tests.playwright.helpers.api import api_get, api_post_json, bearer_headers
 from tests.playwright.pages.admin.login_page import AdminLoginPage
 
@@ -163,41 +166,6 @@ def _create_phase1_offer(
     assert offer_profile_link_response.status == 201
 
     return offer, radius_profile
-
-
-def _configure_phase1_radius_settings(
-    api_context, admin_token: str | None = None
-) -> None:
-    headers = {"Content-Type": "application/json"}
-    if admin_token:
-        headers.update(bearer_headers(admin_token))
-    prefix_response = _request_with_retry(
-        lambda: api_context.put(
-            "/api/v1/settings/radius/pppoe_username_prefix",
-            data=json.dumps(
-                {
-                    "value_text": "1050",
-                    "is_active": True,
-                }
-            ),
-            headers=headers,
-        )
-    )
-    assert prefix_response.status == 200
-    prefix_payload = prefix_response.json()
-    assert prefix_payload["key"] == "pppoe_username_prefix"
-    assert prefix_payload["value_text"] == "1050"
-
-    current_prefix_response = _request_with_retry(
-        lambda: api_get(
-            api_context,
-            "/api/v1/settings/radius/pppoe_username_prefix",
-            headers=bearer_headers(admin_token) if admin_token else None,
-        )
-    )
-    assert current_prefix_response.status == 200
-    current_prefix = current_prefix_response.json()
-    assert current_prefix["value_text"] == "1050"
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -401,12 +369,12 @@ class TestSubscriptionActivation:
         settings,
         api_context,
         admin_token,
+        e2e_db,
         phase1_external_radius_source,
     ):
         """Create customer and active subscription, then verify PPPoE and RADIUS evidence in UI."""
         suffix = uuid4().hex[:8].upper()
         customer_email = f"phase1-{suffix.lower()}@example.com"
-        _configure_phase1_radius_settings(api_context, admin_token)
         pop_site, nas_device = _create_disposable_pop_site_with_nas(
             api_context, admin_token, suffix
         )
@@ -500,6 +468,15 @@ class TestSubscriptionActivation:
             "No subscription was created for the Phase 1 E2E offer."
         )
         subscription_id = subscription_items[0]["id"]
+        subscription = e2e_db.get(Subscription, UUID(subscription_id))
+        assert subscription is not None
+        subscriber = e2e_db.get(Subscriber, subscription.subscriber_id)
+        assert subscriber is not None
+        expected_username = pppoe_username_from_subscriber_number(
+            e2e_db, subscriber.subscriber_number
+        )
+        assert expected_username is not None
+        assert subscription.login == expected_username
 
         page.goto(
             f"{settings.base_url}/admin/catalog/subscriptions/{subscription_id}",
@@ -510,10 +487,10 @@ class TestSubscriptionActivation:
         credential_card = page.get_by_text("Access Credential", exact=True).locator(
             "xpath=.."
         )
-        expect(credential_card).to_contain_text(re.compile(r"1050\d+"))
+        username_field = credential_card.locator("p.font-mono")
+        expect(username_field).to_have_text(expected_username)
         expect(credential_card).to_contain_text("PPPOE")
-        username_match = re.search(r"\b1050\d+\b", credential_card.inner_text())
-        assert username_match is not None
+        displayed_username = username_field.inner_text().strip()
 
         expect(
             page.get_by_text("Resolved RADIUS Reply Attributes", exact=True)
@@ -528,7 +505,7 @@ class TestSubscriptionActivation:
         ).to_be_visible()
 
         external_job_name, external_pool = phase1_external_radius_source(
-            username_match.group(), suffix
+            displayed_username, suffix
         )
         page.reload(wait_until="domcontentloaded")
         expect(page.get_by_text("External FreeRADIUS Rows", exact=True)).to_be_visible()
@@ -585,12 +562,11 @@ class TestSubscriptionActivation:
             "xpath=//label[contains(., 'Current Service Login')]/following-sibling::input[@readonly]"
         ).first
         expect(page.get_by_text("Current Service Password", exact=True)).to_be_visible()
-        page.get_by_role("button", name="View", exact=True).click()
         password_input = page.locator(
             "xpath=//label[contains(., 'Current Service Password')]/following-sibling::div//input[@readonly]"
         ).first
-        expect(password_input).not_to_have_value("")
-        expect(current_login).to_have_value(re.compile(r"1050\d+"))
+        assert password_input.evaluate("element => Boolean(element.value)") is True
+        expect(current_login).to_have_value(expected_username)
         expect(page.locator("#radius_profile_id")).to_have_value(
             str(radius_profile["id"])
         )
