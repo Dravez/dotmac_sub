@@ -77,6 +77,8 @@ def correction_candidate(e2e_db):
         billing_mode=BillingMode.postpaid,
         login=login,
         created_at=now - timedelta(days=2),
+        start_at=now - timedelta(days=2),
+        next_billing_at=now + timedelta(days=28),
     )
     mistaken = Subscription(
         subscriber_id=subscriber.id,
@@ -85,6 +87,8 @@ def correction_candidate(e2e_db):
         billing_mode=BillingMode.postpaid,
         login=login,
         created_at=now - timedelta(days=1),
+        start_at=now - timedelta(days=1),
+        next_billing_at=now + timedelta(days=30),
     )
     e2e_db.add_all((target, mistaken))
     e2e_db.flush()
@@ -131,7 +135,9 @@ def test_review_and_apply_exact_subscription_correction(
     action.get_by_role("button", name="Apply reviewed correction").click()
     admin_page.wait_for_url(f"**/admin/catalog/subscriptions/{target_id}?notice=**")
     expect(
-        admin_page.get_by_text("Subscription correction applied", exact=False)
+        admin_page.locator("div.border-emerald-200").filter(
+            has_text="Subscription correction applied"
+        )
     ).to_be_visible()
 
     e2e_db.expire_all()

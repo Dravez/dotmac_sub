@@ -599,7 +599,39 @@ def admin_storage_state(browser, settings: E2ESettings) -> Path:
 
 @pytest.fixture(scope="session")
 def agent_storage_state(browser, settings: E2ESettings, agent_token: str) -> Path:
-    return _write_storage_state(browser, settings, agent_token, "agent")
+    # Exercise the staff web-login path: its cookie is intentionally a compact
+    # web session token, while agent_token is an API access token.
+    path = _storage_state_path("agent")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    context = browser.new_context()
+    context.set_default_timeout(settings.action_timeout_ms)
+    context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+    page = context.new_page()
+    try:
+        page.goto(f"{settings.base_url}/auth/login", wait_until="domcontentloaded")
+        page.get_by_label("Email or Username").fill(settings.agent_username)
+        page.get_by_label("Password").fill(settings.agent_password)
+        with page.expect_response(
+            lambda response: (
+                response.url.endswith("/auth/login")
+                and response.request.method == "POST"
+            ),
+            timeout=min(settings.navigation_timeout_ms, 60_000),
+        ) as login_response:
+            page.get_by_role("button", name="Sign in").click(no_wait_after=True)
+        response = login_response.value
+        assert response.status == 303, (
+            f"Agent web login returned HTTP {response.status}"
+        )
+        page.wait_for_url(
+            "**/admin/dashboard**",
+            wait_until="commit",
+            timeout=min(settings.navigation_timeout_ms, 60_000),
+        )
+        context.storage_state(path=path)
+        return path
+    finally:
+        context.close()
 
 
 @pytest.fixture(scope="session")

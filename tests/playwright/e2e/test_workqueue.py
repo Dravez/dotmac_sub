@@ -67,7 +67,7 @@ def workqueue_ticket(e2e_db, settings):
     return {
         "ticket_id": ticket.id,
         "title": ticket.title,
-        "system_user_id": system_user.id,
+        "assignee_person_id": system_user.person_party_id,
     }
 
 
@@ -90,6 +90,9 @@ class TestNativeAgentWorkqueue:
         expect(admin_page.get_by_text("Generated", exact=False).first).to_be_visible()
         _assert_rendered_post_forms_have_csrf(admin_page)
 
+        tickets_tab = admin_page.get_by_role("tab", name="Tickets")
+        tickets_tab.click()
+        expect(tickets_tab).to_have_attribute("aria-selected", "true")
         section = admin_page.locator("#workqueue-section-ticket")
         row = section.locator("article").filter(has_text=workqueue_ticket["title"])
         expect(row).to_have_count(1)
@@ -111,7 +114,7 @@ class TestNativeAgentWorkqueue:
         e2e_db.expire_all()
         ticket = e2e_db.get(Ticket, workqueue_ticket["ticket_id"])
         assert ticket is not None
-        assert ticket.assigned_to_person_id == workqueue_ticket["system_user_id"]
+        assert ticket.assigned_to_person_id == workqueue_ticket["assignee_person_id"]
         assert ticket.status == TicketStatus.closed.value
 
     def test_narrow_view_keeps_filters_and_primary_action_usable(

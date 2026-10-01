@@ -24,39 +24,12 @@
     "review_by": "2026-09-30"
   },
   {
-    "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerServices::test_services_change_plan_page_loads",
-    "reason": "Environment-dependent: passes on GitHub runners, fails in container runs",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "flaky"
-  },
-  {
     "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerSupport::test_create_ticket_flow[mobile]",
     "reason": "Page-object drift under investigation; fails with the harness repaired",
     "issue": "#1895",
     "category": "tail",
     "owner": "unassigned",
     "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_dashboard.py::TestAdminDashboard::test_navigate_to_tickets",
-    "reason": "Environment-dependent: passes on GitHub runners, times out clicking the Support sidebar link in container runs",
-    "issue": "#1895",
-    "category": "retired-routes",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "flaky"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_e2e_workflows.py::TestSubscriptionActivation::test_subscriber_to_active_service_flow",
-    "reason": "Environment-dependent: passes on GitHub runners, fails in container runs",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "flaky"
   },
   {
     "spec": "tests/playwright/e2e/test_e2e_workflows.py::TestSubscriptionActivation::test_phase1_customer_activation_shows_pppoe_and_radius_evidence",
@@ -139,26 +112,8 @@
     "review_by": "2026-09-30"
   },
   {
-    "spec": "tests/playwright/e2e/test_sales_leads.py::TestSalesLeads::test_admin_can_create_and_open_a_lead",
-    "reason": "Fixture/setup error before the test body runs; xfail cannot suppress setup errors",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "skip"
-  },
-  {
     "spec": "tests/playwright/e2e/test_customer_portal.py::TestCustomerDashboard::test_dashboard_shows_account_summary",
     "reason": "Intermittent: the account-summary locator (dashboard_page.py:34) is sometimes not visible on first render; passed and failed across identical back-to-back runs",
-    "issue": "#1895",
-    "category": "tail",
-    "owner": "unassigned",
-    "review_by": "2026-09-30",
-    "action": "flaky"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_service_teams.py::TestServiceTeamCompositionForms::test_admin_can_register_an_outage_routing_policy",
-    "reason": "Intermittent: passed and failed across identical back-to-back full runs; needs a deterministic wait on the composition form",
     "issue": "#1895",
     "category": "tail",
     "owner": "unassigned",

@@ -28,8 +28,6 @@ class CustomerSupportPage(BasePage):
     def expect_loaded(self) -> None:
         expect(
             self.page.get_by_role("heading", name="Support", exact=True)
-            .or_(self.page.get_by_text("Support", exact=False))
-            .first
         ).to_be_visible()
 
     def expect_tickets_visible(self) -> None:

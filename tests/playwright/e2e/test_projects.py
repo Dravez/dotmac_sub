@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from playwright.sync_api import expect
@@ -77,7 +78,9 @@ def test_admin_project_template_dependency_journey(admin_page, settings):
         "Disposable browser regression template"
     )
     admin_page.get_by_role("button", name="Create Template").click()
-    expect(admin_page).to_have_url("**/admin/projects/templates/*")
+    expect(admin_page).to_have_url(
+        re.compile(r".*/admin/projects/templates/[0-9a-f-]{36}$")
+    )
 
     admin_page.get_by_role("link", name="Edit Tasks").click()
     admin_page.get_by_role("button", name="Add Task").click()

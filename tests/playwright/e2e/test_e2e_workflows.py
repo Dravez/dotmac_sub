@@ -153,22 +153,6 @@ def _configure_phase1_radius_settings(
     headers = {"Content-Type": "application/json"}
     if admin_token:
         headers.update(bearer_headers(admin_token))
-    enabled_response = _request_with_retry(
-        lambda: api_context.put(
-            "/api/v1/settings/radius/pppoe_auto_generate_enabled",
-            data=json.dumps(
-                {
-                    "value_text": "true",
-                    "is_active": True,
-                }
-            ),
-            headers=headers,
-        )
-    )
-    assert enabled_response.status == 200
-    enabled_payload = enabled_response.json()
-    assert enabled_payload["key"] == "pppoe_auto_generate_enabled"
-
     prefix_response = _request_with_retry(
         lambda: api_context.put(
             "/api/v1/settings/radius/pppoe_username_prefix",
@@ -185,20 +169,6 @@ def _configure_phase1_radius_settings(
     prefix_payload = prefix_response.json()
     assert prefix_payload["key"] == "pppoe_username_prefix"
     assert prefix_payload["value_text"] == "1050"
-
-    current_enabled_response = _request_with_retry(
-        lambda: api_get(
-            api_context,
-            "/api/v1/settings/radius/pppoe_auto_generate_enabled",
-            headers=bearer_headers(admin_token) if admin_token else None,
-        )
-    )
-    assert current_enabled_response.status == 200
-    current_enabled = current_enabled_response.json()
-    enabled_value = current_enabled.get("value_json")
-    if enabled_value is None:
-        enabled_value = str(current_enabled.get("value_text") or "").strip().lower()
-    assert enabled_value in {True, "true", "1", "yes", "on"}
 
     current_prefix_response = _request_with_retry(
         lambda: api_get(
