@@ -38,13 +38,5 @@
     "category": "tail",
     "owner": "unassigned",
     "review_by": "2026-09-30"
-  },
-  {
-    "spec": "tests/playwright/e2e/test_permissions.py::TestWebPortalAccess::test_agent_can_access_dashboard",
-    "reason": "The support role holds customer:read and billing:invoice:read so the dashboard dependency should pass, but the agent's token-derived storage state does not authenticate the web layer the same way a UI login does; needs the agent fixture reworked before this asserts anything real",
-    "issue": "#1895",
-    "category": "permissions",
-    "owner": "unassigned",
-    "review_by": "2026-09-30"
   }
 ]

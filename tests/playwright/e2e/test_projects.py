@@ -113,4 +113,6 @@ def test_admin_project_template_dependency_journey(admin_page, settings):
 
     admin_page.on("dialog", lambda dialog: dialog.accept())
     admin_page.get_by_role("button", name="Delete Template").click()
-    expect(admin_page).to_have_url("**/admin/projects/templates")
+    expect(admin_page).to_have_url(
+        re.compile(r"^https?://[^/?#]+/admin/projects/templates$")
+    )

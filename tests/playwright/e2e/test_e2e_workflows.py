@@ -290,6 +290,9 @@ class TestSubscriptionActivation:
         offer, radius_profile = _create_phase1_offer(api_context, suffix, admin_token)
 
         fresh_context = browser.new_context()
+        fresh_context.add_init_script(
+            "window.localStorage.setItem('dotmac_admin_tour_seen_v1', '1')"
+        )
         fresh_context.set_default_timeout(settings.action_timeout_ms)
         fresh_context.set_default_navigation_timeout(settings.navigation_timeout_ms)
         page = fresh_context.new_page()
