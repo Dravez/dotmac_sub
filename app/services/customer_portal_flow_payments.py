@@ -20,9 +20,9 @@ from app.models.billing import (
     PaymentStatus,
     TopupIntent,
 )
+from app.models.catalog import BillingMode, Subscription
 from app.models.domain_settings import SettingDomain
 from app.models.idempotency import IdempotencyKey
-from app.models.catalog import BillingMode, Subscription
 from app.models.service_period_purchase import PrepaidPeriodPurchase
 from app.models.subscriber import Subscriber
 from app.services import billing as billing_service
@@ -109,9 +109,7 @@ _ONLINE_PROVIDER_LABELS = {
 }
 _DIRECT_TRANSFER_LABEL = "Direct bank transfer"
 _DEFAULT_TOPUP_PRESET_AMOUNTS = (1000, 2000, 5000, 10000, 20000, 50000)
-_PERIOD_PURCHASE_CHARGE_IDEMPOTENCY_SCOPE = (
-    "prepaid_period_purchase_saved_card_charge"
-)
+_PERIOD_PURCHASE_CHARGE_IDEMPOTENCY_SCOPE = "prepaid_period_purchase_saved_card_charge"
 
 
 class GatewayPaymentIncomplete(ValueError):

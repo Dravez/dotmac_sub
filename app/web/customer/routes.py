@@ -32,8 +32,8 @@ from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from app.db import finish_read_transaction, get_db
-from app.models.subscriber import Subscriber
 from app.models.domain_settings import SettingDomain
+from app.models.subscriber import Subscriber
 from app.services import auth_flow as auth_flow_service
 from app.services import autopay as autopay_service
 from app.services import billing_payment_receipts as payment_receipts_service
@@ -2297,10 +2297,11 @@ def customer_service_period_purchase_intent(
             preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
             provider=payload.get("provider"),
             payment_method_id=payload.get("payment_method_id"),
-            redirect_url=str(request.url_for("customer_service_period_purchase_verify")),
+            redirect_url=str(
+                request.url_for("customer_service_period_purchase_verify")
+            ),
             idempotency_key=(
-                request.headers.get("Idempotency-Key")
-                or payload.get("idempotency_key")
+                request.headers.get("Idempotency-Key") or payload.get("idempotency_key")
             ),
         )
     except (ValueError, DomainError, HTTPException) as exc:

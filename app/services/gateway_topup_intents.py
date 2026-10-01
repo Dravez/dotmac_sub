@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 from app.models.billing import BillingAccount, Invoice, InvoiceStatus, TopupIntent
 from app.models.domain_settings import SettingDomain
 from app.models.idempotency import IdempotencyKey
-from app.models.service_period_purchase import (
-    PrepaidPeriodPurchase,
-    PrepaidPeriodPurchaseStatus,
-)
 from app.models.integration_platform import (
     IntegrationBindingState,
     IntegrationCapabilityBinding,
     IntegrationInstallationState,
+)
+from app.models.service_period_purchase import (
+    PrepaidPeriodPurchase,
+    PrepaidPeriodPurchaseStatus,
 )
 from app.services import topup_intents
 from app.services.account_credit_deposits import (

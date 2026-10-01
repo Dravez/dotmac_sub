@@ -1006,7 +1006,9 @@ def stage_gateway_topup_intent(
             else None
         ),
         policy_version=(
-            1 if command.flow is GatewayTopupIntentFlow.prepaid_period_purchase else None
+            1
+            if command.flow is GatewayTopupIntentFlow.prepaid_period_purchase
+            else None
         ),
         preview_fingerprint=(
             str(command.preview_fingerprint or "")

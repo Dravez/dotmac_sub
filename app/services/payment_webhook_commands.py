@@ -48,8 +48,8 @@ from app.services.payment_provider_events import (
     PaymentProviderEventResult,
 )
 from app.services.prepaid_period_purchases import (
-    SettleVerifiedPrepaidPeriodPurchaseCommand,
     PrepaidPeriodPurchaseError,
+    SettleVerifiedPrepaidPeriodPurchaseCommand,
     stage_verified_prepaid_period_purchase,
 )
 from app.services.topup_intents import (
@@ -1022,7 +1022,8 @@ def _stage_topup_consequences(
         or settlement.status != PaymentStatus.succeeded
         or event.payment_id is None
         or intent is None
-        or intent.purpose in {
+        or intent.purpose
+        in {
             "account_credit_deposit",
             "prepaid_period_purchase",
         }

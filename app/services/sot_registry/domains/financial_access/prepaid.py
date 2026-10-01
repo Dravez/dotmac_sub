@@ -4001,6 +4001,216 @@ SERVICES: tuple[SOTService, ...] = (
         ),
     ),
     SOTService(
+        name="financial.prepaid_period_purchases",
+        module="app.services.prepaid_period_purchases",
+        owns=(
+            "prepaid service-period purchase quote persistence",
+            "verified prepaid service-period purchase settlement",
+        ),
+        depends_on=(
+            "access.subscription_lifecycle",
+            "control.settings_spec",
+            "customer.financial_position",
+            "financial.account_credit_applications",
+            "financial.invoices",
+            "financial.payments",
+            "financial.prepaid_service_renewals",
+            "financial.topup_intents",
+            "network.outage_lifecycle",
+        ),
+        notes=(
+            "Creates a time-limited quote for one to twelve monthly prepaid "
+            "base-subscription periods, rounds tax independently for each period, "
+            "and settles only the verified payment selected for that purchase. "
+            "Settlement atomically produces one paid invoice and one entitlement "
+            "per quoted period; it never applies funds to unrelated account debt."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="prepaid service-period purchase quote persistence",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "prepaid period-purchase policy",
+                        "eligible prepaid subscription",
+                        "customer debt position",
+                        "active outage state",
+                        "canonical monthly charge and service-period projection",
+                    ),
+                    canonical_writer=("financial.prepaid_period_purchases"),
+                ),
+                ConcernContract(
+                    name="verified prepaid service-period purchase settlement",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "persisted period-purchase quote",
+                        "verified selected-payment evidence",
+                        "invoice, allocation, entitlement, and anchor protocols",
+                    ),
+                    canonical_writer=("financial.prepaid_period_purchases"),
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="prepaid period-purchase policy",
+                    owner="control.settings_spec",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed feature enablement and maximum-month settings from "
+                        "app.services.service_period_policy"
+                    ),
+                ),
+                AuthorityInput(
+                    name="eligible prepaid subscription",
+                    owner="access.subscription_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "account-owned monthly prepaid Subscription lifecycle and "
+                        "base-subscription-only eligibility"
+                    ),
+                ),
+                AuthorityInput(
+                    name="customer debt position",
+                    owner="customer.financial_position",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="canonical positive open-invoice balance for the account",
+                ),
+                AuthorityInput(
+                    name="active outage state",
+                    owner="network.outage_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "open confirmed-unavailable CustomerOutageInterval for the "
+                        "exact subscription"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical monthly charge and service-period projection",
+                    owner="financial.prepaid_service_renewals",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "contracted monthly base price, per-period tax policy, and "
+                        "funded-tail settlement-period resolver"
+                    ),
+                ),
+                AuthorityInput(
+                    name="persisted period-purchase quote",
+                    owner="financial.prepaid_period_purchases",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "immutable purchase and ordered period rows bound to the "
+                        "quote fingerprint and expiry"
+                    ),
+                ),
+                AuthorityInput(
+                    name="verified selected-payment evidence",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "succeeded account payment whose exact amount and currency "
+                        "match the purchase and which has no prior allocations"
+                    ),
+                ),
+                AuthorityInput(
+                    name="invoice, allocation, entitlement, and anchor protocols",
+                    owner="financial.invoices",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed invoice issuance, selected-payment application, paid "
+                        "entitlement creation, and prepaid-anchor projection APIs"
+                    ),
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.OWNER_MANAGED,
+                boundary=(
+                    "Quote persistence and verified settlement each enter "
+                    "execute_owner_command once on a transaction-free session. "
+                    "All purchase, invoice, allocation, entitlement, anchor, and "
+                    "intent-completion writes commit or roll back together."
+                ),
+                locking=(
+                    "The account is locked before quote idempotency resolution and "
+                    "again before settlement. Exact invoice-line keys, purchase "
+                    "status, and payment-allocation checks prevent duplicate funding."
+                ),
+                idempotency=(
+                    "Quote creation binds the account-scoped idempotency key to the "
+                    "subscription, period count, and fingerprint. Settlement replay "
+                    "returns only when the stored payment and every period result "
+                    "remain complete."
+                ),
+                retries=(
+                    "Retry the whole owner command with the same command and "
+                    "idempotency evidence; stale quotes and mismatched provider "
+                    "evidence require a fresh customer action."
+                ),
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    *owner_command_boundary_error_codes(
+                        "financial.prepaid_period_purchases"
+                    ),
+                    "financial.prepaid_period_purchases.active_outage",
+                    "financial.prepaid_period_purchases.billing_mode_ineligible",
+                    "financial.prepaid_period_purchases.command_invalid",
+                    "financial.prepaid_period_purchases.configuration_invalid",
+                    "financial.prepaid_period_purchases.entitlement_missing",
+                    "financial.prepaid_period_purchases.evidence_missing",
+                    "financial.prepaid_period_purchases.feature_disabled",
+                    "financial.prepaid_period_purchases.idempotency_conflict",
+                    "financial.prepaid_period_purchases.intent_invalid",
+                    "financial.prepaid_period_purchases.monthly_price_unavailable",
+                    "financial.prepaid_period_purchases.open_debt",
+                    "financial.prepaid_period_purchases.payment_mismatch",
+                    "financial.prepaid_period_purchases.period_count_invalid",
+                    "financial.prepaid_period_purchases.price_changed",
+                    "financial.prepaid_period_purchases.provider_evidence_mismatch",
+                    "financial.prepaid_period_purchases.purchase_expired",
+                    "financial.prepaid_period_purchases.purchase_incomplete",
+                    "financial.prepaid_period_purchases.purchase_ineligible",
+                    "financial.prepaid_period_purchases.purchase_noncontiguous",
+                    "financial.prepaid_period_purchases.purchase_not_found",
+                    "financial.prepaid_period_purchases.recurring_add_on_unsupported",
+                    "financial.prepaid_period_purchases.settlement_rejected",
+                    "financial.prepaid_period_purchases.stale_quote",
+                    "financial.prepaid_period_purchases.subscription_ineligible",
+                    "financial.prepaid_period_purchases.subscription_not_found",
+                ),
+                mapping_owner="customer portal and gateway webhook adapters",
+                fail_closed_on=(
+                    "existing debt or an active service outage",
+                    "unsupported billing mode, cadence, or recurring add-on",
+                    "stale price, tax, period, or quote evidence",
+                    "payment, provider, invoice, allocation, or entitlement mismatch",
+                ),
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="financial.prepaid_period_purchases",
+                verification=(
+                    "Focused quote, tax-rounding, eligibility, exact-payment, "
+                    "multi-invoice settlement, replay, portal, and webhook tests."
+                ),
+                cutover_gate=(
+                    "The portal uses the typed purchase intent and verified owner "
+                    "command; generic account-credit allocation never consumes the "
+                    "purchase payment."
+                ),
+                fallback_retirement=(
+                    "Feature remains default-off until the schema, settlement owner, "
+                    "portal adapter, and operational policy are deployed together."
+                ),
+            ),
+            steward="billing and finance operations",
+            design_refs=("docs/designs/PREPAID_SERVICE_PERIOD_PURCHASES.md",),
+            test_refs=(
+                "tests/test_prepaid_period_purchases.py",
+                "tests/test_gateway_topup_intents.py",
+            ),
+        ),
+    ),
+    SOTService(
         name="financial.prepaid_recovery_billing",
         module="app.services.prepaid_recovery_billing",
         owns=(
