@@ -731,14 +731,17 @@ def test_sidebar_resize_handle_has_exact_shape_states_and_tooltip():
     ):
         assert class_name in handle
     assert 'x-show="!managerDashboardOpen"' in handle
-    assert "hidden" in handle and "sm:flex" in handle
+    assert "hidden" in handle and "lg:flex" in handle
     assert "Drag to resize inbox" in handle
 
 
-def test_sidebar_resize_drag_state_is_bounded_and_persisted():
+def test_sidebar_resize_drag_state_is_desktop_only_bounded_and_persisted():
+    style_marker = JAVASCRIPT.index("      desktopSidebarStyle() {")
+    style_body = JAVASCRIPT[style_marker : style_marker + 300]
+    assert 'if (window.innerWidth < 1024) return ""' in style_body
     marker = JAVASCRIPT.index("startSidebarResize(event)")
     body = JAVASCRIPT[marker : marker + 2600]
-    assert "window.innerWidth <= 639" in body
+    assert "window.innerWidth < 1024" in body
     assert "this.resizingSidebar = true" in body
     assert "this.resizingSidebar = false" in body
     assert 'document.body.style.cursor = "ew-resize"' in body
