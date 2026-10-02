@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.audit import AuditActorType
 from app.models.network import FiberSegmentType
@@ -185,14 +185,18 @@ class NetworkMapImportFeatureClassification:
 
 
 class NetworkMapImportFeatureClassificationRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     staged_feature_id: UUID
     asset_type: NetworkMapImportAssetType
 
 
 class ReviewNetworkMapImportFeaturesRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     command_key: UUID
     reason: str = Field(min_length=1, max_length=500)
-    features: list[NetworkMapImportFeatureClassificationRequest] = Field(
+    features: tuple[NetworkMapImportFeatureClassificationRequest, ...] = Field(
         min_length=1, max_length=MAX_REVIEW_FEATURES
     )
 
