@@ -252,6 +252,19 @@
         });
     }
 
+    function updateReviewActions(features, bulkType, bulkApply, acceptSuggestions) {
+        const items = features || [];
+        const hasUnclassified = items.some(function (feature) {
+            return ['unclassified', 'unsupported'].includes(feature.properties?.asset_type);
+        });
+        const hasSuggestions = items.some(function (feature) {
+            return Boolean(feature.properties?.suggested_asset_type);
+        });
+        if (bulkType?.closest('label')) bulkType.closest('label').hidden = !hasUnclassified;
+        if (bulkApply) bulkApply.hidden = !hasUnclassified;
+        if (acceptSuggestions) acceptSuggestions.hidden = !hasSuggestions;
+    }
+
     if (settings.can_import) {
         const openButton = root.document.getElementById('btn-import-kmz');
         const dialog = root.document.getElementById('network-map-import-dialog');
@@ -310,6 +323,7 @@
                 currentBatchId = payload.batch_id;
                 currentFeatures = payload.features || [];
                 classificationEdits.clear();
+                updateReviewActions(currentFeatures, bulkType, bulkApply, acceptSuggestions);
                 renderFeatureReviews(featureReviews, payload.features);
                 resultHost.classList.remove('hidden');
                 renderPreview(payload.features);
@@ -379,6 +393,7 @@
                 classificationEdits.clear();
                 classificationFingerprint = null;
                 classificationCommandKey = null;
+                updateReviewActions(currentFeatures, bulkType, bulkApply, acceptSuggestions);
                 renderCounts(counts, payload);
                 renderFeatureReviews(featureReviews, currentFeatures);
                 renderPreview(currentFeatures);
