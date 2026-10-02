@@ -47,6 +47,7 @@ from sqlalchemy.engine import URL, make_url
 
 from alembic import command
 from app import config as app_config
+from tests.integration.migration_authority import migration_database
 
 REVISION_511 = "511_sales_order_invoice_links"
 REVISION_512 = "512_open_setting_value_type_vocabulary"
@@ -93,7 +94,9 @@ def fresh_migration_database() -> Iterator[URL]:
         )
 
     try:
-        yield base_url.set(database=database_name)
+        target = base_url.set(database=database_name)
+        with migration_database(target):
+            yield target
     finally:
         with psycopg.connect(_psycopg_url(maintenance_url), autocommit=True) as admin:
             admin.execute(
@@ -201,20 +204,40 @@ def _install_deployed_shape(database_url: URL) -> None:
     against a shape no deployment has.
     """
 
+    # The predecessor enum and table alterations were migration-owned. Build
+    # them as the actual app_admin login so 512 can drop its own type while
+    # retaining the production rule that app_admin has no database CREATE.
+    migration_url = database_url.set(username="app_admin")
+    assert _scalar(migration_url, "SELECT session_user") == "app_admin"
+    assert (
+        _scalar(
+            migration_url,
+            "SELECT has_database_privilege(session_user, current_database(), 'CREATE')",
+        )
+        is False
+    )
     members = ", ".join(f"'{member}'" for member in LEGACY_MEMBERS)
-    _execute(database_url, f"CREATE TYPE {ENUM_NAME} AS ENUM ({members})")
+    _execute(migration_url, f"CREATE TYPE {ENUM_NAME} AS ENUM ({members})")
+    assert (
+        _scalar(
+            migration_url,
+            "SELECT pg_get_userbyid(typowner) FROM pg_type WHERE typname = :name",
+            name=ENUM_NAME,
+        )
+        == "app_admin"
+    )
     for table, column in LEGACY_COLUMNS:
         _execute(
-            database_url,
+            migration_url,
             f"ALTER TABLE {table} ALTER COLUMN {column} "
             f"TYPE {ENUM_NAME} USING {column}::{ENUM_NAME}",
         )
     _execute(
-        database_url,
+        migration_url,
         f"ALTER TABLE domain_settings DROP CONSTRAINT IF EXISTS {ALIGNMENT_CONSTRAINT}",
     )
     _execute(
-        database_url,
+        migration_url,
         f"ALTER TABLE domain_settings ADD CONSTRAINT {ALIGNMENT_CONSTRAINT} CHECK ("
         f"(value_type = 'json' AND value_json IS NOT NULL AND value_text IS NULL) "
         f"OR (value_type != 'json' AND value_text IS NOT NULL))",
