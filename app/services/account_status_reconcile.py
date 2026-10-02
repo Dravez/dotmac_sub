@@ -38,7 +38,11 @@ from app.services.subscriber_access_policy import (
 logger = logging.getLogger(__name__)
 
 _PERMISSIVE_ACTIVE_PARENT_STATUSES = frozenset(
-    {SubscriberStatus.active, SubscriberStatus.delinquent}
+    {
+        SubscriberStatus.active,
+        SubscriberStatus.paused,
+        SubscriberStatus.delinquent,
+    }
 )
 
 
@@ -219,6 +223,7 @@ def find_account_projection_drift_ids(
                     SubscriberStatus.active,
                     SubscriberStatus.new,
                     SubscriberStatus.blocked,
+                    SubscriberStatus.paused,
                     SubscriberStatus.delinquent,
                 }
             )

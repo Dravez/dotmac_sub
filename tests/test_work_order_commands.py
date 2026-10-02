@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -16,6 +16,7 @@ from app.schemas.dispatch import (
     WorkOrderHeaderCreate,
     WorkOrderHeaderUpdate,
 )
+from app.services import work_order_commands as work_order_command_module
 from app.services.work_order_commands import work_order_commands
 from app.services.work_order_errors import WorkOrderCommandError
 from tests.staff_identity_fixtures import add_bound_staff_user
@@ -401,3 +402,37 @@ def test_header_command_rejects_parallel_assignment_and_field_status(db_session)
         )
     assert transition.value.status_code == 422
     assert "field transition owner" in transition.value.detail
+
+
+def test_native_work_order_events_use_uuid_and_preserve_public_identity(
+    db_session, monkeypatch
+):
+    subscriber = _subscriber(db_session)
+    emitted = []
+
+    def capture_event(_db, _event_type, payload, **_kwargs):
+        emitted.append(payload)
+
+    monkeypatch.setattr(work_order_command_module, "emit_event", capture_event)
+
+    work_order = work_order_commands.create(
+        db_session,
+        WorkOrderHeaderCreate(
+            public_id="sub-event-identity",
+            subscriber_id=subscriber.id,
+            title="Event identity",
+        ),
+    )
+    work_order_commands.update_header(
+        db_session,
+        work_order.public_id,
+        WorkOrderHeaderUpdate(title="Updated event identity"),
+    )
+
+    assert [payload["name"] for payload in emitted] == [
+        "work_order.created",
+        "work_order.updated",
+    ]
+    for payload in emitted:
+        assert UUID(payload["work_order_id"]) == work_order.id
+        assert payload["work_order_public_id"] == work_order.public_id

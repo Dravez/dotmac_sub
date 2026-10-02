@@ -177,7 +177,7 @@ class TestModuleManager:
         page.goto()
         page.expect_loaded()
 
-        control = page.control("billing.autopay")
+        control = page.control("usage.warnings")
         expect(control).to_be_visible()
         expect(control.locator("option")).to_have_text(["Inherit", "On", "Off"])
         for label in ("Effective", "Source", "Scope", "Precedence", "Canonical change"):
@@ -190,7 +190,7 @@ class TestModuleManager:
         page.goto()
         page.expect_loaded()
 
-        control_key = "billing.autopay"
+        control_key = "usage.warnings"
         control = page.control(control_key)
         original = control.input_value()
         changed = "off" if original != "off" else "on"
@@ -258,12 +258,10 @@ class TestSystemNavigation:
         dashboard = AdminDashboardPage(admin_page, settings.base_url)
         dashboard.goto()
         dashboard.expect_loaded()
-        system_link = admin_page.get_by_role("link", name="System").first
-        href = system_link.get_attribute("href")
-        assert href in {"/admin/settings", "/admin/system/settings-hub"}
-        admin_page.goto(f"{settings.base_url}{href}", wait_until="domcontentloaded")
-        expect(admin_page).to_have_url(
-            f"{settings.base_url}/admin/system/settings-hub"
-            if href == "/admin/settings"
-            else f"{settings.base_url}{href}"
-        )
+        system_link = admin_page.get_by_role("link", name="System Overview", exact=True)
+        expect(system_link).to_have_attribute("href", "/admin/system")
+        system_link.click()
+        expect(admin_page).to_have_url(f"{settings.base_url}/admin/system")
+        expect(
+            admin_page.get_by_role("heading", name="System Overview")
+        ).to_be_visible()

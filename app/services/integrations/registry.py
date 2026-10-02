@@ -264,9 +264,9 @@ def _dotmac_crm_manifest(
     version: str,
     include_chat_session: bool,
     include_quote_command: bool = True,
-    include_ticket_observation: bool = True,
+    include_ticket_observation: bool,
 ) -> ConnectorManifest:
-    """Build the current CRM manifest and its bounded pre-chat predecessor."""
+    """Build current CRM and exact historical manifest versions."""
 
     capabilities = [
         CapabilityManifest(
@@ -290,6 +290,8 @@ def _dotmac_crm_manifest(
             modes=(CapabilityMode.interactive,),
         ),
     ]
+    # Historical versions declare the immutable ticket pin. Version 1.4.0
+    # passes False: this branch is not a current capability declaration.
     if include_ticket_observation:
         capabilities.insert(
             1,
@@ -793,6 +795,8 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
         version="1.1.0",
         include_bearer_authorization=True,
     ),
+    # The current manifest excludes retired ticket observation; historical
+    # manifest digests below remain available for pin identification only.
     _dotmac_crm_manifest(
         version="1.4.0",
         include_chat_session=False,
@@ -836,6 +840,43 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
             classifications=("staff_identity", "support_content", "message_content"),
         ),
         egress=EgressManifest(allow_installation_hosts=True),
+        health=HealthManifest(operation="connection.validate.v1"),
+    ),
+    ConnectorManifest(
+        key="meta.capi",
+        name="Meta Conversions API",
+        version="1.0.0",
+        connector_type="marketing",
+        description="Server-side website Lead delivery to a Meta dataset.",
+        runtime=RuntimeManifest(
+            type=ConnectorRuntimeType.builtin_worker,
+            module="app.services.integrations.connectors.meta_social_runtime",
+        ),
+        capabilities=(
+            CapabilityManifest(
+                id="marketing.website_lead.send.v1",
+                modes=(CapabilityMode.event, CapabilityMode.reconcile),
+            ),
+        ),
+        config_schema={
+            "type": "object",
+            "properties": {
+                "pixel_id": {"type": "string", "default": "410389919883152"},
+                "api_version": {"type": "string", "default": "v26.0"},
+                "test_event_code": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 10},
+                "max_attempts": {"type": "integer", "default": 8},
+            },
+            "required": ["pixel_id", "api_version"],
+            "additionalProperties": False,
+        },
+        secrets=(SecretBindingManifest(name="access_token"),),
+        data_access=DataAccessManifest(
+            reads=("sales.website_fiber_lead",),
+            emits=("marketing.meta_lead_delivery_receipt",),
+            classifications=("sales_acquisition", "hashed_customer_contact"),
+        ),
+        egress=EgressManifest(hosts=("graph.facebook.com",)),
         health=HealthManifest(operation="connection.validate.v1"),
     ),
     _meta_social_manifest(
@@ -960,9 +1001,14 @@ _HISTORICAL_DEFINITIONS: tuple[ConnectorManifest, ...] = (
         version="1.3.0",
         include_chat_session=False,
         include_quote_command=False,
+        include_ticket_observation=True,
     ),
-    _dotmac_crm_manifest(version="1.2.0", include_chat_session=False),
-    _dotmac_crm_manifest(version="1.0.0", include_chat_session=False),
+    _dotmac_crm_manifest(
+        version="1.2.0", include_chat_session=False, include_ticket_observation=True
+    ),
+    _dotmac_crm_manifest(
+        version="1.0.0", include_chat_session=False, include_ticket_observation=True
+    ),
     # CRM 1.1.0 is the ONLY manifest that ever declared `crm.chat_session.v1`
     # (ADR 0006, retired 2026-08-30 with the CRM itself). 1.2.0 drops the
     # capability. This exact 1.1.0 digest is retained UNCHANGED rather than
@@ -973,7 +1019,9 @@ _HISTORICAL_DEFINITIONS: tuple[ConnectorManifest, ...] = (
     # reachability -- Sub has no caller for `crm.chat_session.v1` any more, and
     # the runner no longer maps it to an action, so a 1.1.0-pinned binding for
     # it now fails closed with `capability_not_supported`.
-    _dotmac_crm_manifest(version="1.1.0", include_chat_session=True),
+    _dotmac_crm_manifest(
+        version="1.1.0", include_chat_session=True, include_ticket_observation=True
+    ),
     _meta_social_manifest(
         version="1.1.0",
         include_shared_oauth=True,

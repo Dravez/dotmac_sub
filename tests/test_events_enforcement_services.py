@@ -126,6 +126,8 @@ class TestEventType:
     def test_subscription_lifecycle_map_keys(self):
         expected_keys = {
             EventType.subscription_activated,
+            EventType.subscription_paused,
+            EventType.subscription_pause_resumed,
             EventType.subscription_suspended,
             EventType.subscription_resumed,
             EventType.subscription_disabled,

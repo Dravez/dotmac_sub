@@ -1145,6 +1145,19 @@ serialization behavior.
 
 ## 9. Key Integrations & External Dependencies
 
+### Retired CRM ticket observation
+
+The current `dotmac.crm` connector manifest is 1.4.0 and does not declare
+`crm.ticket_observation.v1`. Older manifests retain that identifier and their
+exact digests so historical installation pins remain identifiable. The CRM
+runner treats the identifier as a tombstone: availability and connection
+validation refuse it, and execution rejects it before any CRM transport call.
+The scheduler also skips interval jobs bound to it; the sync dispatcher has no
+ticket handler. No one-off CRM subscriber-ID backfill command remains. Native
+Support owns ticket facts and the reseller ticket projection. See
+`docs/runbooks/CRM_TICKET_CAPABILITY_CUTOVER.md` for the observed cutover and
+the separate production retirement gate.
+
 ### Payment Providers
 
 **Stripe**
@@ -1228,6 +1241,24 @@ serialization behavior.
 - Foreign keys with cascade relationships
 
 ### Security Measures
+
+Database migration execution and runtime traffic use separate authorities.
+`alembic/env.py` requires a one-shot `MIGRATION_DATABASE_URL` authenticated as
+`app_admin` with BYPASSRLS and NOSUPERUSER, and proves both session and current
+identity before version-table access. `DATABASE_URL` supplies application
+traffic; the intended online role is non-superuser NOBYPASSRLS `app_user`
+after reviewed ownership/grant provisioning. Long-running Compose services
+mask the migration URL. Module schemas are owned by `app_admin`, derived in
+`docs/generated/MODULE_SCHEMA_CONTRACT.md`; prerequisite repair refuses
+existing owner drift. Historical revision 557's `dotmac_app` membership
+prerequisite is retained for explicit fresh historical initialization; normal
+dispatcher verification uses `app_admin` directly and refuses the retired
+legacy link. It cannot recreate that link. The permanent authority decision
+and outstanding per-object policy are documented in
+`docs/designs/DATABASE_RUNTIME_ACCESS_CONTRACT.md`.
+The 2026-10-01 Seabone runtime observation still used superuser `postgres`;
+source alignment does not establish deployed separation. See the
+[existing-estate cutover gate](runbooks/PRODUCTION_DEPLOYMENT.md#existing-estate-cutover-gate).
 
 - CSRF: Double-submit cookie
 - Brute Force: Failed login tracking with lockout

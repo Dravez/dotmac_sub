@@ -32,6 +32,7 @@ class ConversationLeadLinkSource(StrEnum):
     exact_party_lead = "exact_party_lead"
     reviewed_selection = "reviewed_selection"
     inbox_lead_intake = "inbox_lead_intake"
+    ai_lead_candidate = "ai_lead_candidate"
     inbox_lead_authoring = "inbox_lead_authoring"
     fiber_website_inquiry = "fiber_website_inquiry"
     fiber_website_chat = "fiber_website_chat"

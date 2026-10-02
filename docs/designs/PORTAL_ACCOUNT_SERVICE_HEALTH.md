@@ -69,7 +69,10 @@ OLT, ONT, NAS, or RADIUS polling.
 
 - Customer dashboard renders the shared financial and service-health macros.
 - Customer service detail narrows the same account projection to the requested
-  subscription after the existing ownership check.
+  subscription after the existing ownership check. If an owned subscription is
+  missing from that projection, the detail service returns no result so the
+  route responds with not found; it does not render data from a partial or
+  mismatched projection.
 - Reseller account detail performs its reseller/account scope check before
   building the projection and uses the same macros.
 - Admin Customer 360 renders the same service-health strip before its tabs,

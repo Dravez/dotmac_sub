@@ -2417,11 +2417,20 @@ class Tickets:
             "status": ticket.status,
             "priority": ticket.priority,
             "channel": ticket.channel.value,
+            "customer_id": str(ticket.customer_account_id or ticket.subscriber_id)
+            if ticket.customer_account_id or ticket.subscriber_id
+            else None,
             "customer_account_id": str(ticket.customer_account_id)
             if ticket.customer_account_id
             else None,
             "subscriber_id": str(ticket.subscriber_id)
             if ticket.subscriber_id
+            else None,
+            "service_team_id": str(ticket.service_team_id)
+            if ticket.service_team_id
+            else None,
+            "assigned_to_person_id": str(ticket.assigned_to_person_id)
+            if ticket.assigned_to_person_id
             else None,
             "actor_id": actor_id,
         }
@@ -4011,6 +4020,11 @@ class Tickets:
             ]
         ):
             Tickets._emit_ticket_event(db, "ticket.assigned", ticket, actor_id)
+
+        if before["status"] != after["status"]:
+            Tickets._emit_ticket_event(db, "ticket.status_changed", ticket, actor_id)
+        if before["priority"] != after["priority"]:
+            Tickets._emit_ticket_event(db, "ticket.priority_changed", ticket, actor_id)
 
         db.flush()
         db.refresh(ticket)

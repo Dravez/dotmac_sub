@@ -53,7 +53,9 @@ class InvoicesPage(BasePage):
 
     def click_new_invoice(self) -> None:
         """Click new invoice button."""
-        self.page.get_by_role("link", name="New Invoice").click()
+        self.page.locator(
+            'a[href="/admin/billing/invoices/new"]', has_text="New Invoice"
+        ).first.click()
 
     def click_invoice_row(self, invoice_number: str) -> None:
         """Click on an invoice row."""

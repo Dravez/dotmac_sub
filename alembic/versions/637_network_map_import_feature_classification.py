@@ -1,7 +1,7 @@
 """Add append-only classification review for staged map features.
 
-Revision ID: 627_network_map_import_feature_classification
-Revises: 626_network_map_kmz_transfer
+Revision ID: 637_network_map_import_feature_classification
+Revises: 636_allow_name_identified_fiber_topology_features
 Create Date: 2026-10-02
 """
 
@@ -14,8 +14,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "627_network_map_import_feature_classification"
-down_revision: str | None = "626_network_map_kmz_transfer"
+revision: str = "637_network_map_import_feature_classification"
+down_revision: str | None = "636_allow_name_identified_fiber_topology_features"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

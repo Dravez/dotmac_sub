@@ -846,6 +846,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -858,6 +859,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -897,6 +899,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "persisted recipient, event, category, status, and "
                             "creation time used by the dedupe window"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected template purpose category",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "purpose persisted on the selected NotificationTemplate "
+                            "for manual customer-page sends"
                         ),
                     ),
                     AuthorityInput(
@@ -981,6 +992,107 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.payment_template_adoption",
+            module="app.services.payment_template_adoption",
+            owns=("explicit payment email content adoption",),
+            depends_on=(
+                "communications.notification_service",
+                "tenancy.operator_tenant",
+            ),
+            notes=(
+                "Dormant explicit one-time coordinator. Template Studio alone owns "
+                "published content and subsequent authoring; Sub's legacy row "
+                "retains UUID, conditions, and active state until sealed cutover."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="explicit payment email content adoption",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "legacy payment email content",
+                            "operator tenant identity",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="legacy payment email content",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Current legacy NotificationTemplate EMAIL UUID, text, conditions, and active state.",
+                    ),
+                    AuthorityInput(
+                        name="operator tenant identity",
+                        owner="tenancy.operator_tenant",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Configured operator tenant UUID for Template Studio's tenant-scoped identity.",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.COORDINATOR_MANAGED,
+                    boundary=(
+                        "The explicit backfill enters execute_owner_command once on "
+                        "a transaction-free session. Studio service mutations "
+                        "flush and commit together in that transaction."
+                    ),
+                    locking=(
+                        "The Studio tenant/slug/channel unique constraint arbitrates "
+                        "concurrent creates; changed existing versions refuse adoption."
+                    ),
+                    idempotency=(
+                        "Legacy UUID and full snapshot digest bind each fixed Studio "
+                        "slug; exact replay performs no writes."
+                    ),
+                    retries=(
+                        "A conflict aborts the entire pair; an operator must resolve "
+                        "changed content before explicit retry."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        *owner_command_boundary_error_codes(
+                            "communications.payment_template_adoption"
+                        ),
+                        "payment_template_adoption.ambiguous_legacy",
+                        "payment_template_adoption.invalid_legacy",
+                        "payment_template_adoption.studio_conflict",
+                        "payment_template_adoption.invalid_contexts",
+                        "payment_template_adoption.invalid_tenant",
+                        "payment_template_adoption.unsafe_runtime_role",
+                    ),
+                    mapping_owner="Explicit operator backfill caller",
+                    fail_closed_on=(
+                        "ambiguous legacy email identity",
+                        "invalid receipt content",
+                        "Studio operator edits or draft changes",
+                        "PostgreSQL current role with SUPERUSER or BYPASSRLS",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.SHADOWING,
+                    old_owner="No contracted one-time backfill owner",
+                    new_owner="communications.payment_template_adoption",
+                    verification="Explicit backfill and representative read-only parity report.",
+                    cutover_gate=(
+                        "First prove installed Studio content and parity; then seal "
+                        "the old content writer and switch rendering together."
+                    ),
+                    fallback_retirement="Retire legacy content writing at the sealed switch.",
+                ),
+                steward="customer communications",
+                design_refs=(
+                    "docs/designs/PAYMENT_EMAIL_COMPOSITION_CUTOVER.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_payment_template_adoption.py",
+                    "tests/architecture/test_payment_template_adoption_boundary.py",
+                    "tests/integration/test_payment_template_adoption_runtime_role_pg.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="communications.customer_experience_intents",
             module="app.services.customer_experience_communications",
             owns=(
@@ -1026,6 +1138,7 @@ DOMAIN = DomainSOT(
             module="app.services.notification",
             owns=(
                 "notification template lifecycle and activation validity",
+                "notification-template purpose for customer-page sends",
                 "notification row lifecycle",
                 "delivery state",
                 "notification delivery latency class enforcement",
@@ -1043,7 +1156,10 @@ DOMAIN = DomainSOT(
                 "An explicit send_at always remains authoritative; otherwise "
                 "immediate delivery bypasses quiet-hours deferral while normal "
                 "and batch customer delivery continue to respect it. "
-                "Every web and API template mutation enters this owner. Inactive "
+                "For manual customer-page sends, the selected template's persisted "
+                "purpose supplies the customer-status policy category; automated "
+                "event categories remain owned by EventNotificationSpec. Every web "
+                "and API template mutation enters this owner. Inactive "
                 "drafts may remain incomplete, but activation validates the exact "
                 "renderer vocabulary and event-specific required fields. The "
                 "payment_received contract requires receipt_number and receipt_url "
@@ -2536,22 +2652,27 @@ DOMAIN = DomainSOT(
             name="communications.team_inbox_customer_completion",
             module="app.services.team_inbox_customer_completion",
             owns=(
-                "Customer-only Inbox resolution readiness",
+                "Inbox Customer completion and classified-Lead resolution readiness",
                 "canonical Inbox Customer profile completion coordination",
             ),
             depends_on=(
                 "communications.team_inbox_customer_completion_policy",
                 "communications.team_inbox_threads",
                 "communications.conversation_lead_relationships",
+                "ai.intake",
                 "customer.accounts",
                 "customer.canonical_profile_patch",
                 "party.registry",
+                "sales.lead_intake",
                 "observability.audit_log",
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_customer_completion",
                 concerns=(
-                    ("Customer-only Inbox resolution readiness", OwnerRole.RESOLVER),
+                    (
+                        "Inbox Customer completion and classified-Lead resolution readiness",
+                        OwnerRole.RESOLVER,
+                    ),
                     (
                         "canonical Inbox Customer profile completion coordination",
                         OwnerRole.APPLICATION_COORDINATOR,
@@ -2575,6 +2696,15 @@ DOMAIN = DomainSOT(
                         owner="communications.conversation_lead_relationships",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source="Active reviewed conversation-to-Lead link.",
+                    ),
+                    AuthorityInput(
+                        name="final Inbox sales classification",
+                        owner="ai.intake",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Final classified inbound message metadata for a "
+                            "new-connection or coverage request with known party type."
+                        ),
                     ),
                     AuthorityInput(
                         name="canonical Customer profile",

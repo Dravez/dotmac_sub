@@ -10,23 +10,33 @@ from decimal import Decimal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models.automation_scripts import (
+    AutomationScriptKind,
+    AutomationScriptLanguage,
+)
 from app.services import (
     automation_capabilities,
     automation_rules,
     automation_runtime,
+    automation_script_runtime,
+    automation_scripts,
     customer_search,
     event_replay_evidence,
     service_team_lifecycle,
     web_automation_center,
 )
-from app.services.auth_dependencies import has_permission, require_permission
+from app.services.auth_dependencies import (
+    has_permission,
+    require_permission,
+    require_user_auth,
+)
 from app.services.automation_contracts import (
     AutomationConditionField,
     AutomationOperator,
@@ -46,12 +56,16 @@ from app.services.automation_runtime import (
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.events.types import EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import CommandContext
 
 templates = Jinja2Templates(directory="templates")
 router = APIRouter(prefix="/automation", tags=["web-admin-automation"])
 
-_DEFAULT_TRIGGER = "support.ticket.created"
+# The builder is module-first; an empty initial key lets its capability list
+# choose the first authorized module instead of making Tickets the implicit
+# owner of the central authoring entry point.
+_DEFAULT_TRIGGER = ""
 _KEY_WORDS = re.compile(r"[^a-z0-9]+")
 
 
@@ -124,10 +138,18 @@ def _preserved_customer_ids(customer_ids: list[str]) -> tuple[UUID, ...]:
     return tuple(selected)
 
 
-def _automation_redirect(*, error: str | None = None) -> RedirectResponse:
-    url = "/admin/automation"
+def _automation_redirect(
+    *,
+    path: str = "/admin/automation",
+    error: str | None = None,
+    notice: str | None = None,
+) -> RedirectResponse:
+    safe_path = path if path.startswith("/admin/automation") else "/admin/automation"
+    url = safe_path
     if error:
         url = f"{url}?error={quote(error)}"
+    elif notice:
+        url = f"{url}?notice={quote(notice)}"
     return RedirectResponse(url=url, status_code=303)
 
 
@@ -151,7 +173,26 @@ def _generic_form_context(
         trigger
         for manifest in manifests
         for trigger in manifest.triggers
+        if trigger.runtime_enabled
         if authorized or trigger.author_permission in permission_keys
+    )
+    module_options = tuple(
+        {
+            "key": manifest.module_key,
+            "label": manifest.label,
+            "trigger_keys": [
+                trigger.key
+                for trigger in manifest.triggers
+                if trigger.runtime_enabled
+                if authorized or trigger.author_permission in permission_keys
+            ],
+        }
+        for manifest in manifests
+        if any(
+            trigger.runtime_enabled
+            and (authorized or trigger.author_permission in permission_keys)
+            for trigger in manifest.triggers
+        )
     )
     selected_trigger = next(
         (item for item in triggers if item.key == trigger_key),
@@ -164,6 +205,7 @@ def _generic_form_context(
             for manifest in manifests
             for action in manifest.actions
             if action.entity_type == item.entity_type
+            and action.runtime_enabled
             and (authorized or action.author_permission in permission_keys)
         )
         builder_options[item.key] = {
@@ -209,6 +251,7 @@ def _generic_form_context(
         "name": name,
         "trigger_key": selected_trigger.key if selected_trigger else trigger_key,
         "triggers": triggers,
+        "module_options": module_options,
         "condition_fields": tuple(
             item
             for item in (selected_trigger.fields if selected_trigger else ())
@@ -231,6 +274,99 @@ def _generic_form_context(
         "initial_actions": jsonable_encoder(actions),
         "rule_id": rule_id,
         "command_token": str(uuid4()),
+    }
+
+
+def _script_form_context(
+    request: Request,
+    db: Session,
+    *,
+    kind: AutomationScriptKind,
+    error: str | None = None,
+    name: str = "",
+    key: str = "",
+    description: str = "",
+    target_type: str = "",
+    event_name: str = "",
+    source_code: str = "",
+) -> dict[str, object]:
+    target_groups = tuple(
+        {
+            "module_key": manifest.module_key,
+            "module_label": manifest.label,
+            "targets": tuple(
+                {
+                    "key": target.key,
+                    "label": target.label,
+                    "entity_type": target.entity_type,
+                    "events": list(
+                        target.client_events
+                        if kind is AutomationScriptKind.client
+                        else target.server_events
+                    ),
+                }
+                for target in manifest.script_targets
+                if (
+                    target.client_events
+                    if kind is AutomationScriptKind.client
+                    else target.server_events
+                )
+            ),
+        }
+        for manifest in automation_capabilities.registered_module_manifests()
+        if any(
+            target.client_events
+            if kind is AutomationScriptKind.client
+            else target.server_events
+            for target in manifest.script_targets
+        )
+    )
+    targets = tuple(
+        {
+            "key": target.key,
+            "label": target.label,
+            "entity_type": target.entity_type,
+            "events": list(
+                target.client_events
+                if kind is AutomationScriptKind.client
+                else target.server_events
+            ),
+        }
+        for manifest in automation_capabilities.registered_module_manifests()
+        for target in manifest.script_targets
+        if (
+            target.client_events
+            if kind is AutomationScriptKind.client
+            else target.server_events
+        )
+    )
+    selected_target = target_type or (str(targets[0]["entity_type"]) if targets else "")
+    selected_events = next(
+        (item["events"] for item in targets if item["entity_type"] == selected_target),
+        [],
+    )
+    selected_event = event_name or (str(selected_events[0]) if selected_events else "")
+    return {
+        **_base_context(request, db),
+        "error": error,
+        "script_kind": kind.value,
+        "script_kind_label": "Client script"
+        if kind is AutomationScriptKind.client
+        else "Server script",
+        "script_targets": targets,
+        "script_target_groups": target_groups,
+        "name": name,
+        "key": key,
+        "description": description,
+        "target_type": selected_target,
+        "event_name": selected_event,
+        "source_code": source_code,
+        "command_token": str(uuid4()),
+        "return_to": (
+            "/admin/automation/client-scripts/manage"
+            if kind is AutomationScriptKind.client
+            else "/admin/automation/server-scripts"
+        ),
     }
 
 
@@ -383,6 +519,15 @@ def automation_center_index(
     state = web_automation_center.build_automation_center_data(
         db,
         can_read_rules=has_permission(auth, db, RULE_READ_PERMISSION),
+        can_read_scripts=has_permission(
+            auth, db, automation_scripts.SCRIPT_READ_PERMISSION
+        ),
+        can_create_scripts=has_permission(
+            auth, db, automation_scripts.SCRIPT_CREATE_PERMISSION
+        ),
+        can_publish_scripts=has_permission(
+            auth, db, automation_scripts.SCRIPT_PUBLISH_PERMISSION
+        ),
         can_read_runs=has_permission(auth, db, RUN_READ_PERMISSION),
         can_create_rules=has_permission(auth, db, RULE_CREATE_PERMISSION),
         can_update_rules=has_permission(auth, db, RULE_UPDATE_PERMISSION),
@@ -397,6 +542,246 @@ def automation_center_index(
             **state,
             "page_error": request.query_params.get("error"),
         },
+    )
+
+
+def _automation_module_options() -> tuple[dict[str, str], ...]:
+    return tuple(
+        {"key": manifest.module_key, "label": manifest.label}
+        for manifest in automation_capabilities.registered_module_manifests()
+    )
+
+
+@router.get(
+    "/workflows",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(RULE_READ_PERMISSION)),
+    ],
+)
+def automation_workflow_list(
+    request: Request,
+    q: str = Query(default="", max_length=160),
+    status: str = Query(default="", max_length=24),
+    module: str = Query(default="", max_length=120),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    """List workflows as the focused operator workspace."""
+
+    can_update = has_permission(auth, db, RULE_UPDATE_PERMISSION)
+    can_publish = has_permission(auth, db, RULE_PUBLISH_PERMISSION)
+    can_operate = has_permission(auth, db, RULE_OPERATE_PERMISSION)
+    can_create = has_permission(auth, db, RULE_CREATE_PERMISSION)
+    rules = automation_rules.list_rules(
+        db,
+        automation_rules.ListAutomationRulesQuery(
+            tenant_id=OPERATOR_TENANT_ID,
+            include_retired=False,
+        ),
+    )
+    trigger_modules = {
+        trigger.key: manifest.module_key
+        for manifest in automation_capabilities.registered_module_manifests()
+        for trigger in manifest.triggers
+    }
+    search = q.strip().casefold()
+    filtered_rules = tuple(
+        rule
+        for rule in rules
+        if (
+            not search
+            or search in rule.name.casefold()
+            or search in rule.trigger_key.casefold()
+        )
+        and (not status or rule.status.value == status)
+        and (not module or trigger_modules.get(rule.trigger_key) == module)
+    )
+    return templates.TemplateResponse(
+        "admin/automation/workflows.html",
+        {
+            **_base_context(request, db),
+            "workflows": filtered_rules,
+            "query": q,
+            "selected_status": status,
+            "selected_module": module,
+            "statuses": tuple(automation_rules.AutomationRuleStatus),
+            "modules": _automation_module_options(),
+            "can_create_rules": can_create,
+            "can_update_rules": can_update,
+            "can_publish_rules": can_publish,
+            "can_operate_rules": can_operate,
+            "page_notice": request.query_params.get("notice"),
+            "page_error": request.query_params.get("error"),
+        },
+    )
+
+
+def _script_workspace(
+    request: Request,
+    db: Session,
+    *,
+    kind: AutomationScriptKind,
+    q: str,
+    target_type: str,
+    event_name: str,
+    status: str,
+    updated_from: date | None,
+    updated_to: date | None,
+    auth: dict,
+):
+    """Render one mechanism-specific script list without mixing script kinds."""
+
+    scripts = automation_scripts.list_scripts(db, tenant_id=OPERATOR_TENANT_ID)
+    search = q.strip().casefold()
+    filtered_scripts = tuple(
+        script
+        for script in scripts
+        if script.kind is kind
+        and (
+            not search
+            or search in script.name.casefold()
+            or search in script.key.casefold()
+        )
+        and (not target_type or script.target_type == target_type)
+        and (not event_name or script.event_name == event_name)
+        and (not status or script.status.value == status)
+        and (updated_from is None or script.updated_at.date() >= updated_from)
+        and (updated_to is None or script.updated_at.date() <= updated_to)
+    )
+    target_groups = tuple(
+        {
+            "module_label": manifest.label,
+            "targets": tuple(
+                {
+                    "key": target.entity_type,
+                    "label": target.label,
+                    "events": list(
+                        target.client_events
+                        if kind is AutomationScriptKind.client
+                        else target.server_events
+                    ),
+                }
+                for target in manifest.script_targets
+                if (
+                    target.client_events
+                    if kind is AutomationScriptKind.client
+                    else target.server_events
+                )
+            ),
+        }
+        for manifest in automation_capabilities.registered_module_manifests()
+        if any(
+            target.client_events
+            if kind is AutomationScriptKind.client
+            else target.server_events
+            for target in manifest.script_targets
+        )
+    )
+    return templates.TemplateResponse(
+        "admin/automation/script_list.html",
+        {
+            **_base_context(request, db),
+            "scripts": filtered_scripts,
+            "script_kind": kind.value,
+            "script_kind_label": "Client scripts"
+            if kind is AutomationScriptKind.client
+            else "Server scripts",
+            "script_description": (
+                "JavaScript that runs in declared browser form events through the restricted client API."
+                if kind is AutomationScriptKind.client
+                else "JavaScript drafts dispatched through the isolated runtime and typed owner actions."
+            ),
+            "query": q,
+            "selected_target": target_type,
+            "selected_event": event_name,
+            "selected_status": status,
+            "updated_from": updated_from.isoformat() if updated_from else "",
+            "updated_to": updated_to.isoformat() if updated_to else "",
+            "statuses": tuple(automation_scripts.AutomationScriptStatus),
+            "target_groups": target_groups,
+            "can_create_scripts": has_permission(
+                auth, db, automation_scripts.SCRIPT_CREATE_PERMISSION
+            ),
+            "can_publish_scripts": has_permission(
+                auth, db, automation_scripts.SCRIPT_PUBLISH_PERMISSION
+            ),
+            "server_script_runtime_state": automation_script_runtime.runtime_state().value,
+            "return_to": (
+                "/admin/automation/client-scripts/manage"
+                if kind is AutomationScriptKind.client
+                else "/admin/automation/server-scripts"
+            ),
+            "page_notice": request.query_params.get("notice"),
+            "page_error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.get(
+    "/client-scripts/manage",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+    ],
+)
+def client_script_workspace(
+    request: Request,
+    q: str = Query(default="", max_length=160),
+    target_type: str = Query(default="", max_length=120),
+    event_name: str = Query(default="", max_length=160),
+    status: str = Query(default="", max_length=24),
+    updated_from: date | None = Query(default=None),
+    updated_to: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    return _script_workspace(
+        request,
+        db,
+        kind=AutomationScriptKind.client,
+        q=q,
+        target_type=target_type,
+        event_name=event_name,
+        status=status,
+        updated_from=updated_from,
+        updated_to=updated_to,
+        auth=auth,
+    )
+
+
+@router.get(
+    "/server-scripts",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+    ],
+)
+def server_script_workspace(
+    request: Request,
+    q: str = Query(default="", max_length=160),
+    target_type: str = Query(default="", max_length=120),
+    event_name: str = Query(default="", max_length=160),
+    status: str = Query(default="", max_length=24),
+    updated_from: date | None = Query(default=None),
+    updated_to: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    return _script_workspace(
+        request,
+        db,
+        kind=AutomationScriptKind.server,
+        q=q,
+        target_type=target_type,
+        event_name=event_name,
+        status=status,
+        updated_from=updated_from,
+        updated_to=updated_to,
+        auth=auth,
     )
 
 
@@ -611,6 +996,196 @@ def search_rule_customers(
 
     return JSONResponse(
         jsonable_encoder(customer_search.search_response(db, q, limit=20))
+    )
+
+
+@router.get("/client-scripts", response_class=JSONResponse)
+def published_client_script_bundle(
+    target_type: str = Query(min_length=1, max_length=120),
+    event_name: str = Query(min_length=1, max_length=160),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_user_auth),
+):
+    """Return published client scripts for one authorized declared form event."""
+
+    target = next(
+        (
+            item
+            for manifest in automation_capabilities.registered_module_manifests()
+            for item in manifest.script_targets
+            if item.entity_type == target_type
+        ),
+        None,
+    )
+    if target is None or event_name not in target.client_events:
+        raise HTTPException(status_code=404, detail="Client script target not found")
+    if not has_permission(auth, db, target.read_permission):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    scripts = automation_scripts.published_client_scripts(
+        db,
+        tenant_id=OPERATOR_TENANT_ID,
+        target_type=target_type,
+        event_name=event_name,
+    )
+    return JSONResponse(
+        jsonable_encoder(
+            {
+                "target_type": target_type,
+                "event_name": event_name,
+                "scripts": scripts,
+            }
+        )
+    )
+
+
+@router.get(
+    "/scripts/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("automation:hub:read"))],
+)
+def new_automation_script(
+    request: Request,
+    kind: str = Query(default=AutomationScriptKind.client.value),
+    db: Session = Depends(get_db),
+):
+    """Render a typed client/server script draft form."""
+
+    try:
+        script_kind = AutomationScriptKind(kind)
+    except ValueError:
+        script_kind = AutomationScriptKind.client
+    return templates.TemplateResponse(
+        "admin/automation/script_builder.html",
+        _script_form_context(request, db, kind=script_kind),
+    )
+
+
+@router.post(
+    "/scripts",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("automation:hub:read"))],
+)
+def create_automation_script_draft(
+    request: Request,
+    kind: str = Form(...),
+    name: str = Form(...),
+    key: str = Form(...),
+    description: str = Form(default=""),
+    target_type: str = Form(...),
+    event_name: str = Form(...),
+    source_code: str = Form(...),
+    return_to: str = Form(default="/admin/automation"),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(
+        require_permission(automation_scripts.SCRIPT_CREATE_PERMISSION)
+    ),
+):
+    """Persist a script draft through the script owner, never through the route."""
+
+    try:
+        script_kind = AutomationScriptKind(kind)
+    except ValueError:
+        return templates.TemplateResponse(
+            "admin/automation/script_builder.html",
+            _script_form_context(
+                request,
+                db,
+                kind=AutomationScriptKind.client,
+                error="Choose a supported script mechanism.",
+                name=name,
+                key=key,
+                description=description,
+                target_type=target_type,
+                event_name=event_name,
+                source_code=source_code,
+            ),
+            status_code=400,
+        )
+    try:
+        outcome = automation_scripts.create_script(
+            db,
+            automation_scripts.CreateAutomationScriptCommand(
+                tenant_id=OPERATOR_TENANT_ID,
+                key=key,
+                name=name,
+                description=description,
+                kind=script_kind,
+                language=AutomationScriptLanguage.javascript,
+                target_type=target_type,
+                event_name=event_name,
+                source_code=source_code,
+                permission_keys=frozenset(auth.get("permission_keys") or ()),
+                context=CommandContext.system(
+                    actor=_actor(request),
+                    scope="automation.script_definitions",
+                    reason="Create Automation Center script draft",
+                ),
+            ),
+        )
+    except DomainError as exc:
+        return templates.TemplateResponse(
+            "admin/automation/script_builder.html",
+            _script_form_context(
+                request,
+                db,
+                kind=script_kind,
+                error=exc.message,
+                name=name,
+                key=key,
+                description=description,
+                target_type=target_type,
+                event_name=event_name,
+                source_code=source_code,
+            ),
+            status_code=400,
+        )
+    return _automation_redirect(
+        path=return_to,
+        notice=f"Script draft {outcome.script_id} saved",
+    )
+
+
+@router.post(
+    "/scripts/{script_id}/publish",
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_PUBLISH_PERMISSION)),
+    ],
+)
+def publish_automation_script(
+    script_id: UUID,
+    request: Request,
+    command_token: str = Form(...),
+    return_to: str = Form(default="/admin/automation"),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(
+        require_permission(automation_scripts.SCRIPT_PUBLISH_PERMISSION)
+    ),
+):
+    """Publish a script only after the typed owner validates its runtime."""
+
+    try:
+        token = UUID(command_token)
+        db_session_adapter.release_read_transaction(db)
+        outcome = automation_scripts.publish_script(
+            db,
+            automation_scripts.PublishAutomationScriptCommand(
+                tenant_id=web_automation_center.OPERATOR_TENANT_ID,
+                script_id=script_id,
+                permission_keys=frozenset(auth.get("permission_keys") or ()),
+                context=CommandContext.system(
+                    actor=_actor(request),
+                    scope="automation:script:publish",
+                    reason="Administrator activated an Automation Center script",
+                    idempotency_key=f"automation-script-publish:{script_id}:{token}",
+                ),
+            ),
+        )
+    except (DomainError, ValueError) as exc:
+        return _automation_redirect(path=return_to, error=str(exc))
+    return _automation_redirect(
+        path=return_to,
+        notice=f"Script {outcome.script_id} published at version {outcome.version}",
     )
 
 
@@ -897,6 +1472,7 @@ def publish_automation_rule(
     rule_id: UUID,
     request: Request,
     command_token: str = Form(...),
+    return_to: str = Form(default="/admin/automation"),
     db: Session = Depends(get_db),
     auth: dict = Depends(require_permission(RULE_PUBLISH_PERMISSION)),
 ):
@@ -918,8 +1494,8 @@ def publish_automation_rule(
             ),
         )
     except (DomainError, ValueError) as exc:
-        return _automation_redirect(error=str(exc))
-    return _automation_redirect()
+        return _automation_redirect(path=return_to, error=str(exc))
+    return _automation_redirect(path=return_to)
 
 
 def _change_rule_status(
@@ -930,6 +1506,7 @@ def _change_rule_status(
     auth: dict,
     operation: automation_rules.AutomationRuleOperation,
     command_token: str,
+    return_to: str,
 ) -> RedirectResponse:
     try:
         token = UUID(command_token)
@@ -952,8 +1529,8 @@ def _change_rule_status(
             ),
         )
     except (DomainError, ValueError) as exc:
-        return _automation_redirect(error=str(exc))
-    return _automation_redirect()
+        return _automation_redirect(path=return_to, error=str(exc))
+    return _automation_redirect(path=return_to)
 
 
 @router.post(
@@ -967,6 +1544,7 @@ def pause_automation_rule(
     rule_id: UUID,
     request: Request,
     command_token: str = Form(...),
+    return_to: str = Form(default="/admin/automation"),
     db: Session = Depends(get_db),
     auth: dict = Depends(require_permission(RULE_OPERATE_PERMISSION)),
 ):
@@ -977,6 +1555,7 @@ def pause_automation_rule(
         auth=auth,
         operation=automation_rules.AutomationRuleOperation.pause,
         command_token=command_token,
+        return_to=return_to,
     )
 
 
@@ -991,6 +1570,7 @@ def resume_automation_rule(
     rule_id: UUID,
     request: Request,
     command_token: str = Form(...),
+    return_to: str = Form(default="/admin/automation"),
     db: Session = Depends(get_db),
     auth: dict = Depends(require_permission(RULE_OPERATE_PERMISSION)),
 ):
@@ -1001,6 +1581,7 @@ def resume_automation_rule(
         auth=auth,
         operation=automation_rules.AutomationRuleOperation.resume,
         command_token=command_token,
+        return_to=return_to,
     )
 
 

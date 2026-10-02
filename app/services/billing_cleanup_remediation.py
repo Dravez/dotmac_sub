@@ -689,6 +689,7 @@ def plan_prepaid_collectible_ar_row(db: Session, row: dict[str, str]) -> dict[st
                 [
                     SubscriptionStatus.active,
                     SubscriptionStatus.pending,
+                    SubscriptionStatus.paused,
                     SubscriptionStatus.suspended,
                     SubscriptionStatus.blocked,
                 ]

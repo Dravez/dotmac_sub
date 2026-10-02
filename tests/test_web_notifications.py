@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from app.models.notification import NotificationChannel, NotificationStatus
+from app.models.notification import (
+    NotificationChannel,
+    NotificationStatus,
+    NotificationTemplatePurpose,
+)
 from app.services import web_notifications as web_notifications_service
 
 
@@ -34,6 +38,7 @@ def test_bulk_notification_setup_context_reports_channel_readiness(monkeypatch):
             name="Welcome Email",
             code="welcome_email",
             channel=NotificationChannel.email,
+            purpose=NotificationTemplatePurpose.general,
             subject="Hello",
             is_active=True,
         ),
@@ -42,6 +47,7 @@ def test_bulk_notification_setup_context_reports_channel_readiness(monkeypatch):
             name="Reminder SMS",
             code="reminder_sms",
             channel=NotificationChannel.sms,
+            purpose=NotificationTemplatePurpose.general,
             subject=None,
             is_active=True,
         ),

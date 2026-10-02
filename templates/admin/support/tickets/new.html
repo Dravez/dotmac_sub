@@ -24,7 +24,9 @@
     <form method="post"
           action="{% if form_mode == 'edit' and ticket %}/admin/support/tickets/{{ ticket.id }}/edit{% else %}/admin/support/tickets{% endif %}"
           enctype="multipart/form-data"
-          class="space-y-6">
+          class="space-y-6"
+          data-automation-target="support.ticket"
+          data-automation-record-id="{{ ticket.id if ticket else '' }}">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <fieldset class="space-y-6">
 
@@ -290,6 +292,8 @@
         </div>
         {% endcall %}
         </fieldset>
+
+        {% include 'admin/custom_fields/_creation_fields.html' %}
 
         <div class="flex justify-end gap-3">
             <a href="{% if form_mode == 'edit' and ticket %}/admin/support/tickets/{{ ticket.id }}{% else %}/admin/support/tickets{% endif %}" class="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">Cancel</a>

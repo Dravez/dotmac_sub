@@ -258,6 +258,13 @@ compatibility projection. Historical CSAT reporting reads `support_csat_requests
 and its agent/team snapshots, not mutable current Ticket assignment.
 
 `support.ticket_sla_clock` remains the Ticket SLA clock and breach owner.
+When it records a breach it also stages the bounded
+`support.ticket.sla_breached` Automation Center event; an overdue UI projection
+alone never emits that event. `support.ticket_sla_service_consequence` owns the
+optional cross-domain consequence that suspends the only active Subscription
+linked through the Ticket's canonical customer-account identity. It fails
+closed when that identity or service selection is missing or ambiguous and
+delegates all lock and access-state writes to `access.subscription_lifecycle`.
 `support.ticket_work_order_handoff` remains the only issuance/provenance
 boundary into field work. Issuance requires ticket-update and dispatch-write
 permission evidence plus an idempotency key. A field result may add internal
@@ -343,6 +350,28 @@ declares page-only selection and action presentation. `support.ticket_bulk_comma
 resolves membership, normalizes the shared changes, previews eligibility, binds
 the preview to a deterministic scope token, and detects drift. Confirmed
 mutations delegate to `support.ticket_lifecycle`; there is no second bulk writer.
+
+## Resolution-SLA pause consequence
+
+The SLA clock owner stages `support.ticket.sla_breached` only after it records
+an actual breach for a still-applicable Ticket. A published Automation Center
+rule may select `support.ticket.pause_unique_active_service`; the timer-due
+event alone is never sufficient. The consequence coordinator locks and
+revalidates the event, SLA clock, breach row, Ticket status, canonical customer
+link, and unique active subscription before delegating the pause.
+
+If the Ticket has already reached `pending_confirmation`, `closed`, or
+`canceled`, the queued consequence is a fail-closed no-op. Zero or multiple
+active services are retained as explicit automation-step failures. The pause
+starts at the effective lifecycle commit time, not at Ticket creation or the
+start of the SLA window.
+
+The linked cause becomes administratively resume-eligible only while the
+Ticket is `pending_confirmation` or `closed`. Resume uses a fingerprinted
+preview and remains a subscription-lifecycle command; changing the Ticket,
+pause, billing anchor, or restriction evidence makes the preview stale. A
+reopened, disputed, or otherwise unresolved Ticket cannot be resumed through
+this path.
 
 ## Cutover and repair
 

@@ -19,6 +19,7 @@ from app.models.event_store import EventStatus, EventStore
 from app.services import event_store as event_store_service
 from app.services.domain_errors import DomainError
 from app.services.events.types import Event, EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.session_hooks import run_after_commit
 
 logger = logging.getLogger(__name__)
@@ -543,6 +544,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     from app.services.events.handlers.ip_assignment_projection import (
         IPAssignmentProjectionHandler,
     )
+    from app.services.events.handlers.lead_intake import LeadIntakeHandler
     from app.services.events.handlers.lifecycle import LifecycleHandler
     from app.services.events.handlers.materials_lifecycle_projection import (
         MaterialsLifecycleProjectionHandler,
@@ -588,6 +590,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
 
     dispatcher.register_handler(SubscriptionChangeExecutionHandler())
     dispatcher.register_handler(ReferralHandler())
+    dispatcher.register_handler(LeadIntakeHandler())
     dispatcher.register_handler(PrepaidRenewalHandler())
     dispatcher.register_handler(StaffInviteHandler())
     dispatcher.register_handler(ResellerInviteHandler())
@@ -666,6 +669,14 @@ def emit_event(
         )
     """
 
+    # Events are emitted by a single-operator deployment. Stamp the envelope
+    # once at the shared boundary so automation and other consumers do not
+    # have to infer tenant scope from optional transport metadata. A caller's
+    # explicit value remains authoritative and is validated by its consumer.
+    event_payload = dict(payload)
+    if isinstance(db, Session):
+        event_payload.setdefault("tenant_id", str(OPERATOR_TENANT_ID))
+
     # Normalize UUIDs
     def to_uuid(value: UUID | str | None) -> UUID | None:
         if value is None:
@@ -676,7 +687,7 @@ def emit_event(
 
     event = Event(
         event_type=event_type,
-        payload=payload,
+        payload=event_payload,
         event_id=event_id or uuid4(),
         actor=actor,
         subscriber_id=to_uuid(subscriber_id),

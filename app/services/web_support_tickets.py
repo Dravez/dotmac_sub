@@ -13,12 +13,20 @@ from enum import Enum
 from typing import BinaryIO, Protocol
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.catalog import Subscription
 from app.models.project import ProjectTask
 from app.models.service_team import ServiceTeam
 from app.models.stored_file import StoredFile
 from app.models.subscriber import Subscriber
+from app.models.subscription_pause import (
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+)
 from app.models.support import (
     Ticket,
     TicketChannel,
@@ -71,6 +79,57 @@ from app.services.list_query import (
 from app.services.status_presentation import ticket_status_presentation
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TicketLinkedPauseProjection:
+    subscription_id: UUID
+    subscription_status: str
+    episode_status: str
+    cause_status: str
+    effective_at: datetime
+    resume_eligible: bool
+
+
+def _ticket_linked_pause_projection(
+    db: Session, ticket: Ticket
+) -> TicketLinkedPauseProjection | None:
+    row = db.execute(
+        select(SubscriptionPauseCause, SubscriptionPauseEpisode, Subscription)
+        .join(
+            SubscriptionPauseEpisode,
+            SubscriptionPauseEpisode.id == SubscriptionPauseCause.pause_episode_id,
+        )
+        .join(
+            Subscription,
+            Subscription.id == SubscriptionPauseEpisode.subscription_id,
+        )
+        .where(SubscriptionPauseCause.ticket_id == ticket.id)
+        .order_by(
+            (
+                SubscriptionPauseCause.status
+                == SubscriptionPauseCauseStatus.active.value
+            ).desc(),
+            SubscriptionPauseCause.created_at.desc(),
+        )
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    cause, episode, subscription = row
+    return TicketLinkedPauseProjection(
+        subscription_id=subscription.id,
+        subscription_status=subscription.status.value,
+        episode_status=episode.status,
+        cause_status=cause.status,
+        effective_at=episode.effective_at,
+        resume_eligible=(
+            ticket.status
+            in {TicketStatus.pending_confirmation.value, TicketStatus.closed.value}
+            and episode.status == SubscriptionPauseEpisodeStatus.active.value
+            and cause.status == SubscriptionPauseCauseStatus.active.value
+        ),
+    )
 
 
 class TicketAttachmentEntityType(str, Enum):
@@ -1943,6 +2002,7 @@ def build_ticket_detail_context(
         "staff_lookup": _label_lookup(staff),
         "subscriber_lookup": _label_lookup(subscribers),
         "customer_details": _ticket_customer_context(db, _ticket_customer_id(ticket)),
+        "ticket_linked_pause": _ticket_linked_pause_projection(db, ticket),
         "service_team_options": service_team_options(db),
         "service_team_lookup": _service_team_lookup(db),
         "sla_state": _ticket_sla_state(

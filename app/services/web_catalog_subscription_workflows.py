@@ -724,8 +724,21 @@ def subscription_detail_page_context(
                 subscription=subscription,
             )
         ),
+        "ticket_pause_resume_preview": None,
     }
     context.update(core.subscription_detail_context(db, subscription))
+    if subscription.status == SubscriptionStatus.paused:
+        from app.services.ticket_sla_service_automation import (
+            TicketServicePauseResumePreviewQuery,
+            preview_ticket_service_resume_for_subscription,
+        )
+
+        context["ticket_pause_resume_preview"] = (
+            preview_ticket_service_resume_for_subscription(
+                db,
+                TicketServicePauseResumePreviewQuery(subscription_id=subscription.id),
+            )
+        )
     if (
         subscription.status == SubscriptionStatus.suspended
         and subscription.billing_mode.value == "prepaid"

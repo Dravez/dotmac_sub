@@ -29,6 +29,40 @@ class AutomationCatalogState(StrEnum):
     retired = "retired"
 
 
+class AutomationMechanism(StrEnum):
+    """Authoring mechanisms exposed by the Automation Center."""
+
+    rule = "rule"
+    client_script = "client_script"
+    server_script = "server_script"
+
+
+class AutomationScriptLanguage(StrEnum):
+    """Languages admitted by the native script control plane."""
+
+    javascript = "javascript"
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationScriptTargetCapability:
+    """Closed target contract for client/server scripts.
+
+    This is deliberately separate from rule triggers/actions. A target may be
+    scriptable without being writable, and script execution must still go
+    through the target owner's typed API.
+    """
+
+    key: str
+    label: str
+    entity_type: str
+    client_events: tuple[str, ...] = ()
+    server_events: tuple[str, ...] = ()
+    read_permission: str = ""
+    write_permission: str | None = None
+    tenant_id_field: str = "tenant_id"
+    entity_id_field: str = "id"
+
+
 class AutomationOperator(StrEnum):
     equals = "equals"
     not_equals = "not_equals"
@@ -92,6 +126,9 @@ class AutomationActionCapability:
     author_permission: str
     runtime_scope: str
     idempotency: str
+    #: Declarative mutually-exclusive consequence family. Publication rejects
+    #: overlapping rules with the same trigger and conflict scope.
+    conflict_scope: str | None = None
     #: An action may be admitted for draft authoring before its runtime
     #: event-to-command adapter is ready. Publication must reject it until this
     #: flag is enabled in a later reviewed slice.
@@ -130,6 +167,7 @@ class AutomationDomainCapabilities:
     actions: tuple[AutomationActionCapability, ...] = ()
     legacy_surfaces: tuple[LegacyAutomationSurface, ...] = ()
     catalog_items: tuple[AutomationCatalogItem, ...] = ()
+    script_targets: tuple[AutomationScriptTargetCapability, ...] = ()
     manifest_version: int = 1
 
 
@@ -146,4 +184,5 @@ class AutomationModuleManifest:
     actions: tuple[AutomationActionCapability, ...]
     legacy_surfaces: tuple[LegacyAutomationSurface, ...]
     catalog_items: tuple[AutomationCatalogItem, ...]
+    script_targets: tuple[AutomationScriptTargetCapability, ...]
     manifest_version: int | None

@@ -17,7 +17,9 @@ from sqlalchemy.engine import URL, Engine, make_url
 
 from alembic import command
 from app import config as app_config
+from scripts.ci.bootstrap_test_database_prereqs import bootstrap_disposable_database
 from scripts.ci.migrated_test_database import effective_heads
+from tests.integration.migration_authority import migration_database
 
 REVISION_500 = "500_reconcile_staff_notification_inbox"
 REVISION_501 = "501_retire_allowance_throttle_rate"
@@ -67,7 +69,9 @@ def isolated_migration_database() -> Iterator[URL]:
         )
 
     try:
-        yield base_url.set(database=database_name)
+        target = base_url.set(database=database_name)
+        with migration_database(target):
+            yield target
     finally:
         with psycopg.connect(
             _psycopg_url(maintenance_url),
@@ -173,6 +177,10 @@ def test_postgres_drops_the_obsolete_column_and_keeps_501_resolvable(
     assert _revision_rows(database_url) == {REVISION_500}
     assert not _column_exists(database_url)
 
+    # Downgrading the composed module lineage removes its schema. The marked
+    # disposable bootstrap must restore declared schemas before a restricted
+    # app_admin login can replay the module's historical CREATE SCHEMA clause.
+    assert bootstrap_disposable_database(database_url, label="501 replay") == 0
     command.upgrade(config, "heads")
     assert _revision_rows(database_url) == expected_heads
     assert not _column_exists(database_url)

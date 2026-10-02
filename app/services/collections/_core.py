@@ -904,6 +904,7 @@ def confirm_financial_access_consequence(
             )
             lock_results.append(lock)
             if before not in {
+                SubscriptionStatus.paused,
                 SubscriptionStatus.suspended,
                 SubscriptionStatus.blocked,
                 SubscriptionStatus.stopped,

@@ -30,7 +30,6 @@
 2 cli_script|scripts/migration/backfill_party_status.py
 1 cli_script|scripts/migration/import_crm_phase3.py
 3 cli_script|scripts/migration/kernel_lineage_rehearsal_canaries.py
-2 cli_script|scripts/one_off/backfill_crm_subscriber_ids.py
 4 cli_script|scripts/seed/seed_test_fixtures.py
 1 migration|alembic/versions/045_contact_channels_without_name.py
 1 migration|alembic/versions/116_add_billing_accounts.py
@@ -52,7 +51,7 @@
 1 service|app/services/mrr_snapshot.py
 1 service|app/services/network_subscriber_bridge.py
 1 service|app/services/nin_verifications.py
-21 service|app/services/party.py
+23 service|app/services/party.py
 14 service|app/services/subscriber.py
 2 service|app/services/subscriber_profile_cleanup.py
 3 service|app/services/team_inbox_commands.py

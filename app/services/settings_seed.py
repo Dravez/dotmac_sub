@@ -579,7 +579,16 @@ def seed_notification_settings(db: Session) -> None:
 
 
 def _seed_missing_notification_templates(db: Session) -> int:
-    """Ensure required defaults exist and are usable without committing."""
+    """Ensure required defaults exist and are usable without committing.
+
+    PostgreSQL and SQLite use the database unique constraint as the arbiter so
+    concurrent startup workers cannot both insert the same ``(code, channel)``
+    row. Existing operator-customized templates remain untouched.
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     from app.models.notification import NotificationChannel, NotificationTemplate
     from app.services.notification_template_renderer import (
         PAYMENT_RECEIPT_TEMPLATE_CODE,
@@ -683,6 +692,30 @@ def _seed_missing_notification_templates(db: Session) -> int:
             ),
         },
         {
+            "code": "subscription_paused",
+            "name": "Subscription Paused",
+            "channel": NotificationChannel.email,
+            "subject": "Your service has been paused",
+            "body": (
+                "Dear {subscriber_name},\n\n"
+                "Your {offer_name} service has been paused while support resolves "
+                "the linked issue. You will not lose the unused part of your "
+                "service period.\n\n"
+                "We will let you know when service resumes."
+            ),
+        },
+        {
+            "code": "subscription_paused",
+            "name": "Subscription Paused SMS",
+            "channel": NotificationChannel.sms,
+            "subject": None,
+            "body": (
+                "Hi {subscriber_name}, your {offer_name} service has been paused "
+                "while support resolves the linked issue. Unused service time is "
+                "preserved."
+            ),
+        },
+        {
             "code": "subscription_resumed",
             "name": "Subscription Resumed",
             "channel": NotificationChannel.email,
@@ -702,6 +735,27 @@ def _seed_missing_notification_templates(db: Session) -> int:
             "body": (
                 "Hi {subscriber_name}, your {offer_name} service has been resumed. "
                 "You can now use your service as normal."
+            ),
+        },
+        {
+            "code": "subscription_pause_resumed",
+            "name": "Paused Subscription Resumed",
+            "channel": NotificationChannel.email,
+            "subject": "Your paused service has resumed",
+            "body": (
+                "Dear {subscriber_name},\n\n"
+                "Your {offer_name} service has resumed. The effective pause "
+                "duration has been added to your service period."
+            ),
+        },
+        {
+            "code": "subscription_pause_resumed",
+            "name": "Paused Subscription Resumed SMS",
+            "channel": NotificationChannel.sms,
+            "subject": None,
+            "body": (
+                "Hi {subscriber_name}, your {offer_name} service has resumed and "
+                "the effective pause duration has been added to your service period."
             ),
         },
         {
@@ -1178,25 +1232,61 @@ def _seed_missing_notification_templates(db: Session) -> int:
         for channel in referral_template_channels
     )
 
+    bind = db.get_bind()
     changed = 0
     for tmpl_data in templates:
-        from sqlalchemy import select as sa_select
-
-        existing = db.scalars(
-            sa_select(NotificationTemplate).where(
-                NotificationTemplate.code == tmpl_data["code"],
-                NotificationTemplate.channel == tmpl_data["channel"],
+        existing = None
+        inserted_id = None
+        if bind.dialect.name == "postgresql":
+            inserted_id = db.scalar(
+                postgresql_insert(NotificationTemplate)
+                .values(**tmpl_data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        NotificationTemplate.code,
+                        NotificationTemplate.channel,
+                    ]
+                )
+                .returning(NotificationTemplate.id)
             )
-        ).first()
-        if not existing:
-            tmpl = NotificationTemplate(**tmpl_data)
-            db.add(tmpl)
+        elif bind.dialect.name == "sqlite":
+            inserted_id = db.scalar(
+                sqlite_insert(NotificationTemplate)
+                .values(**tmpl_data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        NotificationTemplate.code,
+                        NotificationTemplate.channel,
+                    ]
+                )
+                .returning(NotificationTemplate.id)
+            )
+        else:  # pragma: no cover - production/tests use PostgreSQL/SQLite
+            existing = db.scalars(
+                sa_select(NotificationTemplate).where(
+                    NotificationTemplate.code == tmpl_data["code"],
+                    NotificationTemplate.channel == tmpl_data["channel"],
+                )
+            ).first()
+            if existing is None:
+                existing = NotificationTemplate(**tmpl_data)
+                db.add(existing)
+                changed += 1
+                logger.info("Seeded notification template: %s", tmpl_data["code"])
+                continue
+        if inserted_id is not None:
             changed += 1
             logger.info("Seeded notification template: %s", tmpl_data["code"])
-            continue
 
         if tmpl_data["code"] != PAYMENT_RECEIPT_TEMPLATE_CODE:
             continue
+        if existing is None:
+            existing = db.scalars(
+                sa_select(NotificationTemplate).where(
+                    NotificationTemplate.code == tmpl_data["code"],
+                    NotificationTemplate.channel == tmpl_data["channel"],
+                )
+            ).one()
 
         try:
             validate_template_activation_text(
@@ -1233,7 +1323,8 @@ def _seed_missing_notification_templates(db: Session) -> int:
 def seed_notification_templates(db: Session) -> None:
     """Seed default notification templates for key ISP events.
 
-    Uses upsert-by-code-and-channel and preserves customized usable content.
+    Uses a conflict-safe insert by code and channel and preserves customized
+    usable content across concurrent application startup workers.
     Payment-receipt rows are the deliberate exception: inactive rows are
     restored, and incomplete rows are replaced with receipt-aware defaults.
     """

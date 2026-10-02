@@ -48,6 +48,15 @@ from app.models.automation import (  # noqa: F401
     AutomationStepRun,
     AutomationStepStatus,
 )
+from app.models.automation_scripts import (  # noqa: F401
+    AutomationScript,
+    AutomationScriptKind,
+    AutomationScriptLanguage,
+    AutomationScriptRun,
+    AutomationScriptRunStatus,
+    AutomationScriptStatus,
+    AutomationScriptVersion,
+)
 from app.models.bandwidth import BandwidthSample, QueueMapping  # noqa: F401
 from app.models.billing import (  # noqa: F401
     AccountAdjustment,
@@ -88,6 +97,7 @@ from app.models.billing import (  # noqa: F401
     LedgerEntryType,
     LedgerSource,
     Payment,
+    PaymentAllocation,
     PaymentAllocationReconciliationException,
     PaymentMethod,
     PaymentMethodType,
@@ -1014,6 +1024,16 @@ from app.models.subscription_engine import (  # noqa: F401
 from app.models.subscription_lifecycle_schedule import (  # noqa: F401
     SubscriptionLifecycleSchedule,
     SubscriptionLifecycleScheduleStatus,
+)
+from app.models.subscription_pause import (  # noqa: F401
+    SubscriptionPauseBillingPolicy,
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+    SubscriptionPauseReason,
+    SubscriptionPauseResumePolicy,
+    SubscriptionPauseSource,
 )
 from app.models.support import (  # noqa: F401
     Ticket,

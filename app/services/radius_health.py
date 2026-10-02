@@ -182,7 +182,11 @@ def _enforcement_signals(db: Session) -> dict[str, int]:
 
     blocked_predicate = or_(
         Subscription.status.in_(
-            (SubscriptionStatus.suspended, SubscriptionStatus.blocked)
+            (
+                SubscriptionStatus.suspended,
+                SubscriptionStatus.paused,
+                SubscriptionStatus.blocked,
+            )
         ),
         Subscriber.status.in_(RADIUS_BLOCKING_SUBSCRIBER_STATUSES),
     )

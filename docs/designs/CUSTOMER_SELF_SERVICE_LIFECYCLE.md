@@ -216,6 +216,11 @@ Completed in this slice:
   actor, and reason, then resumes only from structural payment, fulfillment,
   RADIUS, or provisioning evidence. A crash after payment settlement but before
   fulfillment release is explicitly detectable and repairable.
+- Customer 360 Stats Records treats custom start and end dates as an inclusive
+  typed usage window owned by `customer.usage_summary`. The table, chart,
+  pagination links, and CSV export preserve that exact window. CSV serialization
+  remains an admin adapter concern, exports all matching rows rather than only the
+  current page, and neutralizes spreadsheet-formula prefixes in textual cells.
 
 The lifecycle migration is complete. Further changes extend this contract and
 must preserve these owners rather than introduce compatibility writers.

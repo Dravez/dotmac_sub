@@ -180,7 +180,7 @@ def test_import_classification_is_append_only_and_handoff_uses_review_api() -> N
         PROJECT_ROOT
         / "alembic"
         / "versions"
-        / "627_network_map_import_feature_classification.py"
+        / "637_network_map_import_feature_classification.py"
     ).read_text(encoding="utf-8")
     transfer_ui = (
         PROJECT_ROOT / "static" / "js" / "admin" / "network_map_transfer.js"

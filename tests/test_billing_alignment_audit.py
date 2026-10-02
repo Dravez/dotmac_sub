@@ -606,6 +606,7 @@ def test_funding_export_uses_owner_cohort_replay_and_threshold(db_session, subsc
             db_session,
             snapshot_at=datetime(2026, 7, 12, tzinfo=UTC),
             source="splynx-final-plus-native-events:test",
+            candidate_account_ids={subscriber.id},
         )
     finally:
         metadata.drop_all(db_session.get_bind())

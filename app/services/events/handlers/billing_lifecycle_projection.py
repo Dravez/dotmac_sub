@@ -33,6 +33,7 @@ HANDLED_EVENT_TYPES = frozenset(
         EventType.subscription_created,
         EventType.subscription_activated,
         EventType.subscription_resumed,
+        EventType.subscription_pause_resumed,
     }
 )
 
@@ -63,6 +64,7 @@ class BillingLifecycleProjectionHandler:
             EventType.subscription_created,
             EventType.subscription_activated,
             EventType.subscription_resumed,
+            EventType.subscription_pause_resumed,
         }:
             self._schedule_advance_renewal(db, event)
             return

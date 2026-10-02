@@ -30,6 +30,107 @@ def test_checked_in_registry_is_structurally_valid() -> None:
     assert automation_capabilities.capability_registry_errors() == ()
 
 
+def test_script_control_plane_emits_its_declared_change_event() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "app/services/automation_scripts.py").read_text(encoding="utf-8")
+    event_types = (root / "app/services/events/types.py").read_text(encoding="utf-8")
+    assert "EventType.automation_script_changed" in source
+    assert 'automation_script_changed = "automation.script_changed"' in event_types
+
+
+def test_requested_business_targets_are_declared_for_rule_or_script_authoring() -> None:
+    manifests = automation_capabilities.all_module_manifests()
+    targets = {
+        target.entity_type
+        for manifest in manifests
+        for target in manifest.script_targets
+    }
+    assert {
+        "customer.account",
+        "sales.lead",
+        "sales.quote",
+        "sales.sales_order",
+        "operations.project",
+        "operations.work_order",
+        "operations.material_request",
+        "operations.vendor",
+        "support.ticket",
+    } <= targets
+
+
+def test_script_targets_declare_event_identity_for_independent_server_dispatch() -> (
+    None
+):
+    targets = {
+        target.entity_type: target
+        for manifest in automation_capabilities.all_module_manifests()
+        for target in manifest.script_targets
+    }
+    expected_identity = {
+        "customer.account": "subscriber_id",
+        "sales.lead": "lead_id",
+        "sales.quote": "quote_id",
+        "sales.sales_order": "sales_order_id",
+        "support.ticket": "ticket_id",
+        "operations.project": "project_id",
+        "operations.work_order": "work_order_id",
+        "operations.material_request": "material_request_id",
+        "operations.vendor": "project_id",
+    }
+    assert {
+        entity_type: targets[entity_type].entity_id_field
+        for entity_type in expected_identity
+    } == expected_identity
+    assert all(
+        target.tenant_id_field == "tenant_id" and target.server_events
+        for target in targets.values()
+        if target.entity_type in expected_identity
+    )
+
+
+def test_rule_actions_report_typed_adapter_readiness_by_module() -> None:
+    manifests = automation_capabilities.all_module_manifests()
+    actions = {
+        action.key: action for manifest in manifests for action in manifest.actions
+    }
+    for key in (
+        "customer.account.set_status",
+        "sales.lead.set_status",
+        "sales.quote.set_status",
+        "sales.sales_order.set_status",
+        "operations.project.set_status",
+        "operations.material_request.enqueue_cancellation",
+    ):
+        assert key in actions
+        assert actions[key].runtime_enabled is True
+    assert actions["operations.work_order.set_status"].runtime_enabled is True
+    assert actions["operations.vendor.set_status"].runtime_enabled is True
+    assert actions["sales.lead.set_status"].inputs[0].enum_values
+    assert actions["sales.quote.set_status"].inputs[0].enum_values == (
+        "draft",
+        "sent",
+        "rejected",
+        "expired",
+    )
+    assert actions["sales.sales_order.set_status"].inputs[0].enum_values == (
+        "draft",
+        "confirmed",
+        "cancelled",
+    )
+
+
+def test_work_order_script_update_event_has_a_native_producer() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "app/services/work_order_commands.py").read_text(encoding="utf-8")
+    assert "def _emit_work_order_updated_event" in source
+    assert '"name": "work_order.updated"' in source
+    assert "_emit_work_order_updated_event(" in source
+
+
 def test_support_and_communications_catalogue_shows_readiness_and_existing_owners() -> (
     None
 ):
@@ -41,6 +142,12 @@ def test_support_and_communications_catalogue_shows_readiness_and_existing_owner
     )
     assert items["support.ticket.center_rules"].trigger_keys == (
         "support.ticket.created",
+        "support.ticket.assigned",
+        "support.ticket.status_changed",
+        "support.ticket.priority_changed",
+        "support.ticket.resolution_requested",
+        "support.ticket.resolution_confirmed",
+        "support.ticket.resolution_disputed",
     )
     assert items["support.ticket.assignment_rules"].state is (
         AutomationCatalogState.managed_elsewhere
@@ -52,6 +159,48 @@ def test_support_and_communications_catalogue_shows_readiness_and_existing_owner
         AutomationCatalogState.retired
     )
     assert all(item.explanation.strip() for item in items.values())
+
+
+def test_customer_and_support_workflows_expose_owner_produced_events() -> None:
+    manifests = automation_capabilities.all_module_manifests()
+    triggers = {
+        trigger.key: trigger for manifest in manifests for trigger in manifest.triggers
+    }
+
+    assert {
+        "customer.account.created",
+        "customer.account.updated",
+        "customer.account.status_changed",
+        "customer.account.suspended",
+        "customer.account.reactivated",
+        "support.ticket.created",
+        "support.ticket.assigned",
+        "support.ticket.status_changed",
+        "support.ticket.priority_changed",
+        "support.ticket.resolution_requested",
+        "support.ticket.resolution_confirmed",
+        "support.ticket.resolution_disputed",
+    } <= triggers.keys()
+    assert any(
+        field.key == "status"
+        for field in triggers["customer.account.status_changed"].fields
+    )
+    assert any(
+        field.key == "status"
+        for field in triggers["support.ticket.status_changed"].fields
+    )
+    assert any(
+        field.key == "service_team_id"
+        for field in triggers["support.ticket.assigned"].fields
+    )
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    support_source = (root / "app/services/support.py").read_text(encoding="utf-8")
+    assert '"ticket.status_changed"' in support_source
+    assert '"ticket.priority_changed"' in support_source
+    assert '"customer_id"' in support_source
 
 
 def test_available_catalogue_item_must_name_declared_runtime_capabilities(

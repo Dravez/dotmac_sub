@@ -30,6 +30,9 @@ class Settings:
         "DATABASE_URL",
         "postgresql+psycopg://postgres:postgres@localhost:5434/dotmac_sub",
     )
+    # DATABASE_URL is the application runtime connection. Alembic reads its
+    # separate, one-shot MIGRATION_DATABASE_URL directly from the environment.
+    # Do not load migration credentials into Settings or long-running services.
     # Legacy/developer fallback for stable, non-reversible marketing subject
     # identifiers. Deployed environments hold this value from OpenBao at boot.
     # The raw key and customer identity must never enter an event payload or log.
@@ -180,6 +183,19 @@ class Settings:
     # env files into. XDG_RUNTIME_DIR is tmpfs and user-private on a rootless
     # host, which is what keeps materialized credentials off durable storage.
     connector_runtime_dir: str = os.getenv("XDG_RUNTIME_DIR", "")
+
+    # Native Automation Center server scripts use the same external OCI
+    # boundary as connectors. Empty values intentionally leave publication
+    # unavailable until a deployment pins and provisions the runtime image.
+    automation_script_runtime_image: str = os.getenv(
+        "AUTOMATION_SCRIPT_RUNTIME_IMAGE", ""
+    ).strip()
+    automation_script_runtime_digest: str = os.getenv(
+        "AUTOMATION_SCRIPT_RUNTIME_DIGEST", ""
+    ).strip()
+    automation_script_runtime_timeout_seconds: int = max(
+        1, min(int(os.getenv("AUTOMATION_SCRIPT_RUNTIME_TIMEOUT_SECONDS", "30")), 600)
+    )
 
     # Meta Graph API settings
     meta_graph_api_version: str = os.getenv("META_GRAPH_API_VERSION", "v21.0")

@@ -1287,25 +1287,21 @@
 
         <div x-show="serviceSubTab === 'subscriptions'" x-cloak class="space-y-6">
             <!-- Plan & Network Summary -->
-            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div class="relative rounded-2xl border border-slate-200/60 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
                     <p class="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">Active Subscriptions</p>
                     <p class="mt-2 text-3xl font-bold tabular-nums text-slate-900 dark:text-white">{{ stats.active_subscriptions | default(0) }}</p>
                 </div>
                 <div class="relative rounded-2xl border border-slate-200/60 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
-                    <p class="text-xs font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">Active ONTs</p>
-                    <p class="mt-2 text-3xl font-bold tabular-nums text-slate-900 dark:text-white">{{ ont_assignments | selectattr('active') | list | length }}</p>
-                </div>
-                <div class="relative rounded-2xl border border-slate-200/60 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
                     <button type="button"
                             @click.prevent.stop="openNetworkDetailModal('cpe')"
                             class="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-full border border-blue-100 bg-blue-50 text-blue-600 shadow-sm transition hover:border-blue-200 hover:bg-blue-100 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-300 dark:hover:bg-blue-900/40 dark:focus:ring-offset-slate-800"
-                            title="View CPE devices"
-                            aria-label="View CPE devices">
+                            title="View CPE assignments"
+                            aria-label="View CPE assignments">
                         <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 17L17 7M8 7h9v9"/></svg>
                     </button>
-                    <p class="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">CPE Devices</p>
-                    <p class="mt-2 text-3xl font-bold tabular-nums text-slate-900 dark:text-white">{{ cpe_devices | length }}</p>
+                    <p class="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">CPE Assignments</p>
+                    <p class="mt-2 text-3xl font-bold tabular-nums text-slate-900 dark:text-white">{{ (cpe_devices | length) + (ont_assignments | length) }}</p>
                 </div>
                 <div class="relative rounded-2xl border border-slate-200/60 bg-white p-5 shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
                     <button type="button"
@@ -1558,18 +1554,44 @@
             {% endif %}
         </div>
 
-            <!-- ONT Assignments -->
+            <!-- CPE Assignments: ONTs are rendered as a CPE subtype in this unified view. -->
             <div class="rounded-2xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-800">
                 <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-700">
-                    <h3 class="font-semibold text-slate-900 dark:text-white">ONT Assignments</h3>
+                    <h3 class="font-semibold text-slate-900 dark:text-white">CPE Assignments</h3>
                     <a href="/admin/network/onts?assign_subscriber={{ customer.id }}"
                        class="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800">
                         <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
                         Assign ONT
                     </a>
                 </div>
-                {% if ont_assignments %}
+                {% if cpe_devices or ont_assignments %}
                 <div class="divide-y divide-slate-100 dark:divide-slate-700">
+                    {% for cpe in cpe_devices %}
+                    <div class="p-5 transition hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
+                        <div class="flex items-start justify-between gap-4">
+                            <div class="flex min-w-0 flex-1 items-start gap-3">
+                                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400">
+                                    <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7v14zM9 9h6v6H9V9z"/></svg>
+                                </div>
+                                <div class="min-w-0">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <a href="/admin/network/cpes/{{ cpe.id }}" class="text-sm font-semibold text-slate-900 hover:text-amber-600 dark:text-white dark:hover:text-amber-400">
+                                            {{ cpe.serial_number or cpe.mac_address or 'Unknown CPE' }}
+                                        </a>
+                                        <span class="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">CPE</span>
+                                    </div>
+                                    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                                        <span>{{ [cpe.vendor, cpe.model]|select|join(' / ') or 'Unknown device' }}</span>
+                                        {% if cpe.mac_address %}<span class="font-mono">{{ cpe.mac_address }}</span>{% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                            <span class="rounded-full px-2.5 py-1 text-xs font-medium {% if cpe.status and cpe.status.value == 'active' %}bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400{% else %}bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400{% endif %}">
+                                {{ cpe.status.value | title if cpe.status else 'Unknown' }}
+                            </span>
+                        </div>
+                    </div>
+                    {% endfor %}
                     {% for assignment in ont_assignments %}
                     <div class="p-5 transition hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
                         <div class="flex items-start justify-between gap-4">
@@ -1580,9 +1602,12 @@
                                     </div>
                                     <div class="min-w-0">
                                         {% set ont_display_serial = ont_serial_display_by_id.get(assignment.ont_unit.id | string) if assignment.ont_unit and ont_serial_display_by_id else '' %}
-                                        <a href="/admin/network/onts/{{ assignment.ont_unit.id }}" class="text-sm font-semibold text-slate-900 hover:text-amber-600 dark:text-white dark:hover:text-amber-400">
-                                            {{ ont_display_serial or (assignment.ont_unit.serial_number if assignment.ont_unit else 'Unknown ONT') }}
-                                        </a>
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <a href="/admin/network/onts/{{ assignment.ont_unit.id }}" class="text-sm font-semibold text-slate-900 hover:text-amber-600 dark:text-white dark:hover:text-amber-400">
+                                                {{ ont_display_serial or (assignment.ont_unit.serial_number if assignment.ont_unit else 'Unknown ONT') }}
+                                            </a>
+                                            <span class="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">ONT</span>
+                                        </div>
                                         <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
                                             {% if assignment.ont_unit and assignment.ont_unit.olt_device %}
                                             <span class="flex items-center gap-1">
@@ -1622,8 +1647,8 @@
                     <svg class="mx-auto h-12 w-12 text-slate-300 dark:text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
                     </svg>
-                    <h3 class="mt-3 text-sm font-medium text-slate-900 dark:text-white">No ONT assignments</h3>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Get started by assigning an ONT to this customer.</p>
+                    <h3 class="mt-3 text-sm font-medium text-slate-900 dark:text-white">No CPE assignments</h3>
+                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Get started by assigning an ONT or linking a CPE to this customer.</p>
                     <div class="mt-4">
                         <a href="/admin/network/onts?assign_subscriber={{ customer.id }}"
                            class="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800">
@@ -1794,27 +1819,20 @@
                         </div>
                     </div>
                     {% endif %}
-                    {% if ont_assignments %}
+                    {% if ont_assignments or cpe_devices %}
                     <div>
-                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">ONTs</p>
+                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">CPE Assignments</p>
                         <div class="mt-2 space-y-2">
                             {% for assignment in ont_assignments[:2] %}
                             <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
                                 {% set ont_display_serial = ont_serial_display_by_id.get(assignment.ont_unit.id | string) if assignment.ont_unit and ont_serial_display_by_id else '' %}
-                                <p class="text-sm font-medium text-slate-900 dark:text-white">{{ ont_display_serial or (assignment.ont_unit.serial_number if assignment.ont_unit else 'ONT Assignment') }}</p>
+                                <p class="text-sm font-medium text-slate-900 dark:text-white">ONT · {{ ont_display_serial or (assignment.ont_unit.serial_number if assignment.ont_unit else 'ONT Assignment') }}</p>
                                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ 'Active' if assignment.active else 'Inactive' }}{% if assignment.pon_port and assignment.pon_port.name %} · {{ assignment.pon_port.name }}{% endif %}</p>
                             </div>
                             {% endfor %}
-                        </div>
-                    </div>
-                    {% endif %}
-                    {% if cpe_devices %}
-                    <div>
-                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">CPEs</p>
-                        <div class="mt-2 space-y-2">
                             {% for cpe in cpe_devices[:2] %}
                             <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
-                                <p class="text-sm font-medium text-slate-900 dark:text-white">{{ cpe.serial_number or cpe.mac_address or 'CPE Device' }}</p>
+                                <p class="text-sm font-medium text-slate-900 dark:text-white">CPE · {{ cpe.serial_number or cpe.mac_address or 'CPE Device' }}</p>
                                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ [cpe.vendor, cpe.model]|select|join(' / ') or 'Unknown device' }}</p>
                             </div>
                             {% endfor %}
@@ -2378,7 +2396,7 @@
             </div>
             <div class="overflow-y-auto px-6 py-5">
                 <div x-show="networkDetailModalType === 'cpe'" class="space-y-3">
-                    {% if cpe_devices %}
+                    {% if cpe_devices or ont_assignments %}
                     {% for cpe in cpe_devices %}
                     <a href="/admin/network/cpes/{{ cpe.id }}" class="block rounded-xl border border-slate-200 px-4 py-3 transition hover:border-primary-200 hover:bg-primary-50/60 dark:border-slate-700 dark:hover:border-primary-900/60 dark:hover:bg-primary-900/10">
                         <div class="flex items-start justify-between gap-4">
@@ -2396,8 +2414,23 @@
                         </div>
                     </a>
                     {% endfor %}
+                    {% for assignment in ont_assignments %}
+                    {% set ont_display_serial = ont_serial_display_by_id.get(assignment.ont_unit.id | string) if assignment.ont_unit and ont_serial_display_by_id else '' %}
+                    <a href="/admin/network/onts/{{ assignment.ont_unit.id }}" class="block rounded-xl border border-slate-200 px-4 py-3 transition hover:border-primary-200 hover:bg-primary-50/60 dark:border-slate-700 dark:hover:border-primary-900/60 dark:hover:bg-primary-900/10">
+                        <div class="flex items-start justify-between gap-4">
+                            <div class="min-w-0">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <p class="truncate text-sm font-semibold text-slate-900 dark:text-white">{{ ont_display_serial or (assignment.ont_unit.serial_number if assignment.ont_unit else 'Unknown ONT') }}</p>
+                                    <span class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">ONT</span>
+                                </div>
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ 'Active' if assignment.active else 'Inactive' }}{% if assignment.pon_port and assignment.pon_port.name %} · FSP: {{ assignment.pon_port.name }}{% endif %}{% if assignment.ont_unit and assignment.ont_unit.ont_index is not none %} · ONT-ID: {{ assignment.ont_unit.ont_index }}{% endif %}</p>
+                            </div>
+                            <span class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium {% if assignment.active %}bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400{% else %}bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400{% endif %}">{{ 'Active' if assignment.active else 'Inactive' }}</span>
+                        </div>
+                    </a>
+                    {% endfor %}
                     {% else %}
-                    <div class="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">No CPE devices linked.</div>
+                    <div class="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">No CPE assignments linked.</div>
                     {% endif %}
                 </div>
 
@@ -2746,6 +2779,7 @@
                     <div class="mt-2 space-y-2">
                         <p class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedTemplate().label || selectedTemplate().name"></p>
                         <p class="text-xs text-slate-500 dark:text-slate-400" x-text="selectedTemplate().code"></p>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 capitalize" x-text="'Purpose: ' + (selectedTemplate().purpose || 'general').replace('_', ' ')"></p>
                         <p class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300" x-show="selectedTemplate().subject" x-text="selectedTemplate().subject"></p>
                     </div>
                 </template>
@@ -2987,7 +3021,7 @@ function customerDetail(config = {}) {
 
         networkDetailModalTitle() {
             return {
-                cpe: 'CPE Devices',
+                cpe: 'CPE Assignments',
                 ip: 'IP Assignments',
                 credentials: 'Access Credentials'
             }[this.networkDetailModalType] || 'Network Details';

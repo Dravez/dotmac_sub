@@ -134,6 +134,7 @@ class AutomationRuleSummary:
     draft_version: int | None
     customer_ids: tuple[UUID, ...]
     runtime_ready: bool
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,7 +685,23 @@ def _conditions_provably_disjoint(
 def _live_automation_rule_conflicts(
     db: Session, *, rule: AutomationRule, version: AutomationRuleVersion
 ) -> tuple[tuple[UUID, str, tuple[str, ...]], ...]:
-    candidate_actions = {str(item.get("action_key") or "") for item in version.actions}
+    def conflict_scopes(actions: object) -> set[str]:
+        if not isinstance(actions, list):
+            return set()
+        scopes: set[str] = set()
+        for item in actions:
+            if not isinstance(item, dict):
+                continue
+            action_key = str(item.get("action_key") or "")
+            capability = automation_capabilities.action_capability(action_key)
+            scopes.add(
+                capability.conflict_scope
+                if capability is not None and capability.conflict_scope
+                else action_key
+            )
+        return scopes
+
+    candidate_actions = conflict_scopes(version.actions)
     conflicts: list[tuple[UUID, str, tuple[str, ...]]] = []
     statement = (
         select(AutomationRule, AutomationRuleVersion)
@@ -702,9 +719,7 @@ def _live_automation_rule_conflicts(
         .with_for_update()
     )
     for existing, existing_version in db.execute(statement).tuples():
-        existing_actions = {
-            str(item.get("action_key") or "") for item in existing_version.actions
-        }
+        existing_actions = conflict_scopes(existing_version.actions)
         shared = tuple(sorted(candidate_actions.intersection(existing_actions)))
         if shared and not _conditions_provably_disjoint(
             version.conditions, existing_version.conditions
@@ -1323,6 +1338,7 @@ def list_rules(
                     trigger_key=rule.trigger_key,
                     version=displayed,
                 ),
+                updated_at=rule.updated_at,
             )
         )
     return tuple(summaries)

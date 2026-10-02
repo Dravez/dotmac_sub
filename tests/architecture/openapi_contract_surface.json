@@ -16962,6 +16962,28 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "POST /api/v1/payment-allocation-reversals/confirm": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "7a9f97898313",
+   "responses": {
+    "200": "2d48d08f916e",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "POST /api/v1/payment-allocation-reversals/preview": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "2a74c4b6ab9a",
+   "responses": {
+    "200": "d57139ee5ee1",
+    "422": "a11c9d9b2af8"
+   }
+  },
   "POST /api/v1/payment-allocations": {
    "params": [
     "header:authorization",
@@ -19998,7 +20020,7 @@
   "KanbanMoveRequest": "ba9dd0df6436",
   "LeadAccountConversionRead": "94d5d95d495f",
   "LeadAccountConversionRequest": "292359031b02",
-  "LeadCaptureMethod": "33e99952a65e",
+  "LeadCaptureMethod": "3fb30c871bc0",
   "LeadCapturePartyCreate": "439ed8f1b382",
   "LeadCaptureRead": "f7cb35f6879c",
   "LeadCaptureRequest": "22e37bb92c10",
@@ -20262,9 +20284,10 @@
   "NotificationDeliveryUpdate": "6e0eaee67ab3",
   "NotificationRead": "c4d3c42ac632",
   "NotificationStatus": "0ff606574696",
-  "NotificationTemplateCreate": "6c702deb5b87",
-  "NotificationTemplateRead": "559866507b94",
-  "NotificationTemplateUpdate": "05eed01689f4",
+  "NotificationTemplateCreate": "8f4ab3aec626",
+  "NotificationTemplatePurpose": "d5e4a938f84f",
+  "NotificationTemplateRead": "724a2ad2492a",
+  "NotificationTemplateUpdate": "dd50d0ff1251",
   "NotificationUpdate": "5813bf32590a",
   "ODNEndpointType": "4848866856f3",
   "OLTDeviceCreate": "3fbf11d6798d",
@@ -20369,6 +20392,10 @@
   "PaymentAllocationPreviewRead": "378a3d01d4e2",
   "PaymentAllocationPreviewRequest": "a36f13eb689e",
   "PaymentAllocationRead": "e66bef702266",
+  "PaymentAllocationReversalConfirm": "cb778e689ea6",
+  "PaymentAllocationReversalPreviewRead": "554fed822ce2",
+  "PaymentAllocationReversalPreviewRequest": "3ddf156d9e29",
+  "PaymentAllocationReversalRead": "898daeca0670",
   "PaymentChannelAccountCreate": "2a5c5725785b",
   "PaymentChannelAccountRead": "278a859a05dd",
   "PaymentChannelAccountUpdate": "191f2e0e5d23",
@@ -20700,7 +20727,7 @@
   "SubscriberRoleCreate": "14354d9a4521",
   "SubscriberRoleRead": "ce3c778333ed",
   "SubscriberRoleUpdate": "fb77a484b0b4",
-  "SubscriberStatus": "04f90e59577f",
+  "SubscriberStatus": "e24754f5727c",
   "SubscriberSyncRead": "18be3aa27af4",
   "SubscriberUpdate": "4e2c01041b7a",
   "SubscriptionAddOnCreate": "254584caf81b",
@@ -20709,8 +20736,8 @@
   "SubscriptionBillingTreatment": "6f669e9e59a6",
   "SubscriptionCreate": "74d292a7c6ce",
   "SubscriptionDefaultsResponse": "3e153d9f51b0",
-  "SubscriptionRead": "fc8ee2012673",
-  "SubscriptionStatus": "55da6209c756",
+  "SubscriptionRead": "e2fea35c57bc",
+  "SubscriptionStatus": "313103a38c5f",
   "SubscriptionTechnicalUpdate": "cf9d7e2a90c6",
   "SuppressionCreate": "875f5ad57243",
   "SuppressionReason": "e3c4e28c7028",

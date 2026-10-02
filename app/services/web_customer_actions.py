@@ -82,7 +82,6 @@ from app.services.customer_notification_policy import (
     CustomerNotificationPolicyCohortQuery,
     evaluate_bulk_customer_notification_policy,
     quiet_hours_send_at,
-    resolve_notification_category,
 )
 from app.services.db_session_adapter import db_session_adapter
 from app.services.integrations import whatsapp_capability
@@ -1469,6 +1468,7 @@ def _bulk_message_impact_token(
         "template": {
             "id": str(template.id),
             "updated_at": str(template.updated_at or ""),
+            "purpose": template.purpose.value,
             "subject": template.subject or "",
             "body": template.body or "",
             "conditions": template.conditions or {},
@@ -1599,7 +1599,7 @@ def queue_bulk_message_from_payload(
     queued_count = 0
     suppressed_count = 0
     skipped_count = len(resolved.missing_ids)
-    category = resolve_notification_category("service_bulk_message")
+    category = template.purpose.value
     quiet_send_at = quiet_hours_send_at(db)
     addressed_customers: list[tuple[Subscriber, str]] = []
     for subscriber in customers:

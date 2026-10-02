@@ -1,18 +1,19 @@
 # Automation Center source of truth
 
-Status: reusable rule builder with operator run history and retry
+Status: reusable workflow builder and native script control-plane draft
 
 Decision owner: Michael
 
 ## Scope
 
 The Automation Center is the central authoring and lifecycle surface for
-Automation Center rules. Existing assignment, alert, FUP, inbox, NAS,
+workflows (the user-facing name for central rules) plus governed client and server script drafts. Existing assignment, alert, FUP, inbox, NAS,
 provisioning, SLA, escalation, and routing rules remain managed by their
 existing owners until a later, separately approved migration. That migration
 must hand off each rule without leaving two active writers.
 
-Custom fields are explicitly out of scope.
+Custom fields remain explicitly out of scope as an authoring mechanism; they
+may be read by a declared script target only when its owner permits it.
 
 ## Capability boundary
 
@@ -29,14 +30,12 @@ from the UI. Adding or restoring a capability is a reviewed code change in its
 owning domain. The code change must be deployed before the capability becomes
 available for rule activation.
 
-Owner declarations also publish a typed business-automation catalogue. The
-central page shows whether each listed Support, communications, billing,
-subscription, usage/access, provisioning, customer-identity, network, sales,
-field-operations, integration, reporting, export, or maintenance item is ready
-for new rules, still managed on its existing page, unavailable because it has
-no safe Center contract yet, or retired. Unavailable and retired items include
-a plain-language reason. An item is ready only when its declared trigger and
-actions have registered runtime support. The catalogue is read-only: it does
+Owner declarations also publish a typed business-automation catalogue for
+diagnostics and developer guidance. It is not rendered as an operator table on
+the Automation Center landing page. Focused Workflows, Client scripts, and
+Server scripts workspaces expose only the registered targets and actions that
+are relevant to the mechanism being authored. Unavailable and retired items
+retain a plain-language reason for implementation guidance; the catalogue does
 not activate rules or change existing automation.
 
 Every trigger declares the exact payload fields carrying tenant and target
@@ -45,6 +44,14 @@ the runtime never guesses tenancy from an unrelated record or a UI session.
 Customer-specific rules may also name an explicit set of customer identities.
 Those identities come from the trigger's declared customer field and are
 validated against the customer owner when a draft is saved and published.
+
+Customer account workflows may use the owner-produced account-created,
+account-updated, status-changed, suspended, and reactivated events. Support
+ticket workflows may use ticket-created, assigned, status-changed,
+priority-changed, resolution-requested, resolution-confirmed, and
+resolution-disputed events. These choices are declared by the owning SOT and
+their bounded event producers; operators cannot add arbitrary event names from
+the UI.
 
 ## Rule shape
 
@@ -63,12 +70,46 @@ and publication atomically changes the active version. Runtime execution pins
 the exact rule version, trigger schema version, action schema versions and
 event identity used for the decision.
 
+## Script shape
+
+Client and server scripts are separate mechanisms in the same Center. A script
+must name one registered target, one registered browser or server event, one
+supported language, and an immutable source version. The source is hashed and
+stored separately from the script identity. The target declaration, not the
+editor, owns allowed events, read/write permissions, payload shape, and the
+typed owner command boundary.
+
+The initial language is JavaScript, but the application never evaluates it
+in-process. Client scripts are delivered only to an approved browser form
+adapter on declared module forms. The adapter fetches only the published
+target/event bundle, verifies each immutable SHA-256 source hash, and exposes a
+frozen field snapshot plus `get`, `set`, `error`, `clearError`, and
+`preventDefault` helpers. Client scripts cannot fetch, access the DOM directly,
+or issue database/API writes. Server scripts are submitted to the existing external OCI runner
+boundary using a digest-pinned runtime image, read-only filesystem, dropped
+capabilities, bounded memory/processes, and default-deny network. Missing or
+ambiguous runtime configuration blocks publication. A server-script result is
+not itself a database mutation: any requested activity must be mapped to a
+declared typed owner command and retain script/version/event provenance.
+The only admitted server-script side-effect result is an `actions` list whose
+entries contain an `action_key` and typed `inputs`. The registry re-validates
+the action, target module, required inputs, and value types before invoking the
+same owner adapter used by a native rule; unknown actions and malformed output
+fail the script run.
+
+The event boundary stamps the single operator tenant on durable SQLAlchemy
+events when a producer has not already supplied it. This keeps legacy event
+producers usable as script triggers without inferring tenancy from a record or
+from the browser session; an explicit producer value remains authoritative and
+is checked by the runtime.
+
 ## Runtime boundary
 
 The durable event dispatcher invokes one Automation Center handler. The
-handler selects rules for the exact registered event type, evaluates only
-declared fields, and delegates each action to the module's typed command owner.
-It never performs generic ORM mutation.
+handler selects rules for the exact registered event type and independently
+dispatches published server scripts by their declared target/event pair. It
+evaluates only declared fields and delegates each rule action to the module's
+typed command owner. It never performs generic ORM mutation.
 
 Execution is idempotent by event ID, rule version and step position. A durable
 run and step ledger records matched, skipped, succeeded, failed and blocked
@@ -102,24 +143,31 @@ Runtime uses an automation service principal constrained to the action's
 declared runtime scope. It does not impersonate the publisher. Removing or
 disabling a registered capability makes affected rules ineligible to execute.
 
-The admin shell is available at `/admin/automation`. Opening the hub requires
-`automation:hub:read`; its rule and execution sections independently require
-`automation:rule:read` and `automation:run:read`. Run details require
+Script publication repeats target permissions and runtime readiness checks.
+The Center never grants a script arbitrary ORM access, imports, process access,
+network access, dynamic code evaluation, or a generic database writer.
+
+The admin shell is available at `/admin/automation`. The hub is a directory
+that links to focused `/workflows`, `/client-scripts/manage`,
+`/server-scripts`, and `/runs` workspaces. Opening the hub requires
+`automation:hub:read`; each workflow, script, and execution workspace keeps
+its own read permission. Run details require
 `automation:run:read`; continuing a failed run additionally requires
 `automation:run:redrive`. The run detail shows the affected record, rule
 version, timestamps, each action step and its attempts, safe failure guidance,
 and administrator retry outcomes. A customer record link is shown when the
 target type has a known admin destination.
 
-The reusable builder currently admits the Support Ticket created trigger and
-its declared priority, customer, ticket-type, channel, and region facts.
-Administrators can add multiple AND conditions, select all customers or a
-bounded set, and combine the declared actions in order: assign a Service Team
-and set Ticket priority. Each action delegates through a typed Ticket lifecycle
-command with stable event, rule-version, and step provenance. The event carries
-only the declared fields and canonical customer identity. New capabilities are
-added through reviewed domain declarations and typed runtime adapters; existing
-rules stay at their current owners until a separate migration is approved.
+The reusable builder admits runtime-ready targets from Support, Customer account
+status, Sales Lead/Quote/Sales Order, Projects, Work Orders, Material Requests,
+and Vendor Projects. Customer account rules use the reviewed status-action
+protocol; Sales, Project, and Vendor actions delegate through typed owners;
+material cancellation delegates to the existing ERP outbox consumer; and
+work-order status changes stage through the native work-order owner without
+committing independently. Each admitted action carries stable event,
+rule-version, and step provenance. New capabilities are added through reviewed
+domain declarations and typed runtime adapters; existing rules stay at their
+current owners until a separate migration is approved.
 Event schema 4 explicitly remains compatible with schema 3 rules because their
 priority and customer conditions retain the same meaning.
 
@@ -133,11 +181,80 @@ and identifies the existing rule. The overlap check only treats conditions as
 disjoint when a shared field proves they cannot both match; uncertain overlaps
 are blocked. Legacy rules remain in their existing pages and are not migrated.
 
-Support ticket creation, service-team assignment, and priority updates are
-admitted to the runtime by this reviewed code contract. Focused checks for
-event delivery, customer scoping, replay, action audit, activation, pause
-behavior, and both legacy and central rule conflicts run with the pull
-request's CI suite before merge.
+Support ticket creation, service-team assignment, priority updates, customer
+account status actions, sales status actions, project status, work-order status,
+vendor-project status, and material cancellation are admitted to the runtime by
+this reviewed code contract.
+Focused checks for event delivery, customer scoping, replay, action audit,
+activation, pause behavior, and both legacy and central rule conflicts run with
+the pull request's CI suite before merge.
+
+## Ticket SLA service consequences
+
+Support exposes the runtime-enabled `support.ticket.sla_breached` trigger from
+the durable breach fact owned by `support.ticket_sla_clock`. Its version-1
+payload contains the operator tenant, Ticket, SLA clock, breach time, normalized
+priority, and ticket type. The trigger does not reinterpret an overdue date;
+it is staged only when the owner records the breach.
+
+Two admitted actions are available for this trigger. The legacy-compatible
+`support.ticket.suspend_unique_active_service` keeps billing unchanged.
+The new `support.ticket.pause_unique_active_service` creates a first-class,
+non-billable pause and preserves unused service time. The Automation Center adapter
+delegates to `support.ticket_sla_service_consequence`, which locks the Ticket,
+uses its canonical customer-account link, and requires exactly one active
+Subscription. Missing customer identity, zero active services, multiple active
+services, or conflicting replay evidence fail closed and are retained in the
+automation step evidence. The coordinator delegates the actual status and
+enforcement-lock writes to `access.subscription_lifecycle`.
+
+Both actions declare the same
+`support.ticket.sla_service_access_consequence` conflict scope. Publication
+rejects overlapping rules for the SLA trigger unless their conditions are
+provably disjoint, so pause and suspension cannot race for the same breach.
+
+The suspension action suspends network access with a dedicated `ticket_sla` enforcement
+lock. It does not
+pause billing and does not restore service automatically. Its stable lock
+source includes event, rule-version, and step identity so a retry after the
+side effect replays the exact success rather than selecting another service.
+
+The pause action additionally locks and verifies the durable
+`support.ticket.sla_breached` event, its SLA clock, and its breach record. It
+then delegates a typed, flush-only participant command to
+`access.subscription_lifecycle`. That owner creates one active pause episode,
+adds an independently releasable Ticket cause, transitions `active` to
+`paused`, derives the account as `paused`, and stages the access and notification
+events. Credentials, IP assignments, device bindings, and offer configuration
+are retained. Network access and recurring collection are denied while the
+pause remains active.
+
+The action inputs are immutable published-rule configuration:
+`unique_active_subscription`, `manual_after_ticket_resolution`, and
+`extend_by_effective_pause_duration`. These are closed safety contracts, not
+customer or SLA hardcoding. Customer scope, priority, ticket type, SLA target,
+and whether the action is published remain operator-managed configuration.
+No workflow is seeded or published by deployment.
+
+Resume is an explicit administrative command from the subscription detail.
+It is offered only after the linked Ticket reaches `pending_confirmation` or
+`closed`. A read-only preview shows the exact interval and projected billing
+anchor and fingerprints all eligibility evidence. Confirmation rechecks that
+fingerprint, releases only the selected cause, and resumes only after the final
+cause is gone. The billing anchor moves once by `[effective_at, resumed_at)`;
+the generic restore paths cannot resume a paused subscription.
+
+The workflow builder exposes this trigger and both actions alongside the other
+registered Support capabilities. It requires the trigger's Ticket-read
+permission plus each selected action's own permission
+(`subscription:suspend` or `subscription:pause`) at draft and publication
+time. The suspension description states that billing is unchanged; the pause
+description states that exact unused time is preserved. Both explain that
+service selection fails closed when there is no unique active service and that
+restoration requires an authorized follow-up. Any high-impact confirmation
+belongs in the generic workflow publication step; there is no separate
+SLA-specific button or rule-creation route on the hub. Deployment itself still
+creates no rule.
 
 The current ticket-assignment and ticket-creation automation pages are listed
 as existing ownership links. Their rules are not moved by this implementation
@@ -163,8 +280,9 @@ writers for the same decision.
 ## Deployment
 
 Schema changes are additive. Permissions are seeded as assignable and are not
-granted broadly. Migration 625 adds safe error explanations and
-actor-attributed retry evidence. The runtime handler is registered for the
-reviewed Support Ticket trigger; it only acts on rules an authorized
-administrator has explicitly activated. Deployment creates no rules and
-produces no new business side effects by itself.
+granted broadly. Migration 626 adds tenant-isolated script identities,
+immutable versions, and redacted run evidence. Publication and execution remain
+fail-closed until the digest-pinned OCI runtime is configured. Published server
+scripts are selected by target/event and dispatched through the external runner;
+client scripts are only delivered by approved browser-form adapters. Deployment
+creates no rules and produces no new business side effects by itself.

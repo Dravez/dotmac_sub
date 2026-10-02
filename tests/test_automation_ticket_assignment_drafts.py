@@ -57,6 +57,70 @@ def test_ticket_assignment_pilot_is_runtime_enabled() -> None:
     )
 
 
+def test_ticket_sla_suspension_capability_is_available_to_workflows() -> None:
+    trigger = automation_capabilities.trigger_capability("support.ticket.sla_breached")
+    action = automation_capabilities.action_capability(
+        "support.ticket.suspend_unique_active_service"
+    )
+
+    assert trigger.runtime_enabled
+    assert action.runtime_enabled
+    _schema, conditions, actions = automation_rules._validate_definition(
+        db=SimpleNamespace(),
+        trigger_key=trigger.key,
+        conditions=(),
+        actions=(
+            automation_rules.AutomationActionStep(
+                action_key=action.key,
+                inputs=(),
+            ),
+        ),
+        permission_keys=frozenset({"support:ticket:read", "subscription:suspend"}),
+    )
+
+    assert conditions == []
+    assert actions[0]["action_key"] == action.key
+    assert EventType.support_ticket_sla_breached in HANDLED_EVENT_TYPES
+    assert not runtime_registry_errors()
+
+
+def test_ticket_sla_pause_capability_is_configured_by_the_workflow() -> None:
+    trigger = automation_capabilities.trigger_capability("support.ticket.sla_breached")
+    action = automation_capabilities.action_capability(
+        "support.ticket.pause_unique_active_service"
+    )
+    inputs = (
+        automation_rules.AutomationActionValue(
+            key="service_selection_policy", value="unique_active_subscription"
+        ),
+        automation_rules.AutomationActionValue(
+            key="resume_policy", value="manual_after_ticket_resolution"
+        ),
+        automation_rules.AutomationActionValue(
+            key="billing_policy", value="extend_by_effective_pause_duration"
+        ),
+    )
+
+    _schema, conditions, actions = automation_rules._validate_definition(
+        db=SimpleNamespace(),
+        trigger_key=trigger.key,
+        conditions=(),
+        actions=(
+            automation_rules.AutomationActionStep(
+                action_key=action.key,
+                inputs=inputs,
+            ),
+        ),
+        permission_keys=frozenset({"support:ticket:read", "subscription:pause"}),
+    )
+
+    assert conditions == []
+    assert actions[0]["inputs"] == [
+        {"key": item.key, "value": item.value} for item in inputs
+    ]
+    assert not runtime_registry_errors()
+
+
 def test_ticket_assignment_can_target_selected_customers(monkeypatch) -> None:
     customer_id = UUID("9d501e67-4252-45de-8b42-0e74f8a8e307")
     monkeypatch.setattr(

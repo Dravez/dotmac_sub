@@ -27,10 +27,9 @@ class CustomerDashboardPage(BasePage):
 
     def expect_account_summary_visible(self) -> None:
         """Assert account summary section is visible."""
+        expect(self.page.locator("[data-testid='billing-summary']")).to_be_visible()
         expect(
-            self.page.locator("[data-testid='account-summary']")
-            .or_(self.page.get_by_text("Account", exact=False))
-            .first
+            self.page.get_by_role("heading", name="Financial position")
         ).to_be_visible()
 
     def expect_service_status_visible(self) -> None:

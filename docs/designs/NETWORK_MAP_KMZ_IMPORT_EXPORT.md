@@ -127,13 +127,7 @@ fails.
 
 ## Schema and rollout
 
-Migration `626_network_map_kmz_transfer` adds nullable command-key and command-
-fingerprint hashes to existing source batches, their length checks and unique
-key, plus separately assignable import and export permissions. Migration
-`627_network_map_import_feature_classification` adds append-only reviewed type
-revisions for staged features; it does not modify existing batches. Existing source
-batches remain valid without a backfill. The migration uses a five-second lock
-budget and thirty-second statement budget. The source-batch table is expected
+Migration `627_network_map_kmz_transfer` adds idempotency constraints and permissions to existing source batches. Migration `637_network_map_import_feature_classification`, after `636_allow_name_identified_fiber_topology_features`, adds append-only reviewed type revisions for staged features; it does not modify existing batches. Existing source batches remain valid without a backfill. The classification migration uses a five-second lock budget and thirty-second statement budget. The source-batch table is expected
 to be an operator-scale evidence ledger; operators must inspect its row count
 and active locks before applying the constraint on an existing deployment.
 
