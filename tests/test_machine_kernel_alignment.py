@@ -1,4 +1,4 @@
-"""Sub 638 must satisfy the installed Kernel a97 machine credential contract."""
+"""Sub 639 must satisfy the installed Kernel a97 machine credential contract."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from tests.integration.machine_cli_probe import (
 
 _REVISION = (
     Path(__file__).resolve().parents[1]
-    / "alembic/versions/638_machine_attribution_alignment.py"
+    / "alembic/versions/639_machine_attribution_alignment.py"
 )
 
 
@@ -44,9 +44,9 @@ def _postgres_upgrade_sql() -> str:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.revision == "638_machine_attribution"
+    assert module.revision == "639_machine_attribution"
     assert len(module.revision) <= 32
-    assert module.down_revision == "637_payment_email_cutover"
+    assert module.down_revision == "638_payment_email_cutover"
     output = io.StringIO()
     context = MigrationContext.configure(
         dialect_name="postgresql", opts={"as_sql": True, "output_buffer": output}

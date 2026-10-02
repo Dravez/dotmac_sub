@@ -5,8 +5,8 @@ Sub-owned tables. This transcribes Kernel revision 0028's machine credential
 half after Sub revision 551. Existing rows remain unattributed until their
 actual owning application is established. Kernel refuses those rows at auth.
 
-Revision ID: 638_machine_attribution
-Revises: 637_payment_email_cutover
+Revision ID: 639_machine_attribution
+Revises: 638_payment_email_cutover
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "638_machine_attribution"
-down_revision = "637_payment_email_cutover"
+revision = "639_machine_attribution"
+down_revision = "638_payment_email_cutover"
 branch_labels = None
 depends_on = None
 

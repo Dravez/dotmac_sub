@@ -1,7 +1,7 @@
 """Durable payment email correlation and explicit content cutover.
 
-Revision ID: 637_payment_email_cutover
-Revises: 636_comms_delivery_coverage
+Revision ID: 638_payment_email_cutover
+Revises: 637_comms_delivery_coverage
 """
 
 from collections.abc import Sequence
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "637_payment_email_cutover"
-down_revision: str | None = "636_comms_delivery_coverage"
+revision: str = "638_payment_email_cutover"
+down_revision: str | None = "637_comms_delivery_coverage"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

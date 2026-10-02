@@ -3,9 +3,9 @@
 Sub owns `public.machine_credentials` in revision `551_machine_credentials`.
 Kernel owns the ORM and machine authentication contract, but its Alembic
 lineage cannot be composed into Sub's public lineage because it also changes
-Sub-owned tables. Sub revision `638_machine_attribution` mirrors the
+Sub-owned tables. Sub revision `639_machine_attribution` mirrors the
 machine table portion of Kernel's published `0028_machine_attribution` revision
-after Sub revision `637_payment_email_cutover`. It adds nullable
+after Sub revision `638_payment_email_cutover`. It adds nullable
 `source_application`, `next_key_hash`, `rotation_started_at`, and `rotated_at`
 with the matching index, scoped uniqueness, and checks. It does not alter
 Sub's separate `audit_events` table or its local audit writer.

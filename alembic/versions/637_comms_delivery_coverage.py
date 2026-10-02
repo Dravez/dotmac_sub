@@ -1,7 +1,7 @@
 """Persist intent recipient decisions and shared physical delivery coverage.
 
-Revision ID: 636_comms_delivery_coverage
-Revises: 635_subscription_pause_lifecycle
+Revision ID: 637_comms_delivery_coverage
+Revises: 636_allow_name_identified_fiber_topology_features
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "636_comms_delivery_coverage"
-down_revision: str | None = "635_subscription_pause_lifecycle"
+revision: str = "637_comms_delivery_coverage"
+down_revision: str | None = "636_allow_name_identified_fiber_topology_features"
 branch_labels = None
 depends_on = None
 

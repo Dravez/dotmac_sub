@@ -264,7 +264,7 @@ insufficient for control evidence.
 The seal is stored on each reviewed global legacy row, independently of the
 tenant visibility of the cutover record. Activation locks the legacy table
 against concurrent alias insertion/rebinding until parity and both seals
-commit. Tenant foreign keys for the new evidence tables are installed by 637
+commit. Tenant foreign keys for the new evidence tables are installed by 638
 after the operator-tenant provider, following the existing domain_settings/523
 pattern; current ORM metadata must not introduce a dependency into Sub's older
 squashed base before that provider exists.
@@ -321,7 +321,7 @@ by this observation or by the dormant expansion.
 These are release gates, not authorization to infer a deployed cutover from an
 installed package or a source-only adoption test.
 
-Migration 637 supplies only this slice's named legacy runtime prerequisites:
+Migration 638 supplies only this slice's named legacy runtime prerequisites:
 `app_user` `SELECT, UPDATE` on the single-operator `notification_templates`
 routing catalog for reading, locking and sealing the reviewed identities,
 and `SELECT, INSERT` on `event_store` for causal replay checks and durable owner

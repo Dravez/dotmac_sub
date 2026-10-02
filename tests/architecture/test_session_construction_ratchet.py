@@ -100,7 +100,10 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +1 from tests/integration/machine_cli_probe.py: a standalone, explicitly
 #: marked disposable-cluster probe constructs its oracle engine before it
 #: launches a child process that uses the actual app.db.SessionLocal.
-TEST_FIXTURE_BASELINE_TOTAL = 160
+#: +3 from tests/integration/test_notification_template_seed_concurrency.py:
+#: one migrated PostgreSQL engine plus two independently committing sessions
+#: prove concurrent startup seeders safely converge on one template per key.
+TEST_FIXTURE_BASELINE_TOTAL = 163
 
 
 def _baseline() -> dict[str, int]:

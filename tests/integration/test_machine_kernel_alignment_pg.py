@@ -1,4 +1,4 @@
-"""Real migrated PostgreSQL proof for Sub 638 and installed Kernel a97."""
+"""Real migrated PostgreSQL proof for Sub 639 and installed Kernel a97."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _insert_credential(
         {
             "id": str(credential_id),
             "tenant_id": str(tenant_id),
-            "label": f"machine-638-{credential_id.hex}",
+            "label": f"machine-639-{credential_id.hex}",
             "key_hash": key_hash,
             "scopes": '["billing:invoice:read"]',
             "source_application": source_application,
@@ -77,7 +77,7 @@ def test_migrated_machine_schema_rls_authentication_and_constraints(
     with _rollback_connection(engine) as connection:
         assert connection.scalar(
             sa.text(
-                "SELECT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = '638_machine_attribution')"
+                "SELECT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = '639_machine_attribution')"
             )
         )
         columns = dict(
@@ -107,9 +107,9 @@ def test_migrated_machine_schema_rls_authentication_and_constraints(
             connection.execute(
                 sa.text(
                     "INSERT INTO public.tenants (id, slug, name, is_active) "
-                    "VALUES (:id, :slug, 'Machine 638 canary', true)"
+                    "VALUES (:id, :slug, 'Machine 639 canary', true)"
                 ),
-                {"id": str(tenant_id), "slug": f"machine-638-{tenant_id.hex}"},
+                {"id": str(tenant_id), "slug": f"machine-639-{tenant_id.hex}"},
             )
         first_id = _insert_credential(
             connection,
@@ -127,7 +127,7 @@ def test_migrated_machine_schema_rls_authentication_and_constraints(
             next_key_hash=shared_next_hash,
             rotation_started_at=now,
         )
-        # The pre-638 INSERT shape remains valid. No default invents a caller.
+        # The pre-639 INSERT shape remains valid. No default invents a caller.
         anonymous_id = uuid4()
         connection.execute(
             sa.text(
@@ -138,7 +138,7 @@ def test_migrated_machine_schema_rls_authentication_and_constraints(
             {
                 "id": str(anonymous_id),
                 "tenant_id": str(first_tenant),
-                "label": f"machine-638-{anonymous_id.hex}",
+                "label": f"machine-639-{anonymous_id.hex}",
                 "key_hash": anonymous_hash,
                 "scopes": '["billing:invoice:read"]',
             },
