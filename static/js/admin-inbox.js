@@ -349,11 +349,12 @@
       },
 
       desktopSidebarStyle() {
+        if (window.innerWidth < 1024) return "";
         return `--inbox-sidebar-width:${this.sidebarWidth}px;width:var(--inbox-sidebar-width)`;
       },
 
       startSidebarResize(event) {
-        if (window.innerWidth <= 639) return;
+        if (window.innerWidth < 1024) return;
         event.preventDefault();
         const handle = event.currentTarget;
         const pointerId = event.pointerId;
