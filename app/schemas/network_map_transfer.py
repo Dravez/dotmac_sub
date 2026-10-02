@@ -59,6 +59,16 @@ class NetworkMapImportMatchStatus(StrEnum):
     blocked = "blocked"
 
 
+class NetworkMapImportProposalEligibility(StrEnum):
+    eligible = "eligible"
+    matched = "matched"
+    blocked = "blocked"
+    unsupported_asset_type = "unsupported_asset_type"
+    non_point_geometry = "non_point_geometry"
+    source_id_required = "source_id_required"
+    source_id_too_long = "source_id_too_long"
+
+
 class NetworkMapImportAssetType(StrEnum):
     fiber_segment = "fiber_segment"
     fiber_access_point = "fiber_access_point"
@@ -123,6 +133,7 @@ class NetworkMapImportedFeature:
     display_name: str | None
     geometry: NetworkMapImportedGeometry
     match_status: NetworkMapImportMatchStatus
+    proposal_eligibility: NetworkMapImportProposalEligibility
     blocker_codes: tuple[str, ...]
     match_reasons: tuple[str, ...]
     candidate_asset_ids: tuple[str, ...]
@@ -146,6 +157,7 @@ class NetworkMapImportedFeature:
                 "geometry_type": self.geometry.geometry_type.value,
                 "suggested_asset_type": self.suggested_asset_type,
                 "match_status": self.match_status.value,
+                "proposal_eligibility": self.proposal_eligibility.value,
                 "blocker_codes": list(self.blocker_codes),
                 "resource_warnings": list(self.resource_warnings),
                 "match_reasons": list(self.match_reasons),
@@ -289,6 +301,7 @@ __all__ = [
     "NetworkMapImportedFeature",
     "NetworkMapImportedGeometry",
     "NetworkMapImportMatchStatus",
+    "NetworkMapImportProposalEligibility",
     "NetworkMapImportAssetType",
     "NetworkMapImportProfile",
     "NetworkMapImportStatus",

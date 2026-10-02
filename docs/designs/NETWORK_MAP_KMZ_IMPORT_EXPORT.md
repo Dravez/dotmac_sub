@@ -23,7 +23,9 @@ geometry, including geometry on unclassified and unsupported rows. Unsupported
 rows keep only the minimum evidence needed for review; customer/device IDs and
 private ExtendedData remain excluded. Canonical plant changes remain
 independently reviewed. Coordinate proximity never establishes identity or
-connectivity.
+connectivity. The transfer owner returns typed per-feature proposal eligibility
+for the existing point-asset review workflow; the browser presents that result
+and does not infer eligibility from geometry or match state.
 
 ## Import contract
 

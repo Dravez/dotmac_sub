@@ -33,6 +33,7 @@ from app.schemas.network_map_transfer import (
     NetworkMapImportedGeometry,
     NetworkMapImportMatchStatus,
     NetworkMapImportProfile,
+    NetworkMapImportProposalEligibility,
     NetworkMapImportStatus,
     NetworkMapKmzExportOutcome,
     NetworkMapKmzExportQuery,
@@ -80,6 +81,39 @@ XML.register_namespace("", _KML_NS)
 
 class NetworkMapTransferError(DomainError):
     """Stable transport-neutral refusal from the KMZ transfer owner."""
+
+
+def _proposal_eligibility(
+    plan: fiber_topology_staging.FiberFeatureMatchPlan,
+) -> NetworkMapImportProposalEligibility:
+    """Project import evidence into the existing point proposal workflow."""
+    feature = plan.feature
+    if plan.match_status == "blocked" or feature.blocker_codes:
+        return NetworkMapImportProposalEligibility.blocked
+    if plan.match_status != "new":
+        return NetworkMapImportProposalEligibility.matched
+    proposal_types = {
+        fiber_topology_staging.FiberAssetType.fiber_access_point,
+        fiber_topology_staging.FiberAssetType.fdh_cabinet,
+        fiber_topology_staging.FiberAssetType.splice_closure,
+        fiber_topology_staging.FiberAssetType.support_structure,
+    }
+    if feature.asset_type not in proposal_types:
+        return NetworkMapImportProposalEligibility.unsupported_asset_type
+    if feature.geometry_type != "Point":
+        return NetworkMapImportProposalEligibility.non_point_geometry
+    if (
+        feature.asset_type is fiber_topology_staging.FiberAssetType.support_structure
+        and feature.external_id is not None
+        and len(feature.external_id) > 80
+    ):
+        return NetworkMapImportProposalEligibility.source_id_too_long
+    if (
+        feature.asset_type is fiber_topology_staging.FiberAssetType.support_structure
+        and not feature.external_id
+    ):
+        return NetworkMapImportProposalEligibility.source_id_required
+    return NetworkMapImportProposalEligibility.eligible
 
 
 def _error(code: str, message: str, **details: object) -> NetworkMapTransferError:
@@ -199,6 +233,7 @@ def _imported_feature(
         display_name=feature.display_name,
         geometry=_imported_geometry(feature.geometry_geojson),
         match_status=NetworkMapImportMatchStatus(plan.match_status),
+        proposal_eligibility=_proposal_eligibility(plan),
         blocker_codes=feature.blocker_codes,
         match_reasons=plan.match_reasons,
         candidate_asset_ids=plan.candidate_asset_ids,

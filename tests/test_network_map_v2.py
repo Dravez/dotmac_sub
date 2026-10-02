@@ -144,12 +144,8 @@ def test_network_map_import_exposes_audited_classification_and_proposal_handoff(
     assert "network-map-import-save-classifications" in template
     assert "network-map-import-apply" in template
     assert "Classification review recorded" in transfer
-    assert "match_status === 'new'" in transfer
+    assert "proposal_eligibility === 'eligible'" in transfer
     assert "network/map-v2/proposals" in transfer
-    assert (
-        "['fiber_access_point', 'fdh_cabinet', 'splice_closure', 'support_structure']"
-        in transfer
-    )
     assert "POST" in route.methods
 
 

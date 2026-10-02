@@ -134,6 +134,15 @@
             changed_source_identity: 'This source identity differs from an earlier staged version.',
             unchanged_source_identity: 'This source feature matches an earlier staged version.'
         };
+        const proposalEligibilityHelp = {
+            eligible: 'Eligible to submit as a new point asset proposal for independent review.',
+            matched: 'A match or candidate exists. This import does not propose an automatic update.',
+            blocked: 'Resolve this feature’s blockers before submitting a proposal.',
+            unsupported_asset_type: 'The existing proposal workflow does not support this asset type; keep it staged for its owning workflow.',
+            non_point_geometry: 'The existing asset proposal workflow accepts point assets only; keep this geometry staged.',
+            source_id_required: 'A support structure proposal requires a stable source ID to use as its asset code.',
+            source_id_too_long: 'The source ID exceeds the proposal owner’s 80-character asset code limit.'
+        };
         const assetLabels = {
             fiber_segment: 'Fiber segment',
             fiber_access_point: 'Access point',
@@ -198,6 +207,13 @@
             state.className = 'mt-1 text-slate-500 dark:text-slate-400';
             state.textContent = `Row ${properties.row_number} · ${properties.match_status}` + (properties.suggested_asset_type ? ` · suggested ${assetLabels[properties.suggested_asset_type] || properties.suggested_asset_type}` : '');
             card.appendChild(state);
+            if (properties.proposal_eligibility) {
+                const eligibility = root.document.createElement('p');
+                eligibility.className = 'mt-1 text-slate-600 dark:text-slate-300';
+                eligibility.textContent = proposalEligibilityHelp[properties.proposal_eligibility]
+                    || 'Proposal eligibility requires review.';
+                card.appendChild(eligibility);
+            }
             if (properties.description) {
                 const description = root.document.createElement('p');
                 description.className = 'mt-1 whitespace-pre-wrap';
@@ -380,14 +396,10 @@
                 return;
             }
             const eligible = currentFeatures.filter(function (feature) {
-                const properties = feature.properties || {};
-                return properties.match_status === 'new'
-                    && !(properties.blocker_codes || []).length
-                    && feature.geometry?.type === 'Point'
-                    && ['fiber_access_point', 'fdh_cabinet', 'splice_closure', 'support_structure'].includes(properties.asset_type);
+                return feature.properties?.proposal_eligibility === 'eligible';
             });
             const matched = currentFeatures.filter(function (feature) {
-                return ['unchanged', 'exact_external', 'candidate', 'ambiguous'].includes(feature.properties?.match_status);
+                return feature.properties?.proposal_eligibility === 'matched';
             }).length;
             const reason = root.document.getElementById('network-map-import-reason')?.value?.trim() || '';
             if (reason.length < 3) {
@@ -414,13 +426,11 @@
                         splice_closure: 'splice_closure',
                         support_structure: 'support_structure'
                     }[properties.asset_type];
-                    const code = properties.external_id || null;
+                    const code = properties.external_id && properties.external_id.length <= 80
+                        ? properties.external_id
+                        : null;
                     if (properties.asset_type === 'support_structure' && !code) {
-                        failures.push(`${properties.name}: support structures need a source ID/code.`);
-                        continue;
-                    }
-                    if (code && code.length > 80) {
-                        failures.push(`${properties.name}: source ID exceeds the 80-character asset code limit.`);
+                        failures.push(`${properties.name}: ${properties.external_id ? 'source ID exceeds the asset code limit.' : 'support structures need a source ID/code.'}`);
                         continue;
                     }
                     const response = await root.fetch('/admin/network/map-v2/proposals', {

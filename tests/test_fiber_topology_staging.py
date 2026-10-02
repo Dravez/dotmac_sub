@@ -13,16 +13,24 @@ from app.models.fiber_topology_staging import (
     FiberTopologyStagedFeature,
 )
 from app.models.network import FdhCabinet, FiberAccessPoint
-from app.schemas.network_map_transfer import NetworkMapImportAssetType
+from app.schemas.network_map_transfer import (
+    NetworkMapImportAssetType,
+    NetworkMapImportProposalEligibility,
+)
 from app.services.network.fiber_topology_staging import (
     SOURCE_PROFILES,
     FiberAssetType,
+    FiberFeatureMatchPlan,
+    ParsedFiberFeature,
     preview_fiber_source,
     preview_uploaded_fiber_source,
     stage_fiber_preview_batch,
     stage_fiber_source,
 )
-from app.services.network_map_transfer import _imported_geometry
+from app.services.network_map_transfer import (
+    _imported_geometry,
+    _proposal_eligibility,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +49,97 @@ def test_import_review_asset_types_match_the_fiber_domain_vocabulary():
     assert {
         FiberAssetType(value.value) for value in NetworkMapImportAssetType
     } == supported
+
+
+def test_proposal_eligibility_is_projected_by_the_import_owner():
+    def plan(
+        *,
+        asset_type: FiberAssetType,
+        geometry_type: str,
+        match_status: str = "new",
+        external_id: str | None = "source-1",
+        blockers: tuple[str, ...] = (),
+    ) -> FiberFeatureMatchPlan:
+        feature = ParsedFiberFeature(
+            row_number=1,
+            asset_type=asset_type,
+            external_id=external_id,
+            display_name="Imported asset",
+            geometry_type=geometry_type,
+            geometry_geojson={"type": geometry_type, "coordinates": []},
+            source_properties={},
+            content_sha256="a" * 64,
+            geometry_sha256="b" * 64,
+            blocker_codes=blockers,
+        )
+        return FiberFeatureMatchPlan(
+            feature=feature,
+            match_status=match_status,
+            match_reasons=(),
+            candidate_asset_ids=(),
+            canonical_asset_type=None,
+            canonical_asset_id=None,
+            prior_feature_id=None,
+        )
+
+    assert (
+        _proposal_eligibility(
+            plan(asset_type=FiberAssetType.fdh_cabinet, geometry_type="Point")
+        )
+        is NetworkMapImportProposalEligibility.eligible
+    )
+    assert (
+        _proposal_eligibility(
+            plan(
+                asset_type=FiberAssetType.fdh_cabinet,
+                geometry_type="Point",
+                match_status="candidate",
+            )
+        )
+        is NetworkMapImportProposalEligibility.matched
+    )
+    assert (
+        _proposal_eligibility(
+            plan(asset_type=FiberAssetType.fiber_segment, geometry_type="LineString")
+        )
+        is NetworkMapImportProposalEligibility.unsupported_asset_type
+    )
+    assert (
+        _proposal_eligibility(
+            plan(asset_type=FiberAssetType.fdh_cabinet, geometry_type="Polygon")
+        )
+        is NetworkMapImportProposalEligibility.non_point_geometry
+    )
+    assert (
+        _proposal_eligibility(
+            plan(
+                asset_type=FiberAssetType.support_structure,
+                geometry_type="Point",
+                external_id=None,
+            )
+        )
+        is NetworkMapImportProposalEligibility.source_id_required
+    )
+    assert (
+        _proposal_eligibility(
+            plan(
+                asset_type=FiberAssetType.support_structure,
+                geometry_type="Point",
+                external_id="x" * 81,
+            )
+        )
+        is NetworkMapImportProposalEligibility.source_id_too_long
+    )
+    assert (
+        _proposal_eligibility(
+            plan(
+                asset_type=FiberAssetType.fdh_cabinet,
+                geometry_type="Point",
+                blockers=("invalid_coordinate",),
+            )
+        )
+        is NetworkMapImportProposalEligibility.blocked
+    )
 
 
 def _geometry_xml(geometry_type: str, coordinates: str) -> str:
