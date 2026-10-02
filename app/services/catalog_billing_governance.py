@@ -63,6 +63,7 @@ _PRICE_CRITICAL_FIELDS = frozenset(
         "offer_id",
         "offer_version_id",
         "price_type",
+        "tax_application",
         "unit",
     }
 )
