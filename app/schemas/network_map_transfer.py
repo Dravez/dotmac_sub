@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from pydantic import BaseModel, Field
+
 from app.models.audit import AuditActorType
 from app.models.network import FiberSegmentType
 from app.models.network_monitoring import DeviceType
@@ -17,6 +19,8 @@ from app.services.network_map_contracts import (
     NetworkMapSupportLifecycle,
 )
 from app.services.owner_commands import CommandContext
+
+MAX_REVIEW_FEATURES = 5_000
 
 
 class NetworkMapImportProfile(StrEnum):
@@ -55,6 +59,17 @@ class NetworkMapImportMatchStatus(StrEnum):
     blocked = "blocked"
 
 
+class NetworkMapImportAssetType(StrEnum):
+    fiber_segment = "fiber_segment"
+    fiber_access_point = "fiber_access_point"
+    fdh_cabinet = "fdh_cabinet"
+    splice_closure = "splice_closure"
+    service_building = "service_building"
+    support_structure = "support_structure"
+    unclassified = "unclassified"
+    unsupported = "unsupported"
+
+
 class NetworkMapGeometryType(StrEnum):
     point = "Point"
     line_string = "LineString"
@@ -75,16 +90,24 @@ class NetworkMapCoordinate:
 class NetworkMapImportedGeometry:
     geometry_type: NetworkMapGeometryType
     coordinates: tuple[NetworkMapCoordinate, ...]
+    rings: tuple[tuple[NetworkMapCoordinate, ...], ...] = ()
+    components: tuple[NetworkMapImportedGeometry, ...] = ()
 
     def to_transport(self) -> dict[str, object]:
         coordinates: object
         if self.geometry_type is NetworkMapGeometryType.geometry_collection:
-            return {"type": self.geometry_type.value, "geometries": []}
+            return {
+                "type": self.geometry_type.value,
+                "geometries": [
+                    component.to_transport() for component in self.components
+                ],
+            }
         if self.geometry_type is NetworkMapGeometryType.point:
             coordinates = self.coordinates[0].to_transport()
         elif self.geometry_type is NetworkMapGeometryType.polygon:
             coordinates = [
-                [coordinate.to_transport() for coordinate in self.coordinates]
+                [coordinate.to_transport() for coordinate in ring]
+                for ring in (self.rings or (self.coordinates,))
             ]
         else:
             coordinates = [coordinate.to_transport() for coordinate in self.coordinates]
@@ -93,8 +116,9 @@ class NetworkMapImportedGeometry:
 
 @dataclass(frozen=True, slots=True)
 class NetworkMapImportedFeature:
+    staged_feature_id: UUID
     row_number: int
-    asset_type: str
+    asset_type: NetworkMapImportAssetType
     external_id: str | None
     display_name: str | None
     geometry: NetworkMapImportedGeometry
@@ -102,18 +126,28 @@ class NetworkMapImportedFeature:
     blocker_codes: tuple[str, ...]
     match_reasons: tuple[str, ...]
     candidate_asset_ids: tuple[str, ...]
+    description: str | None = None
+    suggested_asset_type: NetworkMapImportAssetType | None = None
+    resource_warnings: tuple[str, ...] = ()
 
     def to_transport(self) -> dict[str, object]:
         return {
             "type": "Feature",
             "geometry": self.geometry.to_transport(),
             "properties": {
+                "staged_feature_id": str(self.staged_feature_id),
                 "row_number": self.row_number,
                 "asset_type": self.asset_type,
                 "external_id": self.external_id,
-                "name": self.display_name or self.external_id or "Imported feature",
+                "name": self.display_name
+                or self.external_id
+                or f"Placemark {self.row_number}",
+                "description": self.description,
+                "geometry_type": self.geometry.geometry_type.value,
+                "suggested_asset_type": self.suggested_asset_type,
                 "match_status": self.match_status.value,
                 "blocker_codes": list(self.blocker_codes),
+                "resource_warnings": list(self.resource_warnings),
                 "match_reasons": list(self.match_reasons),
                 "candidate_asset_ids": list(self.candidate_asset_ids),
                 "preview": True,
@@ -133,6 +167,35 @@ class StageNetworkMapKmzCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkMapImportFeatureClassification:
+    staged_feature_id: UUID
+    asset_type: NetworkMapImportAssetType
+
+
+class NetworkMapImportFeatureClassificationRequest(BaseModel):
+    staged_feature_id: UUID
+    asset_type: NetworkMapImportAssetType
+
+
+class ReviewNetworkMapImportFeaturesRequest(BaseModel):
+    command_key: UUID
+    reason: str = Field(min_length=1, max_length=500)
+    features: list[NetworkMapImportFeatureClassificationRequest] = Field(
+        min_length=1, max_length=MAX_REVIEW_FEATURES
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewNetworkMapImportFeaturesCommand:
+    context: CommandContext
+    batch_id: UUID
+    actor_id: UUID
+    actor_type: AuditActorType
+    actor_label: str
+    edits: tuple[NetworkMapImportFeatureClassification, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class NetworkMapKmzImportOutcome:
     batch_id: UUID
     created: bool
@@ -146,6 +209,7 @@ class NetworkMapKmzImportOutcome:
     candidate_count: int
     new_count: int
     unchanged_count: int
+    unclassified_count: int
     features: tuple[NetworkMapImportedFeature, ...]
     preview_truncated: bool
 
@@ -163,6 +227,8 @@ class NetworkMapKmzImportOutcome:
             "candidate_count": self.candidate_count,
             "new_count": self.new_count,
             "unchanged_count": self.unchanged_count,
+            "matched_count": self.candidate_count + self.unchanged_count,
+            "unclassified_count": self.unclassified_count,
             "features": [feature.to_transport() for feature in self.features],
             "preview_truncated": self.preview_truncated,
         }
@@ -214,6 +280,7 @@ class NetworkMapKmzExportOutcome:
 
 
 __all__ = [
+    "MAX_REVIEW_FEATURES",
     "NetworkMapBounds",
     "NetworkMapCoordinate",
     "NetworkMapExportLayer",
@@ -222,8 +289,13 @@ __all__ = [
     "NetworkMapImportedFeature",
     "NetworkMapImportedGeometry",
     "NetworkMapImportMatchStatus",
+    "NetworkMapImportAssetType",
     "NetworkMapImportProfile",
     "NetworkMapImportStatus",
+    "NetworkMapImportFeatureClassification",
+    "NetworkMapImportFeatureClassificationRequest",
+    "ReviewNetworkMapImportFeaturesCommand",
+    "ReviewNetworkMapImportFeaturesRequest",
     "NetworkMapKmzExportOutcome",
     "NetworkMapKmzExportQuery",
     "NetworkMapKmzImportOutcome",
