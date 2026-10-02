@@ -519,6 +519,15 @@ def test_funding_event_without_payment_id_remains_retryable(db_session, subscrib
     assert exc_info.value.code.endswith("event_payment_missing")
 
 
+def test_historical_debt_payment_event_does_not_run_current_renewal(db_session):
+    event = Event(
+        event_type=EventType.payment_received,
+        payload={"access_consequence": "historical_debt_settlement_only"},
+    )
+
+    PrepaidRenewalHandler().handle(db_session, event)
+
+
 def test_succeeded_payment_without_settlement_evidence_remains_retryable(
     db_session,
     subscriber,
