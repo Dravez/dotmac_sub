@@ -739,11 +739,11 @@ def _style_properties(
     warnings: list[str] = []
     if style is not None:
         for source_name, target_name in (
-            ("IconStyle/kml:color", "icon_color"),
-            ("IconStyle/kml:scale", "icon_scale"),
-            ("LineStyle/kml:color", "line_color"),
-            ("LineStyle/kml:width", "line_width"),
-            ("PolyStyle/kml:color", "polygon_color"),
+            ("kml:IconStyle/kml:color", "icon_color"),
+            ("kml:IconStyle/kml:scale", "icon_scale"),
+            ("kml:LineStyle/kml:color", "line_color"),
+            ("kml:LineStyle/kml:width", "line_width"),
+            ("kml:PolyStyle/kml:color", "polygon_color"),
         ):
             value = style.findtext(source_name, default="", namespaces=KML_NS).strip()
             if value:

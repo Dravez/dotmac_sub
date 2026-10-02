@@ -213,13 +213,13 @@ def test_preview_is_deterministic_and_flags_source_collisions(db_session, tmp_pa
         "cabinets.kmz",
         [
             _placemark(
-                name="Cabinet A",
+                name="Same cabinet",
                 properties={"fibermngrid": "CAB-1", "name": "Same cabinet"},
                 geometry_type="Polygon",
                 coordinates=_polygon(1),
             ),
             _placemark(
-                name="Cabinet B",
+                name="Same cabinet",
                 properties={"fibermngrid": "CAB-2", "name": "Same cabinet"},
                 geometry_type="Polygon",
                 coordinates=_polygon(1),
