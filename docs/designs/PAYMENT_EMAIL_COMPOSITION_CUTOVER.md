@@ -269,6 +269,21 @@ after the operator-tenant provider, following the existing domain_settings/523
 pattern; current ORM metadata must not introduce a dependency into Sub's older
 squashed base before that provider exists.
 
+Startup template seeding reads existing `(code, channel)` identities before
+attempting inserts. An existing sealed payment email therefore takes only the
+read and receipt-validation path: PostgreSQL runs its `BEFORE INSERT` seal
+trigger even for `ON CONFLICT DO NOTHING`. Missing defaults still use the
+unique constraint for concurrent seed arbitration. Activation and the one-way
+pause never reopen insertion of a payment email alias.
+
+Before switching the runtime DSN to `app_user`, prove that the complete startup
+template inventory already exists, or seed missing defaults through a separately
+authorized step before runtime starts. This slice grants only `SELECT, UPDATE`
+on `notification_templates`; the generic startup seeder still inserts genuinely
+missing defaults. The PostgreSQL canary pre-seeds those defaults and proves the
+sealed existing-row path, not readiness of a live staging inventory. A missing
+default must not be repaired by silently widening runtime grants.
+
 `POST /admin/notifications/payment-email-cutover/pause` requires the same staff,
 write and CSRF guards plus `PAUSE_PAYMENT_EMAIL_COMPOSITION`. It disables the
 causal producer and new pair collection in one owner-command transaction.

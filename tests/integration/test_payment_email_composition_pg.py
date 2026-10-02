@@ -1,6 +1,6 @@
 """Migrated PostgreSQL proof for payment email correlation, claims, and cutover.
 
-These tests use a clone at all composed heads, including host revision 637 and
+These tests use a clone at all composed heads, including host revision 638 and
 Template Studio's independent lineage. SQLite metadata and an elevated role
 cannot prove the row-lock or tenant-isolation contracts exercised here.
 """
@@ -84,7 +84,7 @@ def _assert_migrated_app_user_grants(payment_engine) -> None:
                 assert connection.scalar(
                     text("SELECT has_table_privilege('app_user', :table, :privilege)"),
                     {"table": f"public.{table}", "privilege": privilege},
-                ), f"revision 637 must grant app_user {privilege} on {table}"
+                ), f"revision 638 must grant app_user {privilege} on {table}"
         for privilege in ("INSERT", "DELETE"):
             assert not connection.scalar(
                 text(
@@ -118,35 +118,40 @@ def _seed_and_activate_payment_templates(payment_engine, app_user_engine):
         ReviewedPaymentEmailTemplates,
         adopt_payment_email_templates,
     )
+    from app.services.settings_seed import seed_notification_templates
 
     with Session(payment_engine) as db:
         _scope(db)
         provision_operator_tenant(db)
-        receipt = NotificationTemplate(
-            name="PG receipt",
-            code="payment_received",
-            channel=NotificationChannel.email,
-            subject="Receipt {receipt_number}",
-            body="Hello {subscriber_name}; receipt {receipt_number}: {receipt_url}",
-            conditions={},
+        # Startup before activation materializes every default. The same
+        # seeder must later read these identities without attempting INSERT.
+        seed_notification_templates(db)
+        receipt = db.scalars(
+            select(NotificationTemplate).where(
+                NotificationTemplate.code == "payment_received",
+                NotificationTemplate.channel == NotificationChannel.email,
+            )
+        ).one()
+        paid = db.scalars(
+            select(NotificationTemplate).where(
+                NotificationTemplate.code == "invoice_paid",
+                NotificationTemplate.channel == NotificationChannel.email,
+            )
+        ).one()
+        sms = db.scalars(
+            select(NotificationTemplate).where(
+                NotificationTemplate.code == "payment_received",
+                NotificationTemplate.channel == NotificationChannel.sms,
+            )
+        ).one()
+        receipt.name = "PG receipt"
+        receipt.subject = "Receipt {receipt_number}"
+        receipt.body = (
+            "Hello {subscriber_name}; receipt {receipt_number}: {receipt_url}"
         )
-        paid = NotificationTemplate(
-            name="PG invoice paid",
-            code="invoice_paid",
-            channel=NotificationChannel.email,
-            subject="Invoice {invoice_number} paid",
-            body="Hello {subscriber_name}; invoice {invoice_number} paid.",
-            conditions={},
-        )
-        sms = NotificationTemplate(
-            name="PG receipt SMS",
-            code="payment_received",
-            channel=NotificationChannel.sms,
-            subject="SMS",
-            body="SMS body",
-            conditions={},
-        )
-        db.add_all((receipt, paid, sms))
+        paid.name = "PG invoice paid"
+        paid.subject = "Invoice {invoice_number} paid"
+        paid.body = "Hello {subscriber_name}; invoice {invoice_number} paid."
         db.commit()
         reviewed = ReviewedPaymentEmailTemplates(receipt.id, paid.id)
         ids = receipt.id, paid.id, sms.id
@@ -174,7 +179,50 @@ def _seed_and_activate_payment_templates(payment_engine, app_user_engine):
         )
         assert not db.in_transaction()
         _assert_runtime_role(db)
+        before = _payment_template_snapshot(db, ids)
+        _seed_without_template_insert(db)
+        assert _payment_template_snapshot(db, ids) == before
     return ids
+
+
+def _payment_template_snapshot(db: Session, ids):
+    from app.models.notification import NotificationTemplate
+
+    return tuple(
+        db.execute(
+            select(
+                NotificationTemplate.id,
+                NotificationTemplate.code,
+                NotificationTemplate.channel,
+                NotificationTemplate.subject,
+                NotificationTemplate.body,
+                NotificationTemplate.is_active,
+                NotificationTemplate.studio_content_sealed,
+            )
+            .where(NotificationTemplate.id.in_(ids))
+            .order_by(NotificationTemplate.id)
+        ).all()
+    )
+
+
+def _seed_without_template_insert(db: Session) -> None:
+    from app.services.settings_seed import seed_notification_templates
+
+    attempts = []
+
+    def observe(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().lower().startswith("insert into") and (
+            "notification_templates" in statement.lower()
+        ):
+            attempts.append("notification_templates")
+
+    bind = db.get_bind()
+    sa_event.listen(bind, "before_cursor_execute", observe)
+    try:
+        seed_notification_templates(db)
+    finally:
+        sa_event.remove(bind, "before_cursor_execute", observe)
+    assert attempts == []
 
 
 def _prepared_sources(engine):
@@ -609,7 +657,9 @@ def test_pause_waits_for_inflight_gate_and_fences_the_next_gate(payment_engine):
     app_user_engine = _app_user_engine(payment_engine)
     factory = sessionmaker(bind=app_user_engine, expire_on_commit=False)
     try:
-        _seed_and_activate_payment_templates(payment_engine, app_user_engine)
+        template_ids = _seed_and_activate_payment_templates(
+            payment_engine, app_user_engine
+        )
         with factory() as db:
             _assert_runtime_role(db)
 
@@ -655,5 +705,22 @@ def test_pause_waits_for_inflight_gate_and_fences_the_next_gate(payment_engine):
         assert pause_finished.is_set()
         with factory() as db:
             assert composition_enabled(db) is False
+            before = _payment_template_snapshot(db, template_ids)
+            _seed_without_template_insert(db)
+            assert _payment_template_snapshot(db, template_ids) == before
+        with payment_engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                _assert_trigger_rejected(
+                    connection,
+                    "INSERT INTO notification_templates "
+                    "(id, name, code, channel, body, studio_content_sealed) "
+                    "VALUES (:id, 'alias', 'payment_received_email', "
+                    "'email', 'alias body', false)",
+                    {"id": uuid4()},
+                    "Activated payment email routing identity cannot be added or rebound",
+                )
+            finally:
+                transaction.rollback()
     finally:
         app_user_engine.dispose()
