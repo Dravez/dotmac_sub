@@ -17,6 +17,7 @@ from app.models.field_erp_sync import (
     SyncFlowOwner,
     SyncFlowOwnership,
 )
+from app.models.field_expense import FieldExpenseRequest
 from app.models.field_location import FieldTechPresence
 from app.models.subscriber import Subscriber, UserType
 from app.models.system_user import SystemUser
@@ -25,11 +26,14 @@ from app.schemas.field import FieldManagerTechniciansQuery
 from app.schemas.geocoding import ReverseGeocodeResult
 from app.services.auth_dependencies import require_user_auth
 from app.services.field import expense_categories as expense_categories_module
+from app.services.field.expense_recovery import ExpensePaymentDeliveryRecoveryPreview
 from app.services.field.expense_requests import (
     ApproveFieldExpenseRequest,
+    ExpenseApprovalLineInput,
     ExpenseCategoryRule,
     ExpenseRequestLineInput,
     ExpenseWorkOrderIdentity,
+    FieldExpenseRequestError,
     RejectFieldExpenseRequest,
     SubmitFieldExpenseRequest,
     approve_field_expense_request_command,
@@ -82,7 +86,15 @@ def _auth(user: SystemUser, roles: list[str] | None = None) -> dict:
     }
 
 
-def _approve_expense(db_session, *, request_id, reviewer_id):
+def _approve_expense(
+    db_session,
+    *,
+    request_id,
+    reviewer_id,
+    lines=(),
+    adjustment_reason=None,
+    expected_revision=None,
+):
     command_id = uuid4()
     db_session.commit()
     return approve_field_expense_request_command(
@@ -98,6 +110,9 @@ def _approve_expense(db_session, *, request_id, reviewer_id):
             ),
             expense_request_id=request_id,
             reviewer_system_user_id=reviewer_id,
+            lines=tuple(lines),
+            adjustment_reason=adjustment_reason,
+            expected_revision=expected_revision,
         ),
     )
 
@@ -174,6 +189,7 @@ def _presence(db_session, profile: TechnicianProfile, **overrides) -> FieldTechP
 
 def _expense(db_session, tech_user, profile, work_order, status="submitted") -> dict:
     assert status == "submitted"
+    _enable_expense_flow(db_session)
     request_id = uuid4()
     tech_user_id = tech_user.id
     requester_person_id = profile.person_id
@@ -374,6 +390,7 @@ def test_manager_assign_validation(db_session):
 
 
 def test_manager_expense_approve_and_reject(db_session):
+    manager = _user(db_session, "ExpenseManager")
     tech_user = _user(db_session, "Tech")
     profile = _profile(db_session, tech_user, crm_person_id="crm-exp-tech")
     subscriber = _subscriber(db_session)
@@ -386,6 +403,16 @@ def test_manager_expense_approve_and_reject(db_session):
     )
     first = _expense(db_session, tech_user, profile, work_order)
     second = _expense(db_session, tech_user, profile, work_order)
+    legacy_first = db_session.get(FieldExpenseRequest, first["id"])
+    assert legacy_first is not None
+    legacy_first.requested_by_system_user_id = None
+    legacy_second = db_session.get(FieldExpenseRequest, second["id"])
+    assert legacy_second is not None
+    legacy_person_id = uuid4()
+    profile.person_id = legacy_person_id
+    legacy_second.requested_by_person_id = legacy_person_id
+    legacy_second.requested_by_system_user_id = None
+    legacy_second.requested_by_technician_id = None
     _enable_expense_flow(db_session)
     db_session.commit()
 
@@ -394,16 +421,21 @@ def test_manager_expense_approve_and_reject(db_session):
         str(first["id"]),
         str(second["id"]),
     }
+    assert {
+        item["requested_by_name"]
+        for item in pending
+        if item["id"] in {first["id"], second["id"]}
+    } == {"Tech Staff"}
 
     approved = _approve_expense(
-        db_session, request_id=first["id"], reviewer_id=tech_user.id
+        db_session, request_id=first["id"], reviewer_id=manager.id
     )
     assert approved.status == "approved"
     assert approved.approved_at is not None
     assert approved.erp_sync_status.value == "pending"
 
     rejection_id = uuid4()
-    reviewer_id = tech_user.id
+    reviewer_id = manager.id
     second_id = second["id"]
     db_session.commit()
     rejected_outcome = reject_field_expense_request_command(
@@ -426,7 +458,7 @@ def test_manager_expense_approve_and_reject(db_session):
     assert rejected_outcome.rejection_reason == "No receipt provided"
 
     re_approved = _approve_expense(
-        db_session, request_id=first["id"], reviewer_id=tech_user.id
+        db_session, request_id=first["id"], reviewer_id=manager.id
     )
     assert re_approved.status == "approved"
     assert re_approved.erp_sync_event_id == approved.erp_sync_event_id
@@ -437,6 +469,182 @@ def test_manager_expense_approve_and_reject(db_session):
     }
     assert str(first["id"]) not in still_pending
     assert str(second["id"]) not in still_pending
+
+
+def test_manager_can_approve_expense_as_submitted_without_reason(db_session):
+    manager = _user(db_session, "PlainApprovalManager")
+    tech_user = _user(db_session, "PlainApprovalTech")
+    profile = _profile(db_session, tech_user, crm_person_id="plain-approval-tech")
+    work_order = _work_order(
+        db_session,
+        _subscriber(db_session),
+        crm_work_order_id="wo-plain-approval",
+        status="in_progress",
+        assigned_to_crm_person_id="plain-approval-tech",
+    )
+    created = _expense(db_session, tech_user, profile, work_order)
+
+    outcome = _approve_expense(
+        db_session,
+        request_id=created["id"],
+        reviewer_id=manager.id,
+    )
+
+    request = db_session.get(FieldExpenseRequest, created["id"])
+    assert request is not None
+    assert request.items[0].amount == Decimal("2500.00")
+    assert request.items[0].approved_amount == Decimal("2500.00")
+    assert request.approval_adjustment_reason is None
+    assert outcome.amounts_adjusted is False
+    assert outcome.approved_total_amount == Decimal("2500.00")
+
+
+def test_manager_can_adjust_amount_and_approve_with_reason(db_session):
+    manager = _user(db_session, "AdjustedApprovalManager")
+    tech_user = _user(db_session, "AdjustedApprovalTech")
+    profile = _profile(db_session, tech_user, crm_person_id="adjusted-approval-tech")
+    work_order = _work_order(
+        db_session,
+        _subscriber(db_session),
+        crm_work_order_id="wo-adjusted-approval",
+        status="in_progress",
+        assigned_to_crm_person_id="adjusted-approval-tech",
+    )
+    created = _expense(db_session, tech_user, profile, work_order)
+    request = db_session.get(FieldExpenseRequest, created["id"])
+    assert request is not None
+    item_id = request.items[0].id
+
+    outcome = _approve_expense(
+        db_session,
+        request_id=request.id,
+        reviewer_id=manager.id,
+        lines=(
+            ExpenseApprovalLineInput(
+                expense_item_id=item_id,
+                approved_amount=Decimal("2000.00"),
+            ),
+        ),
+        adjustment_reason="Approved transport rate",
+        expected_revision=1,
+    )
+
+    persisted = db_session.get(FieldExpenseRequest, request.id)
+    assert persisted is not None
+    assert persisted.items[0].amount == Decimal("2500.00")
+    assert persisted.items[0].approved_amount == Decimal("2000.00")
+    assert persisted.approval_adjustment_reason == "Approved transport rate"
+    assert outcome.requested_total_amount == Decimal("2500.00")
+    assert outcome.approved_total_amount == Decimal("2000.00")
+    assert outcome.amounts_adjusted is True
+    assert outcome.revision == 2
+
+
+def test_adjusted_approval_requires_reason_and_rolls_back(db_session):
+    manager = _user(db_session, "MissingReasonManager")
+    tech_user = _user(db_session, "MissingReasonTech")
+    profile = _profile(db_session, tech_user, crm_person_id="missing-reason-tech")
+    work_order = _work_order(
+        db_session,
+        _subscriber(db_session),
+        crm_work_order_id="wo-missing-reason",
+        status="in_progress",
+        assigned_to_crm_person_id="missing-reason-tech",
+    )
+    created = _expense(db_session, tech_user, profile, work_order)
+    request = db_session.get(FieldExpenseRequest, created["id"])
+    assert request is not None
+    item_id = request.items[0].id
+
+    with pytest.raises(FieldExpenseRequestError) as raised:
+        _approve_expense(
+            db_session,
+            request_id=request.id,
+            reviewer_id=manager.id,
+            lines=(
+                ExpenseApprovalLineInput(
+                    expense_item_id=item_id,
+                    approved_amount=Decimal("2000.00"),
+                ),
+            ),
+        )
+
+    assert raised.value.code.endswith("adjustment_reason_required")
+    persisted = db_session.get(FieldExpenseRequest, request.id)
+    assert persisted is not None
+    assert persisted.status == "submitted"
+    assert persisted.items[0].approved_amount is None
+
+
+def test_adjusted_approval_rejects_stale_revision_before_mutation(db_session):
+    manager = _user(db_session, "StaleApprovalManager")
+    tech_user = _user(db_session, "StaleApprovalTech")
+    profile = _profile(db_session, tech_user, crm_person_id="stale-approval-tech")
+    work_order = _work_order(
+        db_session,
+        _subscriber(db_session),
+        crm_work_order_id="wo-stale-approval",
+        status="in_progress",
+        assigned_to_crm_person_id="stale-approval-tech",
+    )
+    created = _expense(db_session, tech_user, profile, work_order)
+
+    with pytest.raises(FieldExpenseRequestError) as raised:
+        _approve_expense(
+            db_session,
+            request_id=created["id"],
+            reviewer_id=manager.id,
+            expected_revision=2,
+        )
+
+    assert raised.value.code.endswith("stale_approval")
+    persisted = db_session.get(FieldExpenseRequest, created["id"])
+    assert persisted is not None
+    assert persisted.status == "submitted"
+    assert persisted.items[0].approved_amount is None
+
+
+def test_adjusted_approval_requires_each_line_exactly_once(db_session):
+    manager = _user(db_session, "LineSetApprovalManager")
+    tech_user = _user(db_session, "LineSetApprovalTech")
+    profile = _profile(db_session, tech_user, crm_person_id="line-set-approval-tech")
+    work_order = _work_order(
+        db_session,
+        _subscriber(db_session),
+        crm_work_order_id="wo-line-set-approval",
+        status="in_progress",
+        assigned_to_crm_person_id="line-set-approval-tech",
+    )
+    created = _expense(db_session, tech_user, profile, work_order)
+    request = db_session.get(FieldExpenseRequest, created["id"])
+    assert request is not None
+    item_id = request.items[0].id
+    duplicate_lines = (
+        ExpenseApprovalLineInput(
+            expense_item_id=item_id,
+            approved_amount=Decimal("2000.00"),
+        ),
+        ExpenseApprovalLineInput(
+            expense_item_id=item_id,
+            approved_amount=Decimal("1900.00"),
+        ),
+    )
+
+    with pytest.raises(FieldExpenseRequestError) as raised:
+        _approve_expense(
+            db_session,
+            request_id=request.id,
+            reviewer_id=manager.id,
+            lines=duplicate_lines,
+            adjustment_reason="Approved transport rate",
+            expected_revision=1,
+        )
+
+    assert raised.value.code.endswith("approval_lines_mismatch")
+    persisted = db_session.get(FieldExpenseRequest, request.id)
+    assert persisted is not None
+    assert persisted.status == "submitted"
+    assert persisted.items[0].approved_amount is None
 
 
 def test_manager_api(db_session):
@@ -557,7 +765,10 @@ def test_manager_api(db_session):
 
     expenses = client.get("/api/v1/field/manager/expenses")
     assert expenses.status_code == 200
-    assert str(expense["id"]) in [entry["id"] for entry in expenses.json()["items"]]
+    manager_expense = next(
+        entry for entry in expenses.json()["items"] if entry["id"] == str(expense["id"])
+    )
+    assert manager_expense["requested_by_name"] == "Tech Staff"
 
     approved = client.post(f"/api/v1/field/manager/expenses/{expense['id']}/approve")
     assert approved.status_code == 200
@@ -590,3 +801,43 @@ def test_manager_api_forbidden_without_permissions(db_session):
 
     response = client.get("/api/v1/field/manager/me")
     assert response.status_code == 403
+
+
+def test_payment_recovery_preview_requires_exact_pay_scope(db_session):
+    user = _user(db_session, "Recovery")
+    db_session.commit()
+    event_id = uuid4()
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[require_user_auth] = lambda: {
+        **_auth(user, roles=[]),
+        "scopes": ["operations:expense_request:write"],
+    }
+    client = TestClient(app)
+
+    denied = client.get(
+        f"/api/v1/field/manager/expenses/payment-deliveries/{event_id}/recovery-preview"
+    )
+    assert denied.status_code == 403
+
+    app.dependency_overrides[require_user_auth] = lambda: {
+        **_auth(user, roles=[]),
+        "scopes": ["operations:expense_request:pay"],
+    }
+    with patch(
+        "app.api.field.manager.preview_expense_payment_delivery_recovery",
+        return_value=ExpensePaymentDeliveryRecoveryPreview(
+            dead_event_id=event_id,
+            expense_request_id=uuid4(),
+            idempotency_key="exp-payment-recovery-test",
+            fingerprint="a" * 64,
+            erp_claim_status="approved",
+        ),
+    ):
+        allowed = client.get(
+            "/api/v1/field/manager/expenses/payment-deliveries/"
+            f"{event_id}/recovery-preview"
+        )
+    assert allowed.status_code == 200

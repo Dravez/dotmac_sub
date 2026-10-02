@@ -28,6 +28,7 @@ from app.models.billing import (
     LedgerEntry,
     LedgerEntryType,
     LedgerSource,
+    PaymentAllocation,
     TaxApplication,
     TaxRate,
 )
@@ -81,11 +82,47 @@ logger = logging.getLogger(__name__)
 _VOID_IDEMPOTENCY_SCOPE = "invoice_void"
 _WRITE_OFF_IDEMPOTENCY_SCOPE = "invoice_write_off"
 _RECONCILIATION_IDEMPOTENCY_SCOPE = "invoice_closure_reconciliation"
+_HISTORICAL_TAX_CORRECTION_METADATA_KEY = "historical_invoice_tax_correction"
+_EXISTING_TAX_REPLACEMENT_METADATA_KEY = "existing_invoice_tax_replacement"
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,120}$")
 
 
 class InvoiceOwnerError(DomainError):
     """Transport-neutral failure from an invoice-owner participant."""
+
+
+def build_transient_classification_invoice_shell(
+    *,
+    account_id: UUID,
+    currency: str,
+    balance_due: Decimal,
+) -> Invoice:
+    """Build an in-memory-only ``Invoice`` shell for funding classification.
+
+    The invoice owner (this module) is the only approved constructor of
+    ``Invoice``/``InvoiceLine`` (``test_only_the_invoice_owner_constructs_invoice_documents_and_lines``
+    in ``tests/architecture/test_financial_ownership.py``). A caller that
+    needs to classify funding for an amount that has not been invoiced yet
+    — e.g. deciding which settlement branch a due prepaid renewal will take
+    BEFORE creating the document that branch settles — still needs that
+    ownership boundary respected, so it asks the owner for a shell rather
+    than constructing one itself.
+
+    The returned ``Invoice`` is NEVER added to a session, flushed, or
+    committed by this function or by any caller of it; it exists only so
+    read-only funding-math helpers (``AccountCreditApplications
+    .preview_invoice_funding``, opening-funding preview) that only ever read
+    ``account_id``/``currency``/``balance_due`` off the invoice they're given
+    can be reused without a persisted document. Callers must not add it to
+    a session — doing so would silently insert a phantom draft.
+    """
+
+    return Invoice(
+        account_id=account_id,
+        currency=currency,
+        balance_due=round_money(balance_due),
+        status=InvoiceStatus.draft,
+    )
 
 
 def _apply_available_account_credit(db: Session, invoice: Invoice) -> None:
@@ -171,6 +208,188 @@ class InvoiceIssuanceInput:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalInvoiceTaxCorrectionDocumentEvidence:
+    """Typed documentary link from a replacement invoice to its correction."""
+
+    account_id: UUID
+    source_invoice_id: UUID
+    source_invoice_line_id: UUID
+    source_invoice_closure_id: UUID
+    source_payment_allocation_id: UUID
+    void_evidence_invoice_id: UUID
+    subscription_invoice_id: UUID
+    payment_id: UUID
+    tax_rate_id: UUID
+    subscription_payment_allocation_id: UUID
+    replacement_payment_allocation_id: UUID
+    source_subtotal: Decimal
+    subscription_total: Decimal
+    tax_amount: Decimal
+    replacement_total: Decimal
+    currency: str
+    preview_fingerprint: str
+    command_id: UUID
+    reason: str
+
+    def __post_init__(self) -> None:
+        money = (
+            self.source_subtotal,
+            self.subscription_total,
+            self.tax_amount,
+            self.replacement_total,
+        )
+        if any(round_money(value) <= Decimal("0.00") for value in money):
+            raise ValueError("correction evidence amounts must be positive")
+        if round_money(self.source_subtotal + self.tax_amount) != round_money(
+            self.replacement_total
+        ):
+            raise ValueError("replacement total must equal source subtotal plus tax")
+        if (
+            self.currency != self.currency.strip().upper()
+            or len(self.currency) != 3
+            or not self.currency.isalpha()
+        ):
+            raise ValueError("correction evidence currency must be normalized")
+        if len(self.preview_fingerprint) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.preview_fingerprint
+        ):
+            raise ValueError("correction evidence fingerprint must be SHA-256 hex")
+        if not self.reason.strip() or len(self.reason) > 500:
+            raise ValueError("correction evidence reason is invalid")
+
+    def as_metadata(self) -> dict[str, object]:
+        return {
+            "account_id": str(self.account_id),
+            "source_invoice_id": str(self.source_invoice_id),
+            "source_invoice_line_id": str(self.source_invoice_line_id),
+            "source_invoice_closure_id": str(self.source_invoice_closure_id),
+            "source_payment_allocation_id": str(self.source_payment_allocation_id),
+            "void_evidence_invoice_id": str(self.void_evidence_invoice_id),
+            "subscription_invoice_id": str(self.subscription_invoice_id),
+            "payment_id": str(self.payment_id),
+            "tax_rate_id": str(self.tax_rate_id),
+            "subscription_payment_allocation_id": str(
+                self.subscription_payment_allocation_id
+            ),
+            "replacement_payment_allocation_id": str(
+                self.replacement_payment_allocation_id
+            ),
+            "source_subtotal": str(round_money(self.source_subtotal)),
+            "subscription_total": str(round_money(self.subscription_total)),
+            "tax_amount": str(round_money(self.tax_amount)),
+            "replacement_total": str(round_money(self.replacement_total)),
+            "currency": self.currency,
+            "preview_fingerprint": self.preview_fingerprint,
+            "command_id": str(self.command_id),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingInvoiceTaxReplacementEvidence:
+    """Typed lineage for reusing a reviewed VAT-inclusive invoice draft."""
+
+    account_id: UUID
+    source_invoice_id: UUID
+    source_invoice_line_id: UUID
+    source_invoice_closure_id: UUID
+    source_payment_allocation_id: UUID
+    replacement_payment_allocation_id: UUID
+    payment_id: UUID
+    tax_rate_id: UUID
+    subtotal: Decimal
+    tax_amount: Decimal
+    replacement_total: Decimal
+    remaining_credit: Decimal
+    currency: str
+    preview_fingerprint: str
+    command_id: UUID
+    ticket_reference: str
+    approver_name: str
+    recorded_at: datetime
+    reason: str
+    opening_position_id: UUID | None = None
+    opening_correction_id: UUID | None = None
+    opening_correction_posting_group_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            round_money(self.subtotal) <= Decimal("0.00")
+            or round_money(self.tax_amount) <= Decimal("0.00")
+            or round_money(self.replacement_total) <= Decimal("0.00")
+            or round_money(self.remaining_credit) < Decimal("0.00")
+            or round_money(self.subtotal + self.tax_amount)
+            != round_money(self.replacement_total)
+        ):
+            raise ValueError("invoice-tax replacement amounts are inconsistent")
+        if (
+            self.currency != self.currency.strip().upper()
+            or len(self.currency) != 3
+            or not self.currency.isalpha()
+        ):
+            raise ValueError("invoice-tax replacement currency is invalid")
+        if len(self.preview_fingerprint) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.preview_fingerprint
+        ):
+            raise ValueError("invoice-tax replacement fingerprint is invalid")
+        if not self.ticket_reference.strip() or not self.approver_name.strip():
+            raise ValueError("invoice-tax replacement approval evidence is required")
+        if not self.reason.strip() or len(self.reason) > 500:
+            raise ValueError("invoice-tax replacement reason is invalid")
+        opening_evidence = (
+            self.opening_position_id,
+            self.opening_correction_id,
+            self.opening_correction_posting_group_id,
+        )
+        if any(value is None for value in opening_evidence) and any(
+            value is not None for value in opening_evidence
+        ):
+            raise ValueError("invoice-tax replacement opening evidence is incomplete")
+
+    def as_metadata(self) -> dict[str, object]:
+        return {
+            "account_id": str(self.account_id),
+            "source_invoice_id": str(self.source_invoice_id),
+            "source_invoice_line_id": str(self.source_invoice_line_id),
+            "source_invoice_closure_id": str(self.source_invoice_closure_id),
+            "source_payment_allocation_id": str(self.source_payment_allocation_id),
+            "replacement_payment_allocation_id": str(
+                self.replacement_payment_allocation_id
+            ),
+            "payment_id": str(self.payment_id),
+            "tax_rate_id": str(self.tax_rate_id),
+            "subtotal": str(round_money(self.subtotal)),
+            "tax_amount": str(round_money(self.tax_amount)),
+            "replacement_total": str(round_money(self.replacement_total)),
+            "remaining_credit": str(round_money(self.remaining_credit)),
+            "currency": self.currency,
+            "preview_fingerprint": self.preview_fingerprint,
+            "command_id": str(self.command_id),
+            "ticket_reference": self.ticket_reference.strip(),
+            "approver_name": self.approver_name.strip(),
+            "recorded_at": self.recorded_at.isoformat(),
+            "reason": self.reason.strip(),
+            "opening_position_id": (
+                str(self.opening_position_id)
+                if self.opening_position_id is not None
+                else None
+            ),
+            "opening_correction_id": (
+                str(self.opening_correction_id)
+                if self.opening_correction_id is not None
+                else None
+            ),
+            "opening_correction_posting_group_id": (
+                str(self.opening_correction_posting_group_id)
+                if self.opening_correction_posting_group_id is not None
+                else None
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProformaConversionInput:
     """Locked documentary values for one proforma-to-invoice transition."""
 
@@ -192,6 +411,39 @@ class PrepaidProformaDocumentAdoption:
     billing_period_end: datetime
     line_description: str
     adoption_evidence_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPrepaidDraftDocumentAdoption:
+    """Exact historical identity approved for an existing prepaid draft."""
+
+    invoice_id: UUID
+    line_id: UUID
+    subscription_id: UUID
+    billing_period_start: datetime
+    billing_period_end: datetime
+    expected_line_quantity: Decimal
+    expected_line_unit_price: Decimal
+    expected_line_amount: Decimal
+    line_description: str
+    adoption_evidence_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPrepaidInvoiceSequenceDocument:
+    """Exact identity for one document in a reviewed historical sequence."""
+
+    invoice_id: UUID
+    line_id: UUID
+    subscription_id: UUID
+    billing_period_start: datetime
+    billing_period_end: datetime
+    expected_status: InvoiceStatus
+    expected_line_quantity: Decimal
+    expected_line_unit_price: Decimal
+    expected_line_amount: Decimal
+    line_description: str
+    evidence_ref: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,6 +1193,19 @@ class Invoices(ListResponseMixin):
         return _build_closure_preview(db, invoice, InvoiceClosureType.void)
 
     @staticmethod
+    def preview_void_for_owner(db: Session, invoice_id: UUID) -> InvoiceClosurePreview:
+        """Return a transport-neutral void preview to a composing owner."""
+
+        try:
+            return Invoices.preview_void(db, str(invoice_id))
+        except HTTPException as exc:
+            raise InvoiceOwnerError(
+                code="financial.invoice.void_preview_rejected",
+                message="Invoice owner rejected the composed void preview.",
+                details={"invoice_id": str(invoice_id), "reason": str(exc.detail)},
+            ) from exc
+
+    @staticmethod
     def preview_write_off(db: Session, invoice_id: str) -> InvoiceClosurePreview:
         invoice = get_by_id(db, Invoice, invoice_id)
         if not invoice:
@@ -1175,6 +1440,8 @@ class Invoices(ListResponseMixin):
                 preview=preview,
             )
         except IntegrityError as exc:
+            if not commit:
+                raise
             db.rollback()
             replay = Invoices._closure_replay(
                 db,
@@ -1189,7 +1456,8 @@ class Invoices(ListResponseMixin):
                 status_code=409, detail="Invoice already has terminal closure evidence"
             ) from exc
         except Exception:
-            db.rollback()
+            if commit:
+                db.rollback()
             raise
 
     @staticmethod
@@ -1213,6 +1481,38 @@ class Invoices(ListResponseMixin):
             stage_audit=stage_audit,
             reconcile_access=reconcile_access,
         )
+
+    @staticmethod
+    def confirm_void_for_owner(
+        db: Session,
+        invoice_id: UUID,
+        *,
+        preview_fingerprint: str,
+        idempotency_key: str,
+        reason: str,
+        reconcile_access: bool = False,
+    ) -> InvoiceClosureResult:
+        """Stage a reviewed void inside a wider registered owner transaction."""
+
+        try:
+            return Invoices.confirm_void(
+                db,
+                str(invoice_id),
+                InvoiceClosureConfirm(
+                    preview_fingerprint=preview_fingerprint,
+                    idempotency_key=idempotency_key,
+                    memo=reason,
+                ),
+                origin=InvoiceClosureOrigin.system,
+                commit=False,
+                reconcile_access=reconcile_access,
+            )
+        except HTTPException as exc:
+            raise InvoiceOwnerError(
+                code="financial.invoice.void_rejected",
+                message="Invoice owner rejected the composed void transition.",
+                details={"invoice_id": str(invoice_id), "reason": str(exc.detail)},
+            ) from exc
 
     @staticmethod
     def confirm_write_off(
@@ -1711,7 +2011,7 @@ class Invoices(ListResponseMixin):
                     reason=reason,
                 ),
                 announce=False,
-                apply_available_credit=False,
+                apply_available_credit=True,
                 commit=False,
             )
         AuditEvents.stage(
@@ -1729,7 +2029,8 @@ class Invoices(ListResponseMixin):
                 },
             ),
         )
-        _apply_available_account_credit(db, invoice)
+        if target_status != InvoiceStatus.issued:
+            _apply_available_account_credit(db, invoice)
         return invoice
 
     @staticmethod
@@ -1749,6 +2050,21 @@ class Invoices(ListResponseMixin):
                 message="Invoice owner rejected system document construction.",
                 details={"reason": str(exc.detail)},
             ) from exc
+
+    @staticmethod
+    def recalculate_totals_for_owner(db: Session, invoice_id: UUID) -> Invoice:
+        """Rebuild one staged invoice summary inside its owner's transaction."""
+
+        invoice = lock_for_update(db, Invoice, invoice_id)
+        if invoice is None:
+            raise InvoiceOwnerError(
+                code="financial.invoice.invoice_not_found",
+                message="Invoice was not found.",
+                details={"invoice_id": str(invoice_id)},
+            )
+        _recalculate_invoice_totals(db, invoice)
+        db.flush()
+        return invoice
 
     @staticmethod
     def issue_draft_system(
@@ -1771,6 +2087,10 @@ class Invoices(ListResponseMixin):
         untouched.
         """
         _validate_issuance_input(issuance)
+        observed_invoice = db.get(Invoice, coerce_uuid(invoice_id))
+        if observed_invoice is None:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        lock_account(db, str(observed_invoice.account_id))
         invoice = lock_for_update(db, Invoice, invoice_id)
         if invoice is None:
             raise HTTPException(status_code=404, detail="Invoice not found")
@@ -1798,6 +2118,16 @@ class Invoices(ListResponseMixin):
                 status_code=409,
                 detail="Convert the proforma before issuing an invoice",
             )
+        issuance_funding = None
+        if apply_available_credit:
+            from app.services.billing.account_credit import AccountCreditApplications
+
+            # Reserve against the draft position. Once this document becomes an
+            # issued receivable, its own debit must not make the same funding look
+            # unavailable before the paired allocation is written.
+            issuance_funding = (
+                AccountCreditApplications.preview_invoice_issuance_funding(db, invoice)
+            )
         invoice.status = InvoiceStatus.issued
         invoice.issued_at = issuance.issued_at
         invoice.due_at = issuance.due_at
@@ -1821,6 +2151,14 @@ class Invoices(ListResponseMixin):
                     "due_date_policy_version": issuance.due_date_policy_version,
                     "ledger_transaction_id": None,
                     "service_access_consequence": "none",
+                    "issuance_funding_fingerprint": (
+                        issuance_funding.fingerprint if issuance_funding else None
+                    ),
+                    "issuance_funding_reserved": (
+                        str(issuance_funding.reserved_amount)
+                        if issuance_funding
+                        else "0.00"
+                    ),
                 },
             ),
         )
@@ -1843,10 +2181,19 @@ class Invoices(ListResponseMixin):
                 account_id=invoice.account_id,
                 invoice_id=invoice.id,
             )
-        if apply_available_credit and require_full_available_credit:
-            _apply_available_account_credit_when_fully_funded(db, invoice)
-        elif apply_available_credit:
-            _apply_available_account_credit(db, invoice)
+        if (
+            issuance_funding is not None
+            and issuance_funding.reserved_amount > Decimal("0.00")
+            and (not require_full_available_credit or issuance_funding.fully_funded)
+        ):
+            # Persist the draft -> issued transition before the funding owner
+            # refreshes the locked invoice for its guarded application.
+            db.flush()
+            AccountCreditApplications.apply_invoice_issuance_funding(
+                db,
+                invoice,
+                reservation=issuance_funding,
+            )
         if commit:
             db.commit()
             db.refresh(invoice)
@@ -1997,6 +2344,173 @@ class Invoices(ListResponseMixin):
         return invoice
 
     @staticmethod
+    def adopt_reviewed_prepaid_draft_document_for_owner(
+        db: Session,
+        adoption: ReviewedPrepaidDraftDocumentAdoption,
+    ) -> Invoice:
+        """Apply fingerprint-reviewed identity to one periodless draft.
+
+        This participant deliberately does not decide whether a payment,
+        subscription, service period, or approval is acceptable. The prepaid
+        reconciliation owner proves and locks that chain before calling it.
+        It only performs the documentary mutation and remains flush-only.
+        """
+
+        invoice = lock_for_update(db, Invoice, str(adoption.invoice_id))
+        if (
+            invoice is None
+            or not invoice.is_active
+            or invoice.status is not InvoiceStatus.draft
+            or invoice.billing_period_start is not None
+            or invoice.billing_period_end is not None
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Invoice is not a pristine active periodless draft.",
+                details={"invoice_id": str(adoption.invoice_id)},
+            )
+        if adoption.billing_period_end <= adoption.billing_period_start:
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Reviewed billing period must be positive.",
+                details={"invoice_id": str(adoption.invoice_id)},
+            )
+        line = db.scalar(
+            select(InvoiceLine)
+            .where(
+                InvoiceLine.id == adoption.line_id,
+                InvoiceLine.invoice_id == invoice.id,
+                InvoiceLine.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if (
+            line is None
+            or line.subscription_id is not None
+            or line.quantity != adoption.expected_line_quantity
+            or line.unit_price != adoption.expected_line_unit_price
+            or line.amount != adoption.expected_line_amount
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_draft_adoption_rejected",
+                message="Reviewed draft line identity changed after preview.",
+                details={
+                    "invoice_id": str(adoption.invoice_id),
+                    "line_id": str(adoption.line_id),
+                },
+            )
+
+        invoice.is_proforma = False
+        invoice.billing_period_start = adoption.billing_period_start
+        invoice.billing_period_end = adoption.billing_period_end
+        line.subscription_id = adoption.subscription_id
+        line.description = adoption.line_description
+        line_metadata = dict(line.metadata_ or {})
+        line_metadata.update(
+            {
+                "kind": "base_subscription",
+                "billing_period_start": adoption.billing_period_start.isoformat(),
+                "billing_period_end": adoption.billing_period_end.isoformat(),
+                "reviewed_prepaid_draft_adoption_ref": (adoption.adoption_evidence_ref),
+            }
+        )
+        line.metadata_ = line_metadata
+        db.flush()
+        return invoice
+
+    @staticmethod
+    def adopt_reviewed_prepaid_sequence_document_for_owner(
+        db: Session,
+        document: ReviewedPrepaidInvoiceSequenceDocument,
+    ) -> Invoice:
+        """Adopt or verify one open document selected by a sequence owner.
+
+        This is documentary only and flush-only. It accepts an already-correct
+        first document as well as a periodless draft/issued/overdue document,
+        but never changes money, lifecycle state, or a conflicting identity.
+        """
+
+        invoice = lock_for_update(db, Invoice, str(document.invoice_id))
+        eligible_statuses = {
+            InvoiceStatus.draft,
+            InvoiceStatus.issued,
+            InvoiceStatus.partially_paid,
+            InvoiceStatus.overdue,
+        }
+        if (
+            invoice is None
+            or not invoice.is_active
+            or invoice.is_proforma
+            or invoice.status is not document.expected_status
+            or invoice.status not in eligible_statuses
+            or document.billing_period_end <= document.billing_period_start
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_sequence_adoption_rejected",
+                message="Invoice is not an eligible reviewed sequence document.",
+                details={"invoice_id": str(document.invoice_id)},
+            )
+        line = db.scalar(
+            select(InvoiceLine)
+            .where(
+                InvoiceLine.id == document.line_id,
+                InvoiceLine.invoice_id == invoice.id,
+                InvoiceLine.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        exact_existing_identity = (
+            _evidence_utc(invoice.billing_period_start)
+            == _evidence_utc(document.billing_period_start)
+            and _evidence_utc(invoice.billing_period_end)
+            == _evidence_utc(document.billing_period_end)
+            and line is not None
+            and line.subscription_id == document.subscription_id
+        )
+        missing_identity = (
+            invoice.billing_period_start is None
+            and invoice.billing_period_end is None
+            and line is not None
+            and line.subscription_id is None
+        )
+        if (
+            line is None
+            or (not exact_existing_identity and not missing_identity)
+            or round_money(to_decimal(line.quantity))
+            != round_money(document.expected_line_quantity)
+            or round_money(to_decimal(line.unit_price))
+            != round_money(document.expected_line_unit_price)
+            or round_money(to_decimal(line.amount))
+            != round_money(document.expected_line_amount)
+            or not document.evidence_ref.strip()
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.reviewed_sequence_adoption_rejected",
+                message="Reviewed sequence document identity changed after preview.",
+                details={
+                    "invoice_id": str(document.invoice_id),
+                    "line_id": str(document.line_id),
+                },
+            )
+        if missing_identity:
+            invoice.billing_period_start = document.billing_period_start
+            invoice.billing_period_end = document.billing_period_end
+            line.subscription_id = document.subscription_id
+        line.description = document.line_description
+        line_metadata = dict(line.metadata_ or {})
+        line_metadata.update(
+            {
+                "kind": "base_subscription",
+                "billing_period_start": document.billing_period_start.isoformat(),
+                "billing_period_end": document.billing_period_end.isoformat(),
+                "reviewed_prepaid_sequence_ref": document.evidence_ref,
+            }
+        )
+        line.metadata_ = line_metadata
+        db.flush()
+        return invoice
+
+    @staticmethod
     def repair_paid_prepaid_document_for_owner(
         db: Session,
         repair: PaidPrepaidInvoiceDocumentRepair,
@@ -2091,6 +2605,226 @@ class Invoices(ListResponseMixin):
                 code="financial.invoice.issue_rejected",
                 message="Invoice owner rejected the issue transition.",
                 details={"reason": str(exc.detail)},
+            ) from exc
+
+    @staticmethod
+    def stage_historical_tax_correction_evidence_for_owner(
+        db: Session,
+        invoice_id: UUID,
+        *,
+        evidence: HistoricalInvoiceTaxCorrectionDocumentEvidence,
+    ) -> Invoice:
+        """Persist exact correction lineage on the paid replacement document."""
+
+        invoice = lock_for_update(db, Invoice, invoice_id)
+        if (
+            invoice is None
+            or not invoice.is_active
+            or invoice.is_proforma
+            or invoice.status is not InvoiceStatus.paid
+            or invoice.account_id != evidence.account_id
+            or round_money(invoice.balance_due) != Decimal("0.00")
+            or round_money(invoice.subtotal) != round_money(evidence.source_subtotal)
+            or round_money(invoice.tax_total) != round_money(evidence.tax_amount)
+            or round_money(invoice.total) != round_money(evidence.replacement_total)
+            or invoice.currency.upper() != evidence.currency.upper()
+            or invoice.id
+            in {
+                evidence.source_invoice_id,
+                evidence.void_evidence_invoice_id,
+                evidence.subscription_invoice_id,
+            }
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.tax_correction_evidence_rejected",
+                message="Replacement invoice no longer matches correction evidence.",
+                details={"invoice_id": str(invoice_id)},
+            )
+        payload = evidence.as_metadata()
+        metadata = dict(invoice.metadata_ or {})
+        existing = metadata.get(_HISTORICAL_TAX_CORRECTION_METADATA_KEY)
+        if existing is not None and existing != payload:
+            raise InvoiceOwnerError(
+                code="financial.invoice.tax_correction_evidence_conflict",
+                message="Replacement invoice carries different correction evidence.",
+                details={"invoice_id": str(invoice_id)},
+            )
+        metadata[_HISTORICAL_TAX_CORRECTION_METADATA_KEY] = payload
+        invoice.metadata_ = metadata
+        db.flush()
+        return invoice
+
+    @staticmethod
+    def historical_tax_correction_evidence(
+        invoice: Invoice,
+    ) -> HistoricalInvoiceTaxCorrectionDocumentEvidence | None:
+        """Read and validate typed correction lineage from an invoice document."""
+
+        raw = dict(invoice.metadata_ or {}).get(_HISTORICAL_TAX_CORRECTION_METADATA_KEY)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise InvoiceOwnerError(
+                code="financial.invoice.tax_correction_evidence_invalid",
+                message="Replacement invoice correction evidence is malformed.",
+                details={"invoice_id": str(invoice.id)},
+            )
+        try:
+            return HistoricalInvoiceTaxCorrectionDocumentEvidence(
+                account_id=UUID(str(raw["account_id"])),
+                source_invoice_id=UUID(str(raw["source_invoice_id"])),
+                source_invoice_line_id=UUID(str(raw["source_invoice_line_id"])),
+                source_invoice_closure_id=UUID(str(raw["source_invoice_closure_id"])),
+                source_payment_allocation_id=UUID(
+                    str(raw["source_payment_allocation_id"])
+                ),
+                void_evidence_invoice_id=UUID(str(raw["void_evidence_invoice_id"])),
+                subscription_invoice_id=UUID(str(raw["subscription_invoice_id"])),
+                payment_id=UUID(str(raw["payment_id"])),
+                tax_rate_id=UUID(str(raw["tax_rate_id"])),
+                subscription_payment_allocation_id=UUID(
+                    str(raw["subscription_payment_allocation_id"])
+                ),
+                replacement_payment_allocation_id=UUID(
+                    str(raw["replacement_payment_allocation_id"])
+                ),
+                source_subtotal=Decimal(str(raw["source_subtotal"])),
+                subscription_total=Decimal(str(raw["subscription_total"])),
+                tax_amount=Decimal(str(raw["tax_amount"])),
+                replacement_total=Decimal(str(raw["replacement_total"])),
+                currency=str(raw["currency"]),
+                preview_fingerprint=str(raw["preview_fingerprint"]),
+                command_id=UUID(str(raw["command_id"])),
+                reason=str(raw["reason"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvoiceOwnerError(
+                code="financial.invoice.tax_correction_evidence_invalid",
+                message="Replacement invoice correction evidence is malformed.",
+                details={"invoice_id": str(invoice.id)},
+            ) from exc
+
+    @staticmethod
+    def stage_existing_tax_replacement_evidence_for_owner(
+        db: Session,
+        invoice_id: UUID,
+        *,
+        evidence: ExistingInvoiceTaxReplacementEvidence,
+    ) -> Invoice:
+        """Persist typed lineage for a paid, reused corrective invoice."""
+
+        invoice = lock_for_update(db, Invoice, invoice_id)
+        source = lock_for_update(db, Invoice, evidence.source_invoice_id)
+        allocation = lock_for_update(
+            db, PaymentAllocation, evidence.replacement_payment_allocation_id
+        )
+        closure = lock_for_update(
+            db, InvoiceClosure, evidence.source_invoice_closure_id
+        )
+        if (
+            invoice is None
+            or source is None
+            or allocation is None
+            or closure is None
+            or not invoice.is_active
+            or invoice.is_proforma
+            or invoice.status is not InvoiceStatus.paid
+            or invoice.account_id != evidence.account_id
+            or round_money(invoice.balance_due) != Decimal("0.00")
+            or round_money(invoice.subtotal) != round_money(evidence.subtotal)
+            or round_money(invoice.tax_total) != round_money(evidence.tax_amount)
+            or round_money(invoice.total) != round_money(evidence.replacement_total)
+            or invoice.currency.upper() != evidence.currency
+            or invoice.id == source.id
+            or source.status is not InvoiceStatus.void
+            or source.account_id != evidence.account_id
+            or closure.invoice_id != source.id
+            or closure.closure_type is not InvoiceClosureType.void
+            or allocation.invoice_id != invoice.id
+            or allocation.payment_id != evidence.payment_id
+            or not allocation.is_active
+            or round_money(allocation.amount) != round_money(evidence.replacement_total)
+        ):
+            raise InvoiceOwnerError(
+                code="financial.invoice.existing_tax_replacement_evidence_rejected",
+                message="Reused replacement no longer matches its reviewed evidence.",
+                details={"invoice_id": str(invoice_id)},
+            )
+        metadata = dict(invoice.metadata_ or {})
+        payload = evidence.as_metadata()
+        existing = metadata.get(_EXISTING_TAX_REPLACEMENT_METADATA_KEY)
+        if existing is not None and existing != payload:
+            raise InvoiceOwnerError(
+                code="financial.invoice.existing_tax_replacement_evidence_conflict",
+                message="Replacement invoice carries different correction evidence.",
+                details={"invoice_id": str(invoice_id)},
+            )
+        metadata[_EXISTING_TAX_REPLACEMENT_METADATA_KEY] = payload
+        invoice.metadata_ = metadata
+        db.flush()
+        return invoice
+
+    @staticmethod
+    def existing_tax_replacement_evidence(
+        invoice: Invoice,
+    ) -> ExistingInvoiceTaxReplacementEvidence | None:
+        """Read and validate typed lineage from a reused corrective invoice."""
+
+        raw = dict(invoice.metadata_ or {}).get(_EXISTING_TAX_REPLACEMENT_METADATA_KEY)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise InvoiceOwnerError(
+                code="financial.invoice.existing_tax_replacement_evidence_invalid",
+                message="Reused invoice correction evidence is malformed.",
+                details={"invoice_id": str(invoice.id)},
+            )
+        try:
+            return ExistingInvoiceTaxReplacementEvidence(
+                account_id=UUID(str(raw["account_id"])),
+                source_invoice_id=UUID(str(raw["source_invoice_id"])),
+                source_invoice_line_id=UUID(str(raw["source_invoice_line_id"])),
+                source_invoice_closure_id=UUID(str(raw["source_invoice_closure_id"])),
+                source_payment_allocation_id=UUID(
+                    str(raw["source_payment_allocation_id"])
+                ),
+                replacement_payment_allocation_id=UUID(
+                    str(raw["replacement_payment_allocation_id"])
+                ),
+                payment_id=UUID(str(raw["payment_id"])),
+                tax_rate_id=UUID(str(raw["tax_rate_id"])),
+                subtotal=Decimal(str(raw["subtotal"])),
+                tax_amount=Decimal(str(raw["tax_amount"])),
+                replacement_total=Decimal(str(raw["replacement_total"])),
+                remaining_credit=Decimal(str(raw["remaining_credit"])),
+                currency=str(raw["currency"]),
+                preview_fingerprint=str(raw["preview_fingerprint"]),
+                command_id=UUID(str(raw["command_id"])),
+                ticket_reference=str(raw["ticket_reference"]),
+                approver_name=str(raw["approver_name"]),
+                recorded_at=datetime.fromisoformat(str(raw["recorded_at"])),
+                reason=str(raw["reason"]),
+                opening_position_id=(
+                    UUID(str(raw["opening_position_id"]))
+                    if raw.get("opening_position_id") is not None
+                    else None
+                ),
+                opening_correction_id=(
+                    UUID(str(raw["opening_correction_id"]))
+                    if raw.get("opening_correction_id") is not None
+                    else None
+                ),
+                opening_correction_posting_group_id=(
+                    UUID(str(raw["opening_correction_posting_group_id"]))
+                    if raw.get("opening_correction_posting_group_id") is not None
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvoiceOwnerError(
+                code="financial.invoice.existing_tax_replacement_evidence_invalid",
+                message="Reused invoice correction evidence is malformed.",
+                details={"invoice_id": str(invoice.id)},
             ) from exc
 
     @staticmethod
@@ -2690,6 +3424,8 @@ class Invoices(ListResponseMixin):
         offset: int,
         *,
         updated_since: datetime | None = None,
+        after_updated_at: datetime | None = None,
+        after_id: UUID | None = None,
     ):
         """Return the ordered ERP invoice delta without detail-only relations."""
         query = db.query(Invoice).options(
@@ -2714,13 +3450,56 @@ class Invoices(ListResponseMixin):
             updated_since=updated_since,
             limit=limit,
             offset=offset,
+            after_updated_at=after_updated_at,
+            after_id=after_id,
         ).all()
 
     @classmethod
-    def sync_list_response(cls, db: Session, **kwargs):
-        limit = kwargs["limit"]
-        offset = kwargs["offset"]
-        items = cls.list_for_sync(db, **kwargs)
+    def sync_list_response(
+        cls,
+        db: Session,
+        *,
+        account_id: str | None = None,
+        status: str | None = None,
+        is_active: bool | None = None,
+        updated_since: datetime | None = None,
+        limit: int,
+        offset: int,
+        after_updated_at: datetime | None = None,
+        after_id: UUID | None = None,
+    ):
+        """Legacy accounting-sync page — typed-boundary deviation, documented.
+
+        This service (and ``list_for_sync`` below) predates this repo's typed
+        cross-component-boundary rule and still accepts transport-layer
+        ``str``/``bool`` primitives and returns a ``dict[str, Any]`` envelope,
+        unlike the v2 feed's ``InvoiceAccountingSyncQuery``/``ListResponse``.
+        This change only threads the two new optional keyset-cursor params
+        through the existing shape; it does not migrate it, because the
+        future ProductPort/Integrator work this cursor exists for targets the
+        v2 typed feed exclusively (see
+        ``docs/designs/ERP_INVOICE_ACCOUNTING_SYNC_V2.md``) — the legacy feed
+        stays as the pull job's existing backstop. A full typed migration of
+        this legacy boundary is tracked separately, not part of this slice.
+
+        A partial ``after_updated_at``/``after_id`` pair raises a plain
+        ``ValueError`` from ``apply_sync_page`` (not an HTTP-mapped error) if
+        called directly rather than through the API layer — the sole current
+        caller, ``app.api.billing.sync_invoices``, already validates the pair
+        and returns 422 before reaching here. Any new direct caller of this
+        service must perform the same validation itself.
+        """
+        items = cls.list_for_sync(
+            db,
+            account_id,
+            status,
+            is_active,
+            limit,
+            offset,
+            updated_since=updated_since,
+            after_updated_at=after_updated_at,
+            after_id=after_id,
+        )
         return sync_page_response(items, limit=limit, offset=offset)
 
     @staticmethod
@@ -3043,6 +3822,7 @@ class InvoiceLines(ListResponseMixin):
                 line.is_active = False
         db.flush()
         _recalculate_invoice_totals(db, invoice)
+        invoice.updated_at = datetime.now(UTC)
 
     @staticmethod
     def stage_system_line(

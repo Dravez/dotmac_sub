@@ -18,6 +18,7 @@ from app.models.catalog import RegionZone
 from app.models.organization import Organization, OrganizationAccountType
 from app.models.party import (
     Party,
+    PartyContactPoint,
     PartyContactPointType,
     PartyIdentityStatus,
     PartyRelationshipType,
@@ -36,7 +37,12 @@ from app.models.sales import (
 from app.models.service_team import ServiceTeamMember
 from app.models.subscriber import Reseller
 from app.models.system_user import SystemUser
-from app.services import conversation_lead_relationships
+from app.models.team_inbox import InboxConversation, InboxParticipantRelationship
+from app.services import (
+    conversation_lead_relationships,
+    team_inbox_contact_links,
+    team_inbox_participants,
+)
 from app.services import party as party_service
 from app.services.audit_adapter import stage_audit_event
 from app.services.credential_crypto import encrypt_credential
@@ -64,6 +70,13 @@ _EDIT_LEAD = OwnerCommandDefinition(
     owner="sales.lead_authoring",
     concern="atomic admin Person and Lead maintenance",
     name="edit_lead",
+)
+from app.services.operator_tenant import OPERATOR_TENANT_ID
+
+_AUTOMATION_LEAD_STATUS = OwnerCommandDefinition(
+    owner="sales.lead_authoring",
+    concern="atomic admin Lead maintenance",
+    name="set_lead_status_from_automation",
 )
 _EMAIL = TypeAdapter(EmailStr)
 _NIN = re.compile(r"^[0-9]{11}$")
@@ -154,6 +167,13 @@ class EditLeadCommand:
     notes: str | None
     is_active: bool
     person: LeadPersonDraft
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationLeadStatusCommand:
+    context: CommandContext
+    lead_id: UUID
+    status: LeadStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,6 +622,89 @@ def _inbox_lead_source(channel_type: str) -> str:
     }.get(channel_type, "Website")
 
 
+def _bind_inbox_origin_identity(
+    db: Session,
+    *,
+    conversation: InboxConversation,
+    party: Party,
+) -> None:
+    """Bind the exact inbound endpoint inside the Lead authoring transaction."""
+
+    identity = team_inbox_contact_links.observed_inbound_identity(db, conversation)
+    channel_map = {
+        "email": PartyContactPointType.email,
+        "whatsapp": PartyContactPointType.whatsapp,
+        "facebook_messenger": PartyContactPointType.facebook_messenger,
+        "instagram_dm": PartyContactPointType.instagram_dm,
+    }
+    channel = channel_map.get(identity.channel_type)
+    if channel is None:
+        raise _error(
+            "inbox_identity_channel_unsupported",
+            "This Inbox channel cannot establish the required Lead identity.",
+        )
+    social = identity.channel_type in {"facebook_messenger", "instagram_dm"}
+    if social and not (
+        identity.provider
+        and identity.provider_account_id
+        and identity.external_subject_id
+    ):
+        raise _error(
+            "inbox_identity_scope_incomplete",
+            "The provider-scoped inbound identity is incomplete.",
+        )
+    statement = select(PartyContactPoint).where(
+        PartyContactPoint.party_id == party.id,
+        PartyContactPoint.channel_type == channel.value,
+        PartyContactPoint.is_active.is_(True),
+    )
+    if social:
+        statement = statement.where(
+            PartyContactPoint.provider == identity.provider,
+            PartyContactPoint.provider_account_id == identity.provider_account_id,
+            PartyContactPoint.external_subject_id == identity.external_subject_id,
+        )
+    else:
+        statement = statement.where(
+            PartyContactPoint.normalized_value == identity.normalized_endpoint
+        )
+    point = db.scalar(statement.order_by(PartyContactPoint.created_at).limit(1))
+    if point is None:
+        point = party_service.add_contact_point(
+            db,
+            party_id=party.id,
+            channel_type=channel,
+            normalized_value=identity.normalized_endpoint,
+            display_value=identity.normalized_endpoint,
+            scope_key=(
+                f"{identity.provider}:{identity.provider_account_id}"
+                if social
+                else "default"
+            ),
+            provider=identity.provider if social else None,
+            provider_account_id=identity.provider_account_id if social else None,
+            external_subject_id=identity.external_subject_id if social else None,
+            metadata={
+                "captured_by": "sales.lead_authoring",
+                "origin_conversation_id": str(conversation.id),
+                "identity_provenance": "observed_inbound_endpoint",
+            },
+        )
+    team_inbox_participants.bind_endpoint_to_contact_point(
+        db,
+        team_inbox_participants.BindEndpointContactPointCommand(
+            conversation_id=conversation.id,
+            channel_type=identity.channel_type,
+            normalized_endpoint=identity.normalized_endpoint,
+            provider_account_scope=identity.provider_account_scope,
+            party_contact_point_id=point.id,
+            relationship_type=InboxParticipantRelationship.contact,
+            source="sales.lead_authoring",
+            reason="Operator created this Party and Lead from the exact inbound endpoint",
+        ),
+    )
+
+
 def _operation(db: Session, command: AuthorLeadCommand) -> AuthorLeadOutcome:
     actor = _active_actor(db, command.actor_system_user_id)
     fingerprint = _fingerprint(command)
@@ -620,6 +723,18 @@ def _operation(db: Session, command: AuthorLeadCommand) -> AuthorLeadOutcome:
                 "replay_party_missing", "The saved Lead is missing its Person."
             )
         if command.origin_conversation_id is not None:
+            conversation = db.get(InboxConversation, command.origin_conversation_id)
+            party = db.get(Party, replay.party_id)
+            if conversation is None or party is None:
+                raise _error(
+                    "inbox_identity_replay_unavailable",
+                    "The Inbox Lead identity cannot be restored on replay.",
+                )
+            _bind_inbox_origin_identity(
+                db,
+                conversation=conversation,
+                party=party,
+            )
             conversation_lead_relationships.link_conversation_lead_participant(
                 db,
                 conversation_lead_relationships.ConversationLeadLinkCommand(
@@ -747,6 +862,13 @@ def _operation(db: Session, command: AuthorLeadCommand) -> AuthorLeadOutcome:
             metadata={"organization_profile_id": str(organization.id)},
         )
 
+    if conversation is not None:
+        _bind_inbox_origin_identity(
+            db,
+            conversation=conversation,
+            party=party,
+        )
+
     source = (
         _inbox_lead_source(conversation.channel_type)
         if conversation is not None
@@ -825,6 +947,7 @@ def _operation(db: Session, command: AuthorLeadCommand) -> AuthorLeadOutcome:
         db,
         EventType.lead_created,
         {
+            "tenant_id": str(OPERATOR_TENANT_ID),
             "lead_id": str(lead.id),
             "party_id": str(party.id),
             "status": lead.status,
@@ -1056,6 +1179,7 @@ def _edit_operation(db: Session, command: EditLeadCommand) -> EditLeadOutcome:
         db,
         EventType.lead_updated,
         {
+            "tenant_id": str(OPERATOR_TENANT_ID),
             "lead_id": str(updated.id),
             "party_id": str(party_id),
             "status": updated.status,
@@ -1105,4 +1229,78 @@ def edit_lead(db: Session, command: EditLeadCommand) -> EditLeadOutcome:
         definition=_EDIT_LEAD,
         context=command.context,
         operation=lambda: _edit_operation(db, command),
+    )
+
+
+def set_lead_status_from_automation(
+    db: Session, command: AutomationLeadStatusCommand
+) -> UUID:
+    """Change a Lead status through the existing Lead authoring owner."""
+
+    def operation() -> UUID:
+        lead = db.scalar(
+            select(Lead).where(Lead.id == command.lead_id).with_for_update()
+        )
+        if lead is None:
+            raise _error("lead_not_found", "Lead not found.")
+        metadata = lead.metadata_ if isinstance(lead.metadata_, dict) else {}
+        region_zone_id = None
+        if metadata.get("region_zone_id"):
+            try:
+                region_zone_id = UUID(str(metadata["region_zone_id"]))
+            except ValueError as exc:
+                raise _error("metadata_invalid", "Lead metadata is invalid.") from exc
+        sales_service.stage_lead_maintenance(
+            db,
+            sales_service.LeadMaintenanceUpdate(
+                lead_id=lead.id,
+                title=lead.title or "Lead",
+                status=command.status,
+                owner_agent_id=lead.owner_agent_id,
+                pipeline_id=lead.pipeline_id,
+                stage_id=lead.stage_id,
+                lead_source=lead.lead_source,
+                region=lead.region,
+                estimated_value=lead.estimated_value,
+                currency=lead.currency,
+                address=lead.address,
+                probability=lead.probability,
+                expected_close_date=lead.expected_close_date,
+                lost_reason=lead.lost_reason,
+                notes=lead.notes,
+                is_active=lead.is_active,
+                reseller_id=lead.reseller_id,
+                organization_id=(
+                    UUID(str(metadata["organization_id"]))
+                    if metadata.get("organization_id")
+                    else None
+                ),
+                region_zone_id=region_zone_id,
+                reseller_routed=bool(
+                    metadata.get("communication_routed_through_reseller", False)
+                ),
+                edit_key=command.context.command_id,
+                edit_fingerprint=hashlib.sha256(
+                    f"automation:{lead.id}:{command.status.value}".encode()
+                ).hexdigest(),
+            ),
+        )
+        emit_event(
+            db,
+            EventType.lead_updated,
+            {
+                "tenant_id": str(OPERATOR_TENANT_ID),
+                "lead_id": str(lead.id),
+                "status": lead.status,
+            },
+            actor=command.context.actor,
+        )
+        db.flush()
+        return lead.id
+
+    return execute_owner_command(
+        db,
+        definition=_AUTOMATION_LEAD_STATUS,
+        context=command.context,
+        operation=operation,
     )

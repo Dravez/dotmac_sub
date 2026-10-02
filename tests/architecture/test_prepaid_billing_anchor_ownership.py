@@ -16,6 +16,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from app.services.sot_manifest import OwnerRole, contract_validation_errors
+from app.services.sot_relationships import all_services, service_relationship
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PAYMENTS = PROJECT_ROOT / "app" / "services" / "billing" / "payments.py"
 CANONICAL_WRITER = PROJECT_ROOT / "app" / "services" / "account_lifecycle.py"
@@ -239,6 +242,7 @@ def test_the_owner_defines_the_single_anchor_projection() -> None:
     names = _module_function_names(OWNER)
     assert "project_prepaid_billing_anchor_for_invoice" in names
     assert "retract_prepaid_billing_anchors_after_funding_reversal" in names
+    assert "project_reviewed_invoice_supersession_anchor_for_owner" in names
     # Advancement and retraction both flow through the one projection.
     assert _assigns_next_billing_at(OWNER) == set()
     assert "stage_subscription_billing_anchor(" in OWNER.read_text(encoding="utf-8")
@@ -277,3 +281,46 @@ def test_the_renewal_handler_covers_funding_reversals() -> None:
     source = HANDLER.read_text(encoding="utf-8")
     assert "payment_refunded" in source
     assert "payment_reversed" in source
+
+
+def test_legacy_tax_invoice_correction_stays_in_the_prepaid_owner() -> None:
+    source = OWNER.read_text(encoding="utf-8")
+    operator = (
+        PROJECT_ROOT / "scripts" / "billing" / "billing_target_shadow.py"
+    ).read_text(encoding="utf-8")
+
+    assert "class LegacyRenewalTaxInvoiceCorrectionQuery:" in source
+    assert "class CorrectLegacyRenewalTaxInvoiceCommand:" in source
+    assert "def preview_legacy_prepaid_renewal_tax_invoice_correction(" in source
+    assert "def correct_legacy_prepaid_renewal_tax_invoice(" in source
+    assert "definition=_LEGACY_TAX_CORRECTION_COMMAND" in source
+    assert "stage_account_adjustment_reversal_for_renewal_owner(" in source
+    assert "Invoices.stage_system_invoice_for_owner(" in source
+    assert "prepaid_service_renewal_document_corrected" in source
+    assert "preview-legacy-renewal-tax-invoice-correction" in operator
+    assert "correct-legacy-renewal-tax-invoice" in operator
+
+
+def test_unused_renewal_correction_has_registered_owner_contract() -> None:
+    service = service_relationship("financial.prepaid_service_renewals")
+    assert service.contract is not None
+    assert not contract_validation_errors(
+        service,
+        service_names={item.name for item in all_services()},
+    )
+    concern = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed unused prepaid renewal correction"
+    )
+
+    assert concern.role is OwnerRole.RECONCILER
+    assert concern.canonical_writer == service.name
+    assert concern.name in service.owns
+
+    source = OWNER.read_text(encoding="utf-8")
+    assert (
+        '_UNUSED_RENEWAL_CORRECTION_CONCERN = "reviewed unused prepaid renewal correction"'
+        in source
+    )
+    assert "definition=_UNUSED_RENEWAL_CORRECTION_COMMAND" in source

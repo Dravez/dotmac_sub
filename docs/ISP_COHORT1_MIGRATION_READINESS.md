@@ -23,7 +23,7 @@ decision), `docs/ISP_COHORT1_SOURCE_OWNERSHIP.md` (who writes what today).
 | Source | `asm-dotmac-sub-legacy` — source-authoritative |
 | Target | `asm-dotmac-isp` — candidate, independent database, no deployment owner |
 | Entity types | 12 |
-| Production writers | 27 (7 declared owners, 2 derived projections, 18 parallel) |
+| Production writers | 27 (8 declared owners, 2 derived projections, 17 parallel) |
 | Contract version | 1 |
 | Record schema version | 1 |
 
@@ -220,7 +220,7 @@ is that set, and every one of them carries a disposition that removes it
 displaced writer marked to stay would be a contradiction the ratchet could
 never resolve, so a test refuses one.
 
-Fourteen of the 27 are `ROUTE_THROUGH_OWNER_FIRST`, and those come **earlier**
+Thirteen of the 27 are `ROUTE_THROUGH_OWNER_FIRST`, and those come **earlier**
 than this step: a shadow comparison run against a source with two writers
 cannot tell drift from the second writer. They gate `ctl-isp-007`, not
 `ctl-isp-009`.

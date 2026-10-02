@@ -15,10 +15,11 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.ext.mutable import MutableDict
+from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -44,6 +45,13 @@ class InboxConversationStatus(enum.Enum):
     pending = "pending"
     snoozed = "snoozed"
     resolved = "resolved"
+
+
+class InboxCompletionOverrideGrantState(enum.Enum):
+    pending = "pending"
+    consumed = "consumed"
+    superseded = "superseded"
+    expired = "expired"
 
 
 class InboxMessageDirection(enum.Enum):
@@ -298,10 +306,48 @@ class InboxAutomationRule(Base):
     )
 
 
+class InboxCustomerCompletionPolicyVersion(Base):
+    """Immutable Customer-only resolution-completion policy snapshot source."""
+
+    __tablename__ = "inbox_customer_completion_policy_versions"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_inbox_customer_completion_policy_version"),
+        CheckConstraint(
+            "version > 0", name="ck_inbox_customer_completion_policy_version_positive"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    required_fields: Mapped[list[str]] = mapped_column(
+        MutableList.as_mutable(JSON()), nullable=False
+    )
+    identity_guard_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    created_by_person_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    decision_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+@event.listens_for(InboxCustomerCompletionPolicyVersion, "before_update")
+@event.listens_for(InboxCustomerCompletionPolicyVersion, "before_delete")
+def _deny_customer_completion_policy_mutation(*_args: object) -> None:
+    raise ValueError("Inbox Customer completion policy versions are immutable")
+
+
 class InboxConversation(Base):
     __tablename__ = "inbox_conversations"
     __table_args__ = (
         Index("ix_inbox_conversations_subscriber", "subscriber_id"),
+        Index(
+            "ix_inbox_conversations_customer_completion_policy",
+            "customer_completion_policy_version_id",
+        ),
         Index(
             "ix_inbox_conversations_continued_from",
             "continued_from_conversation_id",
@@ -330,6 +376,17 @@ class InboxConversation(Base):
     )
     subscriber_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("subscribers.id")
+    )
+    customer_completion_policy_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inbox_customer_completion_policy_versions.id", ondelete="RESTRICT"),
+    )
+    # Written EXACTLY ONCE, by alembic/versions/602_inbox_completion_legacy_override.py's
+    # upgrade(), stamped with a single captured now() reused for every backfilled row.
+    # No application code may ever assign this column outside that migration --
+    # enforced by tests/architecture/test_inbox_completion_override_boundary.py.
+    completion_gate_precutover_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     primary_service_team_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("service_teams.id")
@@ -382,6 +439,126 @@ class InboxConversation(Base):
         back_populates="conversation",
         cascade="all, delete-orphan",
     )
+
+
+class InboxCustomerCompletionCutover(Base):
+    """One frozen census/cutover record per legacy-marker backfill run.
+
+    Written exactly once, in the same migration transaction that stamps
+    ``InboxConversation.completion_gate_precutover_at`` -- see
+    ``alembic/versions/602_inbox_completion_legacy_override.py``.
+    """
+
+    __tablename__ = "inbox_customer_completion_cutovers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    policy_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inbox_customer_completion_policy_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    cutover_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    marked_conversation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    marked_subscriber_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class InboxCompletionOverrideGrant(Base):
+    """A narrowly-scoped, audited, single-use legacy completion-gate override.
+
+    Eligibility (``InboxConversation.completion_gate_precutover_at IS NOT
+    NULL``) is never authorization. A grant row is issued by
+    ``communications.team_inbox_completion_override`` only after an operator
+    reviews the exact live gap on one conversation, and it is burned at most
+    once, atomically, inside the same resolution transaction that consumes
+    it -- see ``app/services/team_inbox_completion_override.py``.
+    """
+
+    __tablename__ = "inbox_completion_override_grants"
+    __table_args__ = (
+        Index(
+            "uq_inbox_completion_override_grants_pending",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("state = 'pending'"),
+            postgresql_where=text("state = 'pending'"),
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "grant_idempotency_key",
+            name="uq_inbox_completion_override_grants_idempotency",
+        ),
+        CheckConstraint(
+            "(state = 'consumed') = (consumed_at IS NOT NULL)",
+            name="ck_inbox_completion_override_grants_consumed_at",
+        ),
+        CheckConstraint(
+            "(consumed_at IS NULL) = (consumed_transition_event_id IS NULL)",
+            name="ck_inbox_completion_override_grants_consumed_event",
+        ),
+        CheckConstraint(
+            "expires_at > granted_at",
+            name="ck_inbox_completion_override_grants_expiry_after_grant",
+        ),
+        Index(
+            "ix_inbox_completion_override_grants_conversation",
+            "conversation_id",
+            "granted_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inbox_conversations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    subscriber_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    policy_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inbox_customer_completion_policy_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    missing_fields: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    canonical_values_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    reason_text: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The real staff principal whose granted `support:inbox:completion_override`
+    # role authorized this issuance. `granted_by` above stays a free-text
+    # audit label; this is the only identifier with actual RBAC meaning.
+    granted_by_system_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True)
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    grant_idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    grant_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    state: Mapped[str] = mapped_column(
+        String(20),
+        default=InboxCompletionOverrideGrantState.pending.value,
+        nullable=False,
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_by: Mapped[str | None] = mapped_column(String(255))
+    consumed_transition_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("inbox_status_transition_events.id", ondelete="RESTRICT"),
+    )
+    consumed_resolution_reason: Mapped[str | None] = mapped_column(String(80))
 
 
 class InboxConversationLeadLink(Base):
@@ -625,6 +802,14 @@ class InboxContactLink(Base):
             name="ck_inbox_contact_links_one_target",
         ),
         CheckConstraint(
+            "channel_type NOT IN ('facebook_messenger', 'instagram_dm') OR "
+            "((provider IS NULL AND provider_account_id IS NULL AND "
+            "external_subject_id IS NULL) OR "
+            "(provider IS NOT NULL AND provider_account_id IS NOT NULL AND "
+            "external_subject_id IS NOT NULL))",
+            name="ck_inbox_contact_links_provider_identity_scope",
+        ),
+        CheckConstraint(
             "(party_contact_point_id IS NULL AND "
             "party_contact_point_bound_at IS NULL AND "
             "party_contact_point_binding_source IS NULL AND "
@@ -651,12 +836,52 @@ class InboxContactLink(Base):
             "is_active",
         ),
         Index(
-            "uq_inbox_contact_links_active_contact",
+            "uq_inbox_contact_links_active_unscoped_contact",
             "channel_type",
             "normalized_contact",
             unique=True,
-            sqlite_where=text("is_active IS TRUE"),
-            postgresql_where=text("is_active IS TRUE"),
+            sqlite_where=text(
+                "is_active IS TRUE AND channel_type NOT IN "
+                "('facebook_messenger', 'instagram_dm')"
+            ),
+            postgresql_where=text(
+                "is_active IS TRUE AND channel_type NOT IN "
+                "('facebook_messenger', 'instagram_dm')"
+            ),
+        ),
+        Index(
+            "uq_inbox_contact_links_active_provider_identity",
+            "channel_type",
+            "provider",
+            "provider_account_id",
+            "external_subject_id",
+            unique=True,
+            sqlite_where=text(
+                "is_active IS TRUE AND channel_type IN "
+                "('facebook_messenger', 'instagram_dm') AND provider IS NOT NULL "
+                "AND provider_account_id IS NOT NULL AND external_subject_id IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "is_active IS TRUE AND channel_type IN "
+                "('facebook_messenger', 'instagram_dm') AND provider IS NOT NULL "
+                "AND provider_account_id IS NOT NULL AND external_subject_id IS NOT NULL"
+            ),
+        ),
+        Index(
+            "uq_inbox_contact_links_active_legacy_social_contact",
+            "channel_type",
+            "normalized_contact",
+            unique=True,
+            sqlite_where=text(
+                "is_active IS TRUE AND channel_type IN "
+                "('facebook_messenger', 'instagram_dm') AND provider IS NULL "
+                "AND provider_account_id IS NULL AND external_subject_id IS NULL"
+            ),
+            postgresql_where=text(
+                "is_active IS TRUE AND channel_type IN "
+                "('facebook_messenger', 'instagram_dm') AND provider IS NULL "
+                "AND provider_account_id IS NULL AND external_subject_id IS NULL"
+            ),
         ),
     )
 
@@ -665,6 +890,9 @@ class InboxContactLink(Base):
     )
     channel_type: Mapped[str] = mapped_column(String(40), nullable=False)
     normalized_contact: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(80))
+    provider_account_id: Mapped[str | None] = mapped_column(String(200))
+    external_subject_id: Mapped[str | None] = mapped_column(String(200))
     party_contact_point_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("party_contact_points.id", ondelete="RESTRICT"),
@@ -712,6 +940,7 @@ class InboxParticipantRelationship(enum.Enum):
 
     customer = "customer"
     contact = "contact"
+    representative = "representative"
     third_party = "third_party"
     unknown = "unknown"
 
@@ -919,7 +1148,7 @@ class InboxMessage(Base):
             text("(metadata ->> 'delivery_status')"),
             text("created_at DESC"),
             postgresql_include=("id",),
-        ),
+        ).ddl_if(dialect="postgresql"),
         Index(
             "ix_inbox_messages_unread",
             "conversation_id",
@@ -1665,6 +1894,19 @@ class InboxStatusTransitionEvent(Base):
             "'strongly_inferred', 'weakly_inferred', 'unknown')",
             name="ck_inbox_status_event_evidence_grade",
         ),
+        CheckConstraint(
+            "resolution_reason IS NULL OR resolution_reason IN ("
+            "'customer_stopped_responding', 'whatsapp_window_expired', "
+            "'issue_completed_before_expiry', 'duplicate_conversation', "
+            "'no_further_action_required', 'spam_irrelevant', 'other')",
+            name="ck_inbox_status_event_resolution_reason",
+        ),
+        CheckConstraint(
+            "channel_state_at_resolution IS NULL OR "
+            "channel_state_at_resolution IN ("
+            "'active_window', 'expired', 'unavailable', 'not_applicable')",
+            name="ck_inbox_status_event_resolution_channel_state",
+        ),
         Index(
             "ix_inbox_status_event_conversation_time", "conversation_id", "occurred_at"
         ),
@@ -1689,6 +1931,8 @@ class InboxStatusTransitionEvent(Base):
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     actor_person_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    resolution_reason: Mapped[str | None] = mapped_column(String(80))
+    channel_state_at_resolution: Mapped[str | None] = mapped_column(String(40))
     source: Mapped[InboxAuditSource] = mapped_column(
         Enum(InboxAuditSource), nullable=False
     )

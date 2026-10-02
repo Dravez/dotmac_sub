@@ -30,7 +30,6 @@ app.services.connector
 app.services.contracts
 app.services.crm_api
 app.services.crm_portal
-app.services.crm_ticket_pull
 app.services.cross_app_drift
 app.services.crud
 app.services.customer_identity_resolution
@@ -134,7 +133,6 @@ app.services.nin_verifications
 app.services.numbering
 app.services.olt_observed_state_adapter
 app.services.operational_escalation_delivery
-app.services.pppoe_credentials
 app.services.provisioning_helpers
 app.services.provisioning_step_executors
 app.services.push
@@ -169,7 +167,6 @@ app.services.tr069
 app.services.uisp_control_plane
 app.services.unit_of_work
 app.services.unmatched_radio_queue
-app.services.usage
 app.services.user_profile
 app.services.vendor_admin
 app.services.web_billing_reconciliation

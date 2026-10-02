@@ -56,10 +56,24 @@ from app.models.enforcement_lock import (
     EnforcementReason,
 )
 from app.models.subscriber import Subscriber, SubscriberStatus
+from app.models.subscription_pause import (
+    SubscriptionPauseBillingPolicy,
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+    SubscriptionPauseReason,
+    SubscriptionPauseResumePolicy,
+    SubscriptionPauseSource,
+)
 from app.services.events import emit_event
 from app.services.events.types import EventType
 from app.services.owner_commands import CommandContext
 from app.services.prepaid_enforcement_state import clear_prepaid_enforcement_timers
+from app.services.service_entitlements import (
+    GrantPauseCompensationEntitlementCommand,
+    grant_pause_compensation_entitlement,
+)
 from app.services.subscription_lifecycle_evidence import (
     LifecycleEvidenceGrade,
     LifecycleEvidenceSource,
@@ -230,6 +244,7 @@ ALLOWED_RESTORERS: dict[EnforcementReason, set[str]] = {
     EnforcementReason.customer_hold: {"customer", "admin"},
     EnforcementReason.fraud: {"admin"},
     EnforcementReason.system: {"system", "admin"},
+    EnforcementReason.ticket_sla: {"admin"},
 }
 
 # Verify ALLOWED_RESTORERS covers every enum member at import time
@@ -282,6 +297,66 @@ class AccountUnsuspendResult:
     status: SubscriberStatus
     resolved_lock_ids: tuple[UUID, ...]
     restored_subscription_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PauseSubscriptionCauseCommand:
+    """Typed participant request to start or join one pause episode."""
+
+    subscription_id: UUID
+    reason: SubscriptionPauseReason
+    source_type: SubscriptionPauseSource
+    source_id: str
+    selection_policy: str
+    resume_policy: SubscriptionPauseResumePolicy
+    billing_policy: SubscriptionPauseBillingPolicy
+    requested_at: datetime
+    effective_at: datetime
+    actor: str
+    idempotency_key: str
+    context: CommandContext
+    ticket_id: UUID | None = None
+    sla_clock_id: UUID | None = None
+    sla_breach_id: UUID | None = None
+    automation_event_id: UUID | None = None
+    automation_rule_id: UUID | None = None
+    automation_rule_version_id: UUID | None = None
+    automation_step_index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PauseSubscriptionCauseOutcome:
+    episode_id: UUID
+    cause_id: UUID
+    subscription_id: UUID
+    account_status: SubscriberStatus
+    cause_added: bool
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ResumePausedSubscriptionCauseCommand:
+    cause_id: UUID
+    preview_fingerprint: str
+    resumed_at: datetime
+    actor: str
+    reason: str
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class ResumePausedSubscriptionCauseOutcome:
+    episode_id: UUID
+    cause_id: UUID
+    subscription_id: UUID
+    resulting_status: SubscriptionStatus
+    account_status: SubscriberStatus
+    paused_seconds: int
+    previous_next_billing_at: datetime | None
+    resulting_next_billing_at: datetime | None
+    resumed: bool
+    active_cause_count: int
+    replayed: bool
 
 
 def _record_subscription_transition(
@@ -495,7 +570,10 @@ def suspend_subscription(
         raise ValueError(f"Subscription {subscription_id} not found")
 
     prev_status = subscription.status
-    was_already_suspended = subscription.status in SUSPENDED_EQUIVALENT
+    was_already_suspended = (
+        subscription.status in SUSPENDED_EQUIVALENT
+        or subscription.status == SubscriptionStatus.paused
+    )
 
     if subscription.status not in _SUSPENDABLE and not was_already_suspended:
         raise ValueError(
@@ -1188,6 +1266,23 @@ def activate_subscription(
             else f"activation:{subscription.id}"
         ),
     )
+    # The credential is a mandatory activation invariant, not a create-form
+    # side effect. Ensuring it here covers every pending -> active caller and
+    # keeps the status transition, exact service binding, and login projection
+    # in one transaction.
+    from app.services.pppoe_credentials import (
+        EnsurePppoeCredentialCommand,
+        ensure_pppoe_credential,
+    )
+
+    ensure_pppoe_credential(
+        db,
+        EnsurePppoeCredentialCommand(
+            subscriber_id=subscription.subscriber_id,
+            subscription_id=subscription.id,
+            radius_profile_id=subscription.radius_profile_id,
+        ),
+    )
     # Make active the final staged mutation. The anchor writer locks through a
     # query, and SQLAlchemy may autoflush before that query; setting active
     # earlier could hit the database invariant while the anchor was still NULL.
@@ -1508,6 +1603,368 @@ def disable_subscription(
         resolved_count,
     )
     return True
+
+
+def pause_subscription_for_cause(
+    db: Session,
+    command: PauseSubscriptionCauseCommand,
+) -> PauseSubscriptionCauseOutcome:
+    """Pause one active subscription or add an independent cause.
+
+    This is a flush-only participant owned by ``access.subscription_lifecycle``.
+    A registered public command or coordinator owns the surrounding transaction.
+    """
+
+    if command.effective_at.tzinfo is None or command.effective_at.utcoffset() is None:
+        raise ValueError("Pause effective_at must be timezone-aware")
+    if not command.source_id.strip() or not command.idempotency_key.strip():
+        raise ValueError("Pause source and idempotency evidence are required")
+
+    idempotency_match = db.scalar(
+        select(SubscriptionPauseCause)
+        .where(SubscriptionPauseCause.idempotency_key == command.idempotency_key)
+        .with_for_update()
+    )
+    if idempotency_match is not None and (
+        idempotency_match.source_type != command.source_type.value
+        or idempotency_match.source_id != command.source_id
+    ):
+        raise ValueError("Pause idempotency key conflicts with another source")
+
+    prior_cause = db.scalar(
+        select(SubscriptionPauseCause)
+        .where(
+            SubscriptionPauseCause.source_type == command.source_type.value,
+            SubscriptionPauseCause.source_id == command.source_id,
+        )
+        .with_for_update()
+    )
+    if prior_cause is not None:
+        prior_episode = db.scalar(
+            select(SubscriptionPauseEpisode)
+            .where(SubscriptionPauseEpisode.id == prior_cause.pause_episode_id)
+            .with_for_update()
+        )
+        if (
+            prior_episode is None
+            or prior_episode.subscription_id != command.subscription_id
+        ):
+            raise ValueError(
+                "Pause source identity conflicts with another subscription"
+            )
+        account_status = compute_account_status(db, str(prior_episode.account_id))
+        return PauseSubscriptionCauseOutcome(
+            episode_id=prior_episode.id,
+            cause_id=prior_cause.id,
+            subscription_id=prior_episode.subscription_id,
+            account_status=account_status,
+            cause_added=False,
+            replayed=True,
+        )
+
+    subscription = db.scalar(
+        select(Subscription)
+        .where(Subscription.id == command.subscription_id)
+        .with_for_update()
+    )
+    if subscription is None:
+        raise ValueError(f"Subscription {command.subscription_id} not found")
+    account = db.scalar(
+        select(Subscriber)
+        .where(Subscriber.id == subscription.subscriber_id)
+        .with_for_update()
+    )
+    if account is None:
+        raise ValueError(f"Subscriber {subscription.subscriber_id} not found")
+
+    episode = db.scalar(
+        select(SubscriptionPauseEpisode)
+        .where(
+            SubscriptionPauseEpisode.subscription_id == subscription.id,
+            SubscriptionPauseEpisode.status
+            == SubscriptionPauseEpisodeStatus.active.value,
+        )
+        .with_for_update()
+    )
+    cause_added = episode is not None
+    if episode is None:
+        if subscription.status != SubscriptionStatus.active:
+            raise ValueError(
+                "Only an active subscription may begin a pause episode; "
+                f"current status is {subscription.status.value}"
+            )
+        episode = SubscriptionPauseEpisode(
+            subscription_id=subscription.id,
+            account_id=subscription.subscriber_id,
+            status=SubscriptionPauseEpisodeStatus.active.value,
+            requested_at=command.requested_at,
+            effective_at=command.effective_at,
+            previous_subscription_status=subscription.status.value,
+            previous_account_status=account.status.value,
+            previous_next_billing_at=subscription.next_billing_at,
+            billing_policy_key=command.billing_policy.value,
+            billing_policy_version=1,
+            policy_snapshot={
+                "billing_policy": command.billing_policy.value,
+                "resume_policy": command.resume_policy.value,
+            },
+            created_by=command.actor,
+        )
+        db.add(episode)
+        db.flush()
+
+        previous_status = subscription.status
+        subscription.status = SubscriptionStatus.paused
+        db.flush()
+        _record_subscription_transition(
+            db,
+            subscription=subscription,
+            from_status=previous_status,
+            to_status=SubscriptionStatus.paused,
+            source=command.source_id,
+            reason=command.reason.value,
+            effective_at=command.effective_at,
+            context=command.context,
+        )
+    elif subscription.status != SubscriptionStatus.paused:
+        raise ValueError("Active pause episode conflicts with subscription status")
+
+    cause = SubscriptionPauseCause(
+        pause_episode_id=episode.id,
+        reason_code=command.reason.value,
+        source_type=command.source_type.value,
+        source_id=command.source_id,
+        status=SubscriptionPauseCauseStatus.active.value,
+        ticket_id=command.ticket_id,
+        sla_clock_id=command.sla_clock_id,
+        sla_breach_id=command.sla_breach_id,
+        automation_event_id=command.automation_event_id,
+        automation_rule_id=command.automation_rule_id,
+        automation_rule_version_id=command.automation_rule_version_id,
+        automation_step_index=command.automation_step_index,
+        selection_policy=command.selection_policy,
+        resume_policy=command.resume_policy.value,
+        workflow_policy_snapshot={
+            "selection_policy": command.selection_policy,
+            "resume_policy": command.resume_policy.value,
+        },
+        activated_at=command.effective_at,
+        idempotency_key=command.idempotency_key,
+    )
+    db.add(cause)
+    db.flush()
+    account_status = compute_account_status(db, str(subscription.subscriber_id))
+    episode.resulting_subscription_status = subscription.status.value
+    episode.resulting_account_status = account_status.value
+    db.flush()
+
+    emit_event(
+        db,
+        EventType.subscription_paused,
+        {
+            "subscription_id": str(subscription.id),
+            "pause_episode_id": str(episode.id),
+            "pause_cause_id": str(cause.id),
+            "reason": command.reason.value,
+            "effective_at": command.effective_at.isoformat(),
+            "from_status": episode.previous_subscription_status,
+            "to_status": SubscriptionStatus.paused.value,
+        },
+        subscription_id=subscription.id,
+        account_id=subscription.subscriber_id,
+    )
+    return PauseSubscriptionCauseOutcome(
+        episode_id=episode.id,
+        cause_id=cause.id,
+        subscription_id=subscription.id,
+        account_status=account_status,
+        cause_added=cause_added,
+        replayed=False,
+    )
+
+
+def release_pause_cause_and_resume_subscription(
+    db: Session,
+    command: ResumePausedSubscriptionCauseCommand,
+) -> ResumePausedSubscriptionCauseOutcome:
+    """Release one pause cause and resume when no independent cause remains."""
+
+    if command.resumed_at.tzinfo is None or command.resumed_at.utcoffset() is None:
+        raise ValueError("Resume time must be timezone-aware")
+    if not command.preview_fingerprint.strip() or not command.reason.strip():
+        raise ValueError("Resume preview fingerprint and reason are required")
+    cause = db.scalar(
+        select(SubscriptionPauseCause)
+        .where(SubscriptionPauseCause.id == command.cause_id)
+        .with_for_update()
+    )
+    if cause is None:
+        raise ValueError(f"Pause cause {command.cause_id} not found")
+    episode = db.scalar(
+        select(SubscriptionPauseEpisode)
+        .where(SubscriptionPauseEpisode.id == cause.pause_episode_id)
+        .with_for_update()
+    )
+    if episode is None:
+        raise ValueError("Pause episode not found")
+    subscription = db.scalar(
+        select(Subscription)
+        .where(Subscription.id == episode.subscription_id)
+        .with_for_update()
+    )
+    if subscription is None:
+        raise ValueError("Paused subscription not found")
+
+    effective_at = _aware_utc(episode.effective_at)
+    if effective_at is None:
+        raise ValueError("Pause episode effective time is missing")
+    if command.resumed_at < effective_at:
+        raise ValueError("Resume time cannot precede the pause effective time")
+    paused_seconds = int((command.resumed_at - effective_at).total_seconds())
+    if cause.status != SubscriptionPauseCauseStatus.active.value:
+        account_status = compute_account_status(db, str(subscription.subscriber_id))
+        return ResumePausedSubscriptionCauseOutcome(
+            episode_id=episode.id,
+            cause_id=cause.id,
+            subscription_id=subscription.id,
+            resulting_status=subscription.status,
+            account_status=account_status,
+            paused_seconds=episode.effective_duration_seconds or paused_seconds,
+            previous_next_billing_at=episode.previous_next_billing_at,
+            resulting_next_billing_at=episode.resulting_next_billing_at,
+            resumed=episode.status == SubscriptionPauseEpisodeStatus.resumed.value,
+            active_cause_count=0,
+            replayed=True,
+        )
+
+    cause.status = SubscriptionPauseCauseStatus.released.value
+    cause.released_at = command.resumed_at
+    cause.released_by = command.actor
+    cause.release_reason = command.reason
+    db.flush()
+    remaining = tuple(
+        db.scalars(
+            select(SubscriptionPauseCause)
+            .where(
+                SubscriptionPauseCause.pause_episode_id == episode.id,
+                SubscriptionPauseCause.status
+                == SubscriptionPauseCauseStatus.active.value,
+            )
+            .with_for_update()
+        ).all()
+    )
+    if remaining:
+        account_status = compute_account_status(db, str(subscription.subscriber_id))
+        return ResumePausedSubscriptionCauseOutcome(
+            episode_id=episode.id,
+            cause_id=cause.id,
+            subscription_id=subscription.id,
+            resulting_status=subscription.status,
+            account_status=account_status,
+            paused_seconds=paused_seconds,
+            previous_next_billing_at=episode.previous_next_billing_at,
+            resulting_next_billing_at=None,
+            resumed=False,
+            active_cause_count=len(remaining),
+            replayed=False,
+        )
+
+    if subscription.status != SubscriptionStatus.paused:
+        raise ValueError(
+            "Paused episode cannot resume from the current subscription state"
+        )
+    previous_anchor = _aware_utc(subscription.next_billing_at)
+    recorded_anchor = _aware_utc(episode.previous_next_billing_at)
+    if previous_anchor != recorded_anchor:
+        raise BillingAnchorProjectionError(
+            "Billing anchor changed while the subscription was paused"
+        )
+    if previous_anchor is None:
+        raise BillingAnchorProjectionError(
+            "A paused subscription requires an existing billing anchor"
+        )
+    target_anchor = previous_anchor + timedelta(seconds=paused_seconds)
+    if subscription.billing_mode == BillingMode.prepaid:
+        grant_pause_compensation_entitlement(
+            db,
+            GrantPauseCompensationEntitlementCommand(
+                pause_episode_id=episode.id,
+                subscription_id=subscription.id,
+                account_id=subscription.subscriber_id,
+                pause_effective_at=effective_at,
+                starts_at=previous_anchor,
+                ends_at=target_anchor,
+            ),
+        )
+    stage_subscription_billing_anchor(
+        db,
+        subscription,
+        BillingAnchorProjectionCommand(
+            subscription_id=subscription.id,
+            expected_previous=previous_anchor,
+            target=target_anchor,
+            source=BillingAnchorProjectionSource.lifecycle_resume,
+            evidence_ref=f"pause-episode:{episode.id}",
+        ),
+    )
+
+    active_locks = get_active_locks(db, subscription_id=str(subscription.id))
+    resulting_status = (
+        SubscriptionStatus.suspended if active_locks else SubscriptionStatus.active
+    )
+    subscription.status = resulting_status
+    db.flush()
+    _record_subscription_transition(
+        db,
+        subscription=subscription,
+        from_status=SubscriptionStatus.paused,
+        to_status=resulting_status,
+        source=f"pause-episode:{episode.id}",
+        reason=command.reason,
+        effective_at=command.resumed_at,
+        context=command.context,
+    )
+    episode.status = SubscriptionPauseEpisodeStatus.resumed.value
+    episode.resumed_at = command.resumed_at
+    episode.effective_duration_seconds = paused_seconds
+    episode.projected_next_billing_at = target_anchor
+    episode.resulting_next_billing_at = target_anchor
+    episode.resulting_subscription_status = resulting_status.value
+    episode.resume_preview_fingerprint = command.preview_fingerprint
+    episode.resumed_by = command.actor
+    account_status = compute_account_status(db, str(subscription.subscriber_id))
+    episode.resulting_account_status = account_status.value
+    db.flush()
+
+    emit_event(
+        db,
+        EventType.subscription_pause_resumed,
+        {
+            "subscription_id": str(subscription.id),
+            "pause_episode_id": str(episode.id),
+            "pause_cause_id": str(cause.id),
+            "paused_seconds": paused_seconds,
+            "previous_next_billing_at": previous_anchor.isoformat(),
+            "resulting_next_billing_at": target_anchor.isoformat(),
+            "from_status": SubscriptionStatus.paused.value,
+            "to_status": resulting_status.value,
+        },
+        subscription_id=subscription.id,
+        account_id=subscription.subscriber_id,
+    )
+    return ResumePausedSubscriptionCauseOutcome(
+        episode_id=episode.id,
+        cause_id=cause.id,
+        subscription_id=subscription.id,
+        resulting_status=resulting_status,
+        account_status=account_status,
+        paused_seconds=paused_seconds,
+        previous_next_billing_at=previous_anchor,
+        resulting_next_billing_at=target_anchor,
+        resumed=True,
+        active_cause_count=0,
+        replayed=False,
+    )
 
 
 def enable_subscription(
@@ -2078,6 +2535,8 @@ def derive_account_status_without_override(
         return SubscriberStatus.blocked
     if any(s.status == SubscriptionStatus.pending for s in subs):
         return SubscriberStatus.new
+    if any(s.status == SubscriptionStatus.paused for s in subs):
+        return SubscriberStatus.paused
     if all(s.status == SubscriptionStatus.disabled for s in subs):
         return SubscriberStatus.disabled
     return SubscriberStatus.canceled
@@ -2115,6 +2574,7 @@ def derive_account_active_projection(
         SubscriberStatus.active,
         SubscriberStatus.new,
         SubscriberStatus.blocked,
+        SubscriberStatus.paused,
         SubscriberStatus.delinquent,
     } or (projected_status == SubscriberStatus.suspended and not explicitly_suspended)
 

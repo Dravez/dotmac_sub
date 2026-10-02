@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum, StrEnum
+from types import TracebackType
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -36,18 +38,20 @@ from app.services.backoffice import (
     BackofficeDeliveryView,
     BackofficeEnqueueResult,
     BackofficeEnqueueStatus,
+    BackofficeUnavailableError,
     expense_payment_projection,
     get_expense_claim_deliveries,
     get_expense_decision_delivery,
     get_expense_payment_deliveries,
 )
-from app.services.common import apply_pagination, coerce_uuid
+from app.services.common import coerce_uuid
 from app.services.domain_errors import DomainError
-from app.services.field.jobs import _profile_from_principal, _scoped_query
+from app.services.field.jobs import _scoped_query
 from app.services.field.source import (
     mark_sub_authoritative as _mark_source_authoritative,
 )
 from app.services.integrations import installations
+from app.services.integrations.diagnostics import safe_diagnostic_summary
 from app.services.integrations.erp_capability import (
     ErpCapabilityError,
     ErpCapabilityTransientError,
@@ -64,6 +68,12 @@ from app.services.owner_commands import (
     OwnerCommandDefinition,
     execute_owner_command,
 )
+from app.services.staff_provisioning import (
+    StaffDisplayIdentityQuery,
+    resolve_staff_display_identities,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ExpenseRequestAccessMode(StrEnum):
@@ -152,6 +162,14 @@ class ExpenseRequestLineInput:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpenseApprovalLineInput:
+    """One approver-selected amount for an immutable submitted expense line."""
+
+    expense_item_id: UUID
+    approved_amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class SelectedExpenseApprover:
     erp_employee_id: UUID
     system_user_id: UUID
@@ -229,6 +247,10 @@ class ApproveFieldExpenseRequest:
     context: CommandContext
     expense_request_id: UUID
     reviewer_system_user_id: UUID
+    lines: tuple[ExpenseApprovalLineInput, ...] = ()
+    adjustment_reason: str | None = None
+    expected_revision: int | None = None
+    expected_work_order_public_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +269,20 @@ class CancelFieldExpenseRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrySubmittedExpenseDelivery:
+    context: CommandContext
+    expense_request_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class RecoverExpenseDelivery:
+    context: CommandContext
+    dead_event_id: UUID
+    preview_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverExpensePaymentDelivery:
     context: CommandContext
     dead_event_id: UUID
     preview_fingerprint: str
@@ -270,6 +305,15 @@ class ExpenseErpSyncStatus(str, Enum):
     NOT_QUEUED = "not_queued"
 
 
+class ExpenseRequestStatus(StrEnum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PAID = "paid"
+    CANCELED = "canceled"
+
+
 @dataclass(frozen=True, slots=True)
 class ExpenseRequestApprovalOutcome:
     id: UUID
@@ -278,6 +322,11 @@ class ExpenseRequestApprovalOutcome:
     erp_sync_status: ExpenseErpSyncStatus
     erp_sync_event_id: UUID | None
     erp_sync_error: str | None
+    requested_total_amount: Decimal
+    approved_total_amount: Decimal
+    amounts_adjusted: bool
+    adjustment_reason: str | None
+    revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,10 +345,25 @@ class ExpenseRequestCancellationOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpenseSubmissionRetryOutcome:
+    id: UUID
+    erp_sync_status: Literal["pending"]
+    erp_sync_event_id: UUID
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ExpenseDeliveryRecoveryOutcome:
     original_event_id: UUID
     replacement_event_id: UUID
     replacement_idempotency_key: str
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExpensePaymentDeliveryRecoveryOutcome:
+    event_id: UUID
+    idempotency_key: str
     replayed: bool
 
 
@@ -319,6 +383,7 @@ class ExpenseRequestItemOutcome:
     category_name: str | None
     description: str
     amount: Decimal
+    approved_amount: Decimal | None
     expense_date: date | None
     vendor_name: str | None
     receipt_url: str | None
@@ -339,10 +404,105 @@ class ExpenseRequestSubmissionOutcome:
     notes: str | None
     client_ref: UUID
     total_amount: Decimal
+    requested_total_amount: Decimal
     submitted_at: datetime
     created_at: datetime
     updated_at: datetime
     items: tuple[ExpenseRequestItemOutcome, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExpenseRequestView:
+    id: UUID
+    work_order_id: str
+    crm_expense_request_id: str | None
+    requested_by_person_id: UUID
+    requested_by_system_user_id: UUID | None
+    requested_by_name: str | None
+    selected_approver_erp_id: UUID | None
+    selected_approver_name: str | None
+    selected_approver_email: str | None
+    payment_destination_mode: str | None
+    recipient_bank_name: str | None
+    masked_account_number: str | None
+    verified_beneficiary_name: str | None
+    status: ExpenseRequestStatus
+    purpose: str
+    expense_date: date | None
+    currency: str
+    notes: str | None
+    rejection_reason: str | None
+    expense_system: str | None
+    expense_claim_reference: str | None
+    expense_claim_number: str | None
+    expense_claim_status: str | None
+    erp_sync_status: ExpenseErpSyncStatus | None
+    erp_sync_error: str | None
+    payment_status: str | None
+    payment_intent_id: str | None
+    payment_error: str | None
+    client_ref: UUID | None
+    total_amount: Decimal
+    requested_total_amount: Decimal
+    approved_total_amount: Decimal | None
+    amounts_adjusted: bool
+    approval_adjustment_reason: str | None
+    approved_by_system_user_id: UUID | None
+    revision: int
+    submitted_at: datetime | None
+    approved_at: datetime | None
+    rejected_at: datetime | None
+    paid_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    items: tuple[ExpenseRequestItemOutcome, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RequesterExpenseHistoryQuery:
+    system_user_id: UUID
+    work_order_id: str | None = None
+    status: ExpenseRequestStatus | None = None
+    limit: int = 50
+    offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RequesterExpenseDetailQuery:
+    system_user_id: UUID
+    request_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class RequesterExpenseHistoryPage:
+    items: tuple[ExpenseRequestView, ...]
+    total: int
+    limit: int
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerExpenseReviewQuery:
+    approver_system_user_id: UUID | None
+    status: ExpenseRequestStatus | None = None
+    work_order_public_id: str | None = None
+    limit: int = 100
+    offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerExpenseReviewPage:
+    items: tuple[ExpenseRequestView, ...]
+    total: int
+    limit: int
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpenseRequesterIdentity:
+    system_user_id: UUID
+    person_ids: tuple[UUID, ...]
+    technician_profile_ids: tuple[UUID, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +536,8 @@ def _local_expense_approvers(
     db: Session,
     *,
     erp_approvers: tuple[ExpenseApproverOption, ...],
+    requester_system_user_id: UUID,
+    requester_email: str,
 ) -> tuple[SelectedExpenseApprover, ...]:
     emails = {item.email.strip().lower() for item in erp_approvers}
     if not emails:
@@ -398,6 +560,8 @@ def _local_expense_approvers(
         )
         for item in erp_approvers
         if item.email.strip().lower() in local_users
+        and local_users[item.email.strip().lower()].id != requester_system_user_id
+        and item.email.strip().lower() != requester_email.strip().lower()
     )
 
 
@@ -419,7 +583,12 @@ def get_field_expense_form_context(
             message="Expense approvers and payment details are unavailable from ERP.",
         ) from exc
     return FieldExpenseFormContext(
-        approvers=_local_expense_approvers(db, erp_approvers=erp_approvers),
+        approvers=_local_expense_approvers(
+            db,
+            erp_approvers=erp_approvers,
+            requester_system_user_id=requester.id,
+            requester_email=requester.email,
+        ),
         banks=banks,
         profile_destination=profile_destination,
     )
@@ -479,7 +648,12 @@ def resolve_field_expense_submission_context(
     selected = next(
         (
             approver
-            for approver in _local_expense_approvers(db, erp_approvers=erp_approvers)
+            for approver in _local_expense_approvers(
+                db,
+                erp_approvers=erp_approvers,
+                requester_system_user_id=requester.id,
+                requester_email=requester.email,
+            )
             if approver.erp_employee_id == query.selected_approver_erp_id
         ),
         None,
@@ -530,13 +704,13 @@ _EXPENSE_SUBMIT_COMMAND = OwnerCommandDefinition(
 
 _EXPENSE_APPROVAL_COMMAND = OwnerCommandDefinition(
     owner="operations.expense_requests",
-    concern="field expense approval and ERP delivery staging",
+    concern="field expense lifecycle ERP delivery staging",
     name="approve_field_expense_request",
 )
 
 _EXPENSE_REJECTION_COMMAND = OwnerCommandDefinition(
     owner="operations.expense_requests",
-    concern="field expense approval and ERP delivery staging",
+    concern="field expense lifecycle ERP delivery staging",
     name="reject_field_expense_request",
 )
 
@@ -552,10 +726,22 @@ _CANCEL_EXPENSE_REQUEST = OwnerCommandDefinition(
     name="cancel_field_expense_request",
 )
 
+_RETRY_EXPENSE_SUBMISSION = OwnerCommandDefinition(
+    owner="operations.expense_requests",
+    concern="dead submitted expense delivery retry",
+    name="retry_submitted_expense_delivery",
+)
+
 _RECOVER_EXPENSE_DELIVERY = OwnerCommandDefinition(
     owner="operations.expense_requests",
     concern="dead expense delivery recovery",
     name="recover_dead_expense_delivery",
+)
+
+_RECOVER_EXPENSE_PAYMENT_DELIVERY = OwnerCommandDefinition(
+    owner="operations.expense_requests",
+    concern="dead expense payment delivery recovery",
+    name="recover_dead_expense_payment_delivery",
 )
 
 
@@ -641,6 +827,15 @@ def submit_field_expense_request_command(
                 code="operations.expense_requests.requester_not_found",
                 message="The requesting staff user is unavailable.",
             )
+        approver = command.selected_approver
+        if approver is not None and (
+            approver.system_user_id == system_user.id
+            or approver.email.strip().lower() == system_user.email.strip().lower()
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.approver_invalid",
+                message="Select an expense approver other than yourself.",
+            )
         existing = (
             db.query(FieldExpenseRequest)
             .options(selectinload(FieldExpenseRequest.items))
@@ -648,6 +843,7 @@ def submit_field_expense_request_command(
             .one_or_none()
         )
         if existing is not None:
+            _require_token_bound_request_identity(existing)
             requester_ids = {system_user.id}
             if system_user.person_party_id is not None:
                 requester_ids.add(system_user.person_party_id)
@@ -669,7 +865,6 @@ def submit_field_expense_request_command(
                     message="Request identity was already used with different expense details.",
                 )
             return _submission_outcome(existing)
-        approver = command.selected_approver
         destination = command.payment_destination
         if (approver is None) != (destination is None):
             raise FieldExpenseRequestError(
@@ -813,6 +1008,7 @@ def submit_field_expense_request_command(
             )
             item["receipt_attachment_id"] = receipt.id
         request = FieldExpenseRequest(
+            id=command.request_id,
             work_order_mirror_id=row.id,
             requested_by_technician_id=profile.id if profile else None,
             requested_by_person_id=system_user.person_party_id or system_user.id,
@@ -859,8 +1055,40 @@ def submit_field_expense_request_command(
         validate_expense_receipt_delivery(db, request, category_rules=category_rules)
         _mark_sub_authoritative(row)
         db.flush()
-        # Submission is a local review transition only. Manager approval is
-        # the sole ERP release point.
+        try:
+            result = _enqueue_submission_backoffice(db, request)
+        except Exception as exc:
+            logger.exception(
+                "Field expense ERP delivery staging failed",
+                extra={
+                    "request_id": str(request.id),
+                    "expense_request_id": str(request.id),
+                    "command_id": str(command.context.command_id),
+                    "correlation_id": str(command.context.correlation_id),
+                    "work_order_public_id": row.public_id,
+                    "requester_system_user_id": str(system_user.id),
+                    "exception_type": type(exc).__name__,
+                },
+                exc_info=_redacted_exception_info(exc),
+            )
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.erp_staging_failed",
+                message=(
+                    "The expense was not submitted because its ERP delivery "
+                    "could not be queued. Please retry."
+                ),
+            ) from exc
+        if (
+            result.status is not BackofficeEnqueueStatus.ENQUEUED
+            or result.event is None
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.erp_delivery_not_configured",
+                message=(
+                    "The expense was not submitted because ERP delivery is not "
+                    "configured. Please retry."
+                ),
+            )
         return _submission_outcome(request)
 
     return execute_owner_command(
@@ -879,11 +1107,69 @@ def approve_field_expense_request_command(
     def operation() -> ExpenseRequestApprovalOutcome:
         request = _locked_expense_request(db, command.expense_request_id)
         if request.status == "approved":
+            if command.lines:
+                current_amounts = {
+                    item.id: (
+                        item.approved_amount
+                        if item.approved_amount is not None
+                        else item.amount
+                    )
+                    for item in request.items
+                }
+                replay_amounts = {
+                    line.expense_item_id: _approval_amount(line.approved_amount)
+                    for line in command.lines
+                }
+                if replay_amounts != current_amounts:
+                    raise FieldExpenseRequestError(
+                        code="operations.expense_requests.idempotency_conflict",
+                        message="This expense was already approved with different amounts.",
+                    )
             return _approval_outcome(db, request)
         if request.status != "submitted":
             raise FieldExpenseRequestError(
                 code="operations.expense_requests.invalid_transition",
                 message="Only submitted expense requests can be approved.",
+            )
+        if (
+            command.expected_revision is not None
+            and command.expected_revision != request.revision
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.stale_approval",
+                message="This expense changed after it was opened. Refresh and try again.",
+            )
+        if (
+            command.expected_work_order_public_id is not None
+            and request.work_order_mirror.public_id
+            != command.expected_work_order_public_id
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.work_order_unauthorized",
+                message="This expense does not belong to the selected work order.",
+            )
+        _require_consistent_claim_identity(request)
+        requester_system_user_id = _expense_requester_system_user_ids(
+            db, [request]
+        ).get(request.id)
+        requester_user = (
+            db.get(SystemUser, requester_system_user_id)
+            if requester_system_user_id is not None
+            else None
+        )
+        if requester_system_user_id is not None and (
+            command.reviewer_system_user_id == requester_system_user_id
+            or request.selected_approver_system_user_id == requester_system_user_id
+            or (
+                requester_user is not None
+                and request.selected_approver_email is not None
+                and request.selected_approver_email.strip().lower()
+                == requester_user.email.strip().lower()
+            )
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.approver_invalid",
+                message="Expense requesters cannot approve their own expense.",
             )
         if (
             request.selected_approver_system_user_id is not None
@@ -901,10 +1187,37 @@ def approve_field_expense_request_command(
             request,
             category_rules=category_rules,
         )
+        approved_amounts = _resolve_approval_amounts(
+            request,
+            lines=command.lines,
+            category_rules=category_rules,
+        )
+        amounts_adjusted = any(
+            approved_amounts[item.id] != item.amount for item in request.items
+        )
+        adjustment_reason = (command.adjustment_reason or "").strip()
+        if amounts_adjusted and len(adjustment_reason) < 2:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.adjustment_reason_required",
+                message="Explain why the approved amount differs from the request.",
+            )
+        if len(adjustment_reason) > 500:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.invalid_request",
+                message="The adjustment reason must not exceed 500 characters.",
+            )
 
         now = datetime.now(UTC)
+        for item in request.items:
+            item.approved_amount = approved_amounts[item.id]
         request.status = "approved"
         request.approved_at = now
+        request.approved_by_system_user_id = command.reviewer_system_user_id
+        request.approval_decision_id = command.context.command_id
+        request.approval_adjustment_reason = (
+            adjustment_reason if amounts_adjusted else None
+        )
+        request.revision += 1
         request.payment_destination_locked_at = now
         request.rejection_reason = None
         _note_approval_command(request, command, occurred_at=now)
@@ -952,25 +1265,106 @@ def approve_field_expense_request_command(
     )
 
 
+def _approval_amount(value: Decimal) -> Decimal:
+    try:
+        amount = Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.invalid_approval_amount",
+            message="Every approved amount must be a valid monetary amount.",
+        ) from exc
+    if amount <= 0 or amount > Decimal("999999999999.99"):
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.invalid_approval_amount",
+            message="Every approved amount must be greater than zero.",
+        )
+    return amount
+
+
+def _resolve_approval_amounts(
+    request: FieldExpenseRequest,
+    *,
+    lines: tuple[ExpenseApprovalLineInput, ...],
+    category_rules: tuple[ExpenseCategoryRule, ...],
+) -> dict[UUID, Decimal]:
+    existing_ids = {item.id for item in request.items}
+    if lines:
+        supplied_ids = [line.expense_item_id for line in lines]
+        if (
+            len(supplied_ids) != len(set(supplied_ids))
+            or set(supplied_ids) != existing_ids
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.approval_lines_mismatch",
+                message="Approve every existing expense line exactly once.",
+            )
+        amounts = {
+            line.expense_item_id: _approval_amount(line.approved_amount)
+            for line in lines
+        }
+    else:
+        amounts = {item.id: _approval_amount(item.amount) for item in request.items}
+
+    rules = {rule.category_code: rule for rule in category_rules}
+    category_totals: dict[str, Decimal] = {}
+    for item in request.items:
+        category_totals[item.category_code] = (
+            category_totals.get(item.category_code, Decimal("0")) + amounts[item.id]
+        )
+    for category_code, total in category_totals.items():
+        rule = rules.get(category_code)
+        if rule is None:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.category_invalid",
+                message="An expense category is no longer available in ERP.",
+            )
+        if rule.max_amount_per_claim is not None and total > rule.max_amount_per_claim:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.invalid_approval_amount",
+                message=(
+                    f"{rule.category_name} cannot exceed "
+                    f"{rule.max_amount_per_claim:.2f} per claim."
+                ),
+            )
+    return amounts
+
+
+def _require_consistent_claim_identity(request: FieldExpenseRequest) -> None:
+    """Fail closed when a claim-bound destination uses a different local ID."""
+    if request.client_ref is None or (
+        request.payment_destination_token is not None
+        and request.client_ref != request.id
+    ):
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.claim_identity_inconsistent",
+            message=(
+                "This expense has inconsistent claim identity and cannot continue to ERP."
+            ),
+            details={"expense_request_id": str(request.id)},
+        )
+
+
 def reject_field_expense_request_command(
     db: Session, *, command: RejectFieldExpenseRequest
 ) -> ExpenseRequestRejectionOutcome:
-    """Reject locally; an unapproved expense has no ERP claim to update."""
+    """Reject locally and durably stage the ordered ERP rejection."""
 
     def operation() -> ExpenseRequestRejectionOutcome:
         request = _locked_expense_request(db, command.expense_request_id)
+        _require_consistent_claim_identity(request)
         if request.status == "rejected":
             if request.rejected_at is None:
                 raise FieldExpenseRequestError(
                     code="operations.expense_requests.invalid_request",
                     message="Rejected expense evidence is incomplete.",
                 )
+            delivery = get_expense_decision_delivery(db, request.id, "reject")
             return ExpenseRequestRejectionOutcome(
                 id=request.id,
                 status="rejected",
                 rejected_at=request.rejected_at,
                 rejection_reason=request.rejection_reason or "Rejected",
-                erp_sync_event_id=None,
+                erp_sync_event_id=delivery.event_id,
             )
         if request.status != "submitted":
             raise FieldExpenseRequestError(
@@ -1004,13 +1398,43 @@ def reject_field_expense_request_command(
             occurred_at=now,
         )
         _mark_sub_authoritative(request.work_order_mirror)
+        try:
+            result = _enqueue_decision_backoffice(
+                db,
+                request,
+                action="reject",
+                decision_id=command.context.command_id,
+                reviewer_system_user_id=command.reviewer_system_user_id,
+                decided_at=now,
+                reason=request.rejection_reason,
+            )
+        except Exception as exc:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.erp_staging_failed",
+                message=(
+                    "The expense was not rejected because its ERP delivery "
+                    "could not be queued. Please retry."
+                ),
+                details={"error_type": type(exc).__name__},
+            ) from exc
+        if (
+            result.status is not BackofficeEnqueueStatus.ENQUEUED
+            or result.event is None
+        ):
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.erp_delivery_not_configured",
+                message=(
+                    "The expense was not rejected because ERP delivery is not "
+                    "configured. Please retry."
+                ),
+            )
         db.flush()
         return ExpenseRequestRejectionOutcome(
             id=request.id,
             status="rejected",
             rejected_at=now,
             rejection_reason=request.rejection_reason,
-            erp_sync_event_id=None,
+            erp_sync_event_id=result.event.id,
         )
 
     return execute_owner_command(
@@ -1074,6 +1498,74 @@ def cancel_field_expense_request_command(
     )
 
 
+def retry_submitted_expense_delivery_command(
+    db: Session, *, command: RetrySubmittedExpenseDelivery
+) -> ExpenseSubmissionRetryOutcome:
+    """Retry the requester's existing dead submission event idempotently."""
+
+    from app.services.backoffice import requeue_expense_submission_delivery
+
+    def operation() -> ExpenseSubmissionRetryOutcome:
+        system_user_id = _system_user_id_for_actor(db, command.context)
+        if system_user_id is None:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.requester_not_found",
+                message="An authenticated staff user is required.",
+            )
+        identity = _requester_identity(db, system_user_id)
+        request = (
+            _requester_expense_query(db, identity)
+            .filter(FieldExpenseRequest.id == command.expense_request_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if request is None:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.request_not_found",
+                message="Expense request was not found.",
+            )
+        if request.status != ExpenseRequestStatus.SUBMITTED.value:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.invalid_transition",
+                message="Only a submitted expense can be retried.",
+            )
+        _require_token_bound_request_identity(request)
+        validate_expense_receipt_delivery(
+            db,
+            request,
+            category_rules=resolve_authoritative_expense_category_rules(db),
+        )
+        delivery = get_expense_claim_deliveries(db, [request.id]).get(request.id)
+        if delivery is None or delivery.event_id is None:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.delivery_not_found",
+                message="The expense submission could not be retried.",
+            )
+        try:
+            staged = requeue_expense_submission_delivery(
+                db,
+                event_id=delivery.event_id,
+            )
+        except BackofficeUnavailableError as exc:
+            raise FieldExpenseRequestError(
+                code="operations.expense_requests.delivery_not_recoverable",
+                message="The expense submission could not be retried.",
+            ) from exc
+        return ExpenseSubmissionRetryOutcome(
+            id=request.id,
+            erp_sync_status="pending",
+            erp_sync_event_id=staged.event_id,
+            replayed=staged.replayed,
+        )
+
+    return execute_owner_command(
+        db,
+        definition=_RETRY_EXPENSE_SUBMISSION,
+        context=command.context,
+        operation=operation,
+    )
+
+
 def recover_expense_delivery(
     db: Session,
     *,
@@ -1101,6 +1593,7 @@ def recover_expense_delivery(
                 code="operations.expense_requests.recovery_state_invalid",
                 message="The expense recovery evidence is no longer available.",
             )
+        _require_consistent_claim_identity(request)
         staged = stage_expense_delivery_recovery(
             db,
             dead_event_id=command.dead_event_id,
@@ -1142,6 +1635,115 @@ def recover_expense_delivery(
     )
 
 
+def recover_expense_payment_delivery(
+    db: Session,
+    *,
+    command: RecoverExpensePaymentDelivery,
+) -> ExpensePaymentDeliveryRecoveryOutcome:
+    """Requeue one verified payment event with its original idempotency key."""
+
+    from app.services.backoffice import (
+        BackofficeDeliveryStatus,
+        inspect_expense_payment_recovery_delivery,
+        requeue_expense_payment_delivery,
+    )
+    from app.services.field.expense_recovery import (
+        PAYMENT_RECOVERY_CONTRACT_VERSION,
+        ExpenseDeliveryRecoveryError,
+        _preview_payment,
+    )
+
+    def operation() -> ExpensePaymentDeliveryRecoveryOutcome:
+        if command.context.scope != "operations:expense_request:pay":
+            raise ExpenseDeliveryRecoveryError(
+                code="operations.expense_requests.payment_recovery_forbidden",
+                message="Payment recovery requires the expense payment permission.",
+            )
+        delivery = inspect_expense_payment_recovery_delivery(
+            db,
+            event_id=command.dead_event_id,
+            lock=True,
+        )
+        request: FieldExpenseRequest | None = (
+            db.get(FieldExpenseRequest, delivery.expense_request_id)
+            if delivery is not None
+            else None
+        )
+        recoveries = list(
+            ((request.metadata_ or {}).get("expense_payment_delivery_recoveries") or [])
+            if request is not None
+            else []
+        )
+        matching_recovery = next(
+            (
+                item
+                for item in recoveries
+                if isinstance(item, dict)
+                and item.get("event_id") == str(command.dead_event_id)
+                and item.get("command_id") == str(command.context.command_id)
+                and item.get("preview_fingerprint") == command.preview_fingerprint
+            ),
+            None,
+        )
+        if (
+            delivery is not None
+            and delivery.status is not BackofficeDeliveryStatus.DEAD
+            and matching_recovery is not None
+        ):
+            return ExpensePaymentDeliveryRecoveryOutcome(
+                event_id=delivery.event_id,
+                idempotency_key=delivery.idempotency_key,
+                replayed=True,
+            )
+
+        preview = _preview_payment(db, command.dead_event_id, lock=True)
+        if preview.fingerprint != command.preview_fingerprint:
+            raise ExpenseDeliveryRecoveryError(
+                code="operations.expense_requests.payment_recovery_preview_stale",
+                message="Payment recovery evidence changed; preview it again.",
+            )
+        request = db.get(FieldExpenseRequest, preview.expense_request_id)
+        if request is None:
+            raise ExpenseDeliveryRecoveryError(
+                code="operations.expense_requests.payment_recovery_state_invalid",
+                message="The expense recovery evidence is no longer available.",
+            )
+        _require_consistent_claim_identity(request)
+        staged = requeue_expense_payment_delivery(
+            db,
+            dead_event_id=command.dead_event_id,
+        )
+
+        metadata = dict(request.metadata_ or {})
+        recoveries = list(metadata.get("expense_payment_delivery_recoveries") or [])
+        recoveries.append(
+            {
+                "contract_version": PAYMENT_RECOVERY_CONTRACT_VERSION,
+                "event_id": str(staged.event_id),
+                "idempotency_key": staged.idempotency_key,
+                "preview_fingerprint": preview.fingerprint,
+                "command_id": str(command.context.command_id),
+                "actor": command.context.actor,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        metadata["expense_payment_delivery_recoveries"] = recoveries[-100:]
+        request.metadata_ = metadata
+        db.flush()
+        return ExpensePaymentDeliveryRecoveryOutcome(
+            event_id=staged.event_id,
+            idempotency_key=staged.idempotency_key,
+            replayed=False,
+        )
+
+    return execute_owner_command(
+        db,
+        definition=_RECOVER_EXPENSE_PAYMENT_DELIVERY,
+        context=command.context,
+        operation=operation,
+    )
+
+
 def initiate_field_expense_payment_command(
     db: Session, *, command: InitiateFieldExpensePayment
 ) -> ExpensePaymentInitiationOutcome:
@@ -1154,6 +1756,7 @@ def initiate_field_expense_payment_command(
                 code="operations.expense_requests.invalid_transition",
                 message="Only approved expense requests can be paid.",
             )
+        _require_consistent_claim_identity(request)
         current = expense_payment_projection(request)
         if current.status in {
             "queued",
@@ -1243,6 +1846,7 @@ def _submission_outcome(
         notes=request.notes,
         client_ref=request.client_ref,
         total_amount=request.total_amount,
+        requested_total_amount=request.requested_total_amount,
         submitted_at=request.submitted_at,
         created_at=request.created_at,
         updated_at=request.updated_at,
@@ -1253,6 +1857,7 @@ def _submission_outcome(
                 category_name=item.category_name,
                 description=item.description,
                 amount=item.amount,
+                approved_amount=item.approved_amount,
                 expense_date=item.expense_date,
                 vendor_name=item.vendor_name,
                 receipt_url=item.receipt_url,
@@ -1285,16 +1890,19 @@ def _expense_sync_error(delivery: BackofficeDeliveryView | None) -> str | None:
     if delivery.event_status == ExpenseErpSyncStatus.REJECTED.value:
         return "ERP rejected this expense claim."
     if delivery.event_status == ExpenseErpSyncStatus.DEAD.value:
+        if delivery.diagnostic is not None:
+            return safe_diagnostic_summary(delivery.diagnostic)
         return "ERP delivery failed after automatic retries."
     return None
 
 
-def serialize_expense_request(
+def _expense_request_view(
     request: FieldExpenseRequest,
     *,
+    requested_by_name: str | None = None,
     delivery: BackofficeDeliveryView | None = None,
     payment_delivery: BackofficeDeliveryView | None = None,
-) -> dict:
+) -> ExpenseRequestView:
     sync_status = _expense_sync_status(request, delivery)
     payment = expense_payment_projection(request)
     payment_status = payment.status
@@ -1305,46 +1913,121 @@ def serialize_expense_request(
         elif payment_delivery.event_status == "dead":
             payment_status = "delivery_failed"
             payment_error = payment_delivery.last_error
-    return {
-        "id": request.id,
-        "work_order_id": request.work_order_mirror.public_id,
-        "crm_expense_request_id": request.crm_expense_request_id,
-        "requested_by_person_id": request.requested_by_person_id,
-        "requested_by_system_user_id": request.requested_by_system_user_id,
-        "selected_approver_erp_id": request.selected_approver_erp_id,
-        "selected_approver_name": request.selected_approver_name,
-        "selected_approver_email": request.selected_approver_email,
-        "payment_destination_mode": request.payment_destination_mode,
-        "recipient_bank_name": request.recipient_bank_name,
-        "masked_account_number": (
+    return ExpenseRequestView(
+        id=request.id,
+        work_order_id=request.work_order_mirror.public_id,
+        crm_expense_request_id=request.crm_expense_request_id,
+        requested_by_person_id=request.requested_by_person_id,
+        requested_by_system_user_id=request.requested_by_system_user_id,
+        requested_by_name=requested_by_name,
+        selected_approver_erp_id=request.selected_approver_erp_id,
+        selected_approver_name=request.selected_approver_name,
+        selected_approver_email=request.selected_approver_email,
+        payment_destination_mode=request.payment_destination_mode,
+        recipient_bank_name=request.recipient_bank_name,
+        masked_account_number=(
             f"******{request.recipient_account_last4}"
             if request.recipient_account_last4
             else None
         ),
-        "verified_beneficiary_name": request.verified_beneficiary_name,
-        "status": request.status,
-        "purpose": request.purpose,
-        "expense_date": request.expense_date,
-        "currency": request.currency,
-        "notes": request.notes,
-        "rejection_reason": request.rejection_reason,
-        "expense_system": request.expense_system,
-        "expense_claim_reference": request.expense_claim_reference,
-        "expense_claim_number": request.expense_claim_number,
-        "expense_claim_status": request.expense_claim_status,
-        "erp_sync_status": sync_status.value if sync_status is not None else None,
-        "erp_sync_error": _expense_sync_error(delivery),
-        "payment_status": payment_status,
-        "payment_intent_id": payment.intent_id,
-        "payment_error": payment_error,
-        "client_ref": request.client_ref,
-        "total_amount": request.total_amount,
-        "submitted_at": request.submitted_at,
-        "approved_at": request.approved_at,
-        "rejected_at": request.rejected_at,
-        "paid_at": request.paid_at,
-        "created_at": request.created_at,
-        "updated_at": request.updated_at,
+        verified_beneficiary_name=request.verified_beneficiary_name,
+        status=ExpenseRequestStatus(request.status),
+        purpose=request.purpose,
+        expense_date=request.expense_date,
+        currency=request.currency,
+        notes=request.notes,
+        rejection_reason=request.rejection_reason,
+        expense_system=request.expense_system,
+        expense_claim_reference=request.expense_claim_reference,
+        expense_claim_number=request.expense_claim_number,
+        expense_claim_status=request.expense_claim_status,
+        erp_sync_status=sync_status,
+        erp_sync_error=_expense_sync_error(delivery),
+        payment_status=payment_status,
+        payment_intent_id=payment.intent_id,
+        payment_error=payment_error,
+        client_ref=request.client_ref,
+        total_amount=request.total_amount,
+        requested_total_amount=request.requested_total_amount,
+        approved_total_amount=request.approved_total_amount,
+        amounts_adjusted=(
+            request.approved_total_amount is not None
+            and request.approved_total_amount != request.requested_total_amount
+        ),
+        approval_adjustment_reason=request.approval_adjustment_reason,
+        approved_by_system_user_id=request.approved_by_system_user_id,
+        revision=request.revision,
+        submitted_at=request.submitted_at,
+        approved_at=request.approved_at,
+        rejected_at=request.rejected_at,
+        paid_at=request.paid_at,
+        created_at=request.created_at,
+        updated_at=request.updated_at,
+        items=tuple(
+            ExpenseRequestItemOutcome(
+                id=item.id,
+                category_code=item.category_code,
+                category_name=item.category_name,
+                description=item.description,
+                amount=item.amount,
+                approved_amount=item.approved_amount,
+                expense_date=item.expense_date,
+                vendor_name=item.vendor_name,
+                receipt_url=item.receipt_url,
+                receipt_attachment_id=item.receipt_attachment_id,
+                notes=item.notes,
+            )
+            for item in request.items
+        ),
+    )
+
+
+def _legacy_expense_request_view(view: ExpenseRequestView) -> dict[str, object]:
+    return {
+        "id": view.id,
+        "work_order_id": view.work_order_id,
+        "crm_expense_request_id": view.crm_expense_request_id,
+        "requested_by_person_id": view.requested_by_person_id,
+        "requested_by_system_user_id": view.requested_by_system_user_id,
+        "requested_by_name": view.requested_by_name,
+        "selected_approver_erp_id": view.selected_approver_erp_id,
+        "selected_approver_name": view.selected_approver_name,
+        "selected_approver_email": view.selected_approver_email,
+        "payment_destination_mode": view.payment_destination_mode,
+        "recipient_bank_name": view.recipient_bank_name,
+        "masked_account_number": view.masked_account_number,
+        "verified_beneficiary_name": view.verified_beneficiary_name,
+        "status": view.status.value,
+        "purpose": view.purpose,
+        "expense_date": view.expense_date,
+        "currency": view.currency,
+        "notes": view.notes,
+        "rejection_reason": view.rejection_reason,
+        "expense_system": view.expense_system,
+        "expense_claim_reference": view.expense_claim_reference,
+        "expense_claim_number": view.expense_claim_number,
+        "expense_claim_status": view.expense_claim_status,
+        "erp_sync_status": (
+            view.erp_sync_status.value if view.erp_sync_status is not None else None
+        ),
+        "erp_sync_error": view.erp_sync_error,
+        "payment_status": view.payment_status,
+        "payment_intent_id": view.payment_intent_id,
+        "payment_error": view.payment_error,
+        "client_ref": view.client_ref,
+        "total_amount": view.total_amount,
+        "requested_total_amount": view.requested_total_amount,
+        "approved_total_amount": view.approved_total_amount,
+        "amounts_adjusted": view.amounts_adjusted,
+        "approval_adjustment_reason": view.approval_adjustment_reason,
+        "approved_by_system_user_id": view.approved_by_system_user_id,
+        "revision": view.revision,
+        "submitted_at": view.submitted_at,
+        "approved_at": view.approved_at,
+        "rejected_at": view.rejected_at,
+        "paid_at": view.paid_at,
+        "created_at": view.created_at,
+        "updated_at": view.updated_at,
         "items": [
             {
                 "id": item.id,
@@ -1352,32 +2035,137 @@ def serialize_expense_request(
                 "category_name": item.category_name,
                 "description": item.description,
                 "amount": item.amount,
+                "approved_amount": item.approved_amount,
                 "expense_date": item.expense_date,
                 "vendor_name": item.vendor_name,
                 "receipt_url": item.receipt_url,
                 "receipt_attachment_id": item.receipt_attachment_id,
                 "notes": item.notes,
             }
-            for item in request.items
+            for item in view.items
         ],
     }
 
 
-def _serialize_expense_requests(
+def serialize_expense_request(
+    request: FieldExpenseRequest,
+    *,
+    delivery: BackofficeDeliveryView | None = None,
+    payment_delivery: BackofficeDeliveryView | None = None,
+) -> dict[str, object]:
+    return _legacy_expense_request_view(
+        _expense_request_view(
+            request,
+            delivery=delivery,
+            payment_delivery=payment_delivery,
+        )
+    )
+
+
+def _expense_request_views(
     db: Session, requests: list[FieldExpenseRequest]
-) -> list[dict]:
+) -> tuple[ExpenseRequestView, ...]:
     deliveries = get_expense_claim_deliveries(db, [request.id for request in requests])
     payment_deliveries = get_expense_payment_deliveries(
         db, [request.id for request in requests]
     )
-    return [
-        serialize_expense_request(
+    requester_user_ids = _expense_requester_system_user_ids(db, requests)
+    requester_identities = resolve_staff_display_identities(
+        db,
+        query=StaffDisplayIdentityQuery(
+            user_ids=frozenset(requester_user_ids.values())
+        ),
+    )
+    requester_names = {
+        identity.user_id: identity.display_name
+        for identity in requester_identities.identities
+    }
+    return tuple(
+        _expense_request_view(
             request,
+            requested_by_name=(
+                requester_names.get(requester_user_ids[request.id])
+                if request.id in requester_user_ids
+                else None
+            ),
             delivery=deliveries.get(request.id),
             payment_delivery=payment_deliveries.get(request.id),
         )
         for request in requests
-    ]
+    )
+
+
+def _expense_requester_system_user_ids(
+    db: Session, requests: list[FieldExpenseRequest]
+) -> dict[UUID, UUID]:
+    """Resolve only exact persisted requester bridges for display projection."""
+
+    resolved = {
+        request.id: request.requested_by_system_user_id
+        for request in requests
+        if request.requested_by_system_user_id is not None
+    }
+    unresolved = [request for request in requests if request.id not in resolved]
+    technician_ids = {
+        request.requested_by_technician_id
+        for request in unresolved
+        if request.requested_by_technician_id is not None
+    }
+    technician_users: dict[UUID, UUID] = {}
+    if technician_ids:
+        technician_rows = db.execute(
+            select(TechnicianProfile.id, TechnicianProfile.system_user_id).where(
+                TechnicianProfile.id.in_(technician_ids),
+                TechnicianProfile.system_user_id.is_not(None),
+            )
+        ).all()
+        technician_users = {
+            technician_id: system_user_id
+            for technician_id, system_user_id in technician_rows
+            if system_user_id is not None
+        }
+    for request in unresolved:
+        technician_id = request.requested_by_technician_id
+        system_user_id = (
+            technician_users.get(technician_id) if technician_id is not None else None
+        )
+        if system_user_id is not None:
+            resolved[request.id] = system_user_id
+
+    unresolved = [request for request in unresolved if request.id not in resolved]
+    person_ids = {request.requested_by_person_id for request in unresolved}
+    if not person_ids:
+        return resolved
+    person_candidates: dict[UUID, set[UUID]] = {
+        person_id: set() for person_id in person_ids
+    }
+    staff_rows = db.execute(
+        select(SystemUser.id, SystemUser.person_party_id).where(
+            or_(
+                SystemUser.id.in_(person_ids),
+                SystemUser.person_party_id.in_(person_ids),
+            )
+        )
+    ).all()
+    for system_user_id, person_party_id in staff_rows:
+        if system_user_id in person_candidates:
+            person_candidates[system_user_id].add(system_user_id)
+        if person_party_id in person_candidates:
+            person_candidates[person_party_id].add(system_user_id)
+    profile_rows = db.execute(
+        select(TechnicianProfile.person_id, TechnicianProfile.system_user_id).where(
+            TechnicianProfile.person_id.in_(person_ids),
+            TechnicianProfile.system_user_id.is_not(None),
+        )
+    ).all()
+    for person_id, system_user_id in profile_rows:
+        if system_user_id is not None:
+            person_candidates[person_id].add(system_user_id)
+    for request in unresolved:
+        candidates = person_candidates[request.requested_by_person_id]
+        if len(candidates) == 1:
+            resolved[request.id] = next(iter(candidates))
+    return resolved
 
 
 def list_expense_vendors(
@@ -1398,6 +2186,159 @@ def list_expense_vendors(
     )
 
 
+def _requester_identity(db: Session, system_user_id: UUID) -> _ExpenseRequesterIdentity:
+    system_user = db.execute(
+        select(SystemUser).where(
+            SystemUser.id == system_user_id,
+            SystemUser.is_active.is_(True),
+        )
+    ).scalar_one_or_none()
+    if system_user is None:
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.requester_not_found",
+            message="The authenticated staff requester was not found.",
+        )
+    person_ids = tuple(
+        dict.fromkeys(
+            value
+            for value in (system_user.id, system_user.person_party_id)
+            if value is not None
+        )
+    )
+    technician_profiles = tuple(
+        db.execute(
+            select(TechnicianProfile.id, TechnicianProfile.person_id).where(
+                or_(
+                    TechnicianProfile.system_user_id == system_user.id,
+                    TechnicianProfile.person_id.in_(person_ids),
+                )
+            )
+        ).all()
+    )
+    person_ids = tuple(
+        dict.fromkeys(
+            (*person_ids, *(person_id for _, person_id in technician_profiles))
+        )
+    )
+    technician_profile_ids = tuple(profile_id for profile_id, _ in technician_profiles)
+    return _ExpenseRequesterIdentity(
+        system_user_id=system_user.id,
+        person_ids=person_ids,
+        technician_profile_ids=technician_profile_ids,
+    )
+
+
+def _expense_request_ownership(identity: _ExpenseRequesterIdentity):
+    return or_(
+        FieldExpenseRequest.requested_by_system_user_id == identity.system_user_id,
+        FieldExpenseRequest.requested_by_person_id.in_(identity.person_ids),
+        FieldExpenseRequest.requested_by_technician_id.in_(
+            identity.technician_profile_ids
+        ),
+    )
+
+
+def _requester_expense_query(db: Session, identity: _ExpenseRequesterIdentity):
+    return (
+        db.query(FieldExpenseRequest)
+        .options(selectinload(FieldExpenseRequest.items))
+        .filter(_expense_request_ownership(identity))
+        .filter(FieldExpenseRequest.is_active.is_(True))
+    )
+
+
+def list_requester_expense_requests(
+    db: Session, query: RequesterExpenseHistoryQuery
+) -> RequesterExpenseHistoryPage:
+    if query.limit < 1 or query.limit > 200 or query.offset < 0:
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.invalid_request",
+            message="Expense history pagination is invalid.",
+        )
+    identity = _requester_identity(db, query.system_user_id)
+    history = _requester_expense_query(db, identity)
+    if query.work_order_id:
+        history = history.join(FieldExpenseRequest.work_order_mirror).filter(
+            WorkOrder.public_id == query.work_order_id.strip()
+        )
+    if query.status is not None:
+        history = history.filter(FieldExpenseRequest.status == query.status.value)
+    total = int(history.with_entities(func.count(FieldExpenseRequest.id)).scalar() or 0)
+    rows = (
+        history.order_by(FieldExpenseRequest.created_at.desc())
+        .offset(query.offset)
+        .limit(query.limit)
+        .all()
+    )
+    return RequesterExpenseHistoryPage(
+        items=_expense_request_views(db, rows),
+        total=total,
+        limit=query.limit,
+        offset=query.offset,
+    )
+
+
+def get_requester_expense_request(
+    db: Session, query: RequesterExpenseDetailQuery
+) -> ExpenseRequestView:
+    identity = _requester_identity(db, query.system_user_id)
+    request = (
+        _requester_expense_query(db, identity)
+        .filter(FieldExpenseRequest.id == query.request_id)
+        .one_or_none()
+    )
+    if request is None:
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.request_not_found",
+            message="Expense request was not found.",
+        )
+    return _expense_request_views(db, [request])[0]
+
+
+def list_manager_expense_requests(
+    db: Session, query: ManagerExpenseReviewQuery
+) -> ManagerExpenseReviewPage:
+    if query.limit < 1 or query.limit > 200 or query.offset < 0:
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.invalid_request",
+            message="Manager expense review pagination is invalid.",
+        )
+    review = (
+        db.query(FieldExpenseRequest)
+        .options(selectinload(FieldExpenseRequest.items))
+        .filter(FieldExpenseRequest.is_active.is_(True))
+    )
+    if query.status is not None:
+        review = review.filter(FieldExpenseRequest.status == query.status.value)
+    if query.work_order_public_id is not None:
+        review = review.join(
+            WorkOrder,
+            WorkOrder.id == FieldExpenseRequest.work_order_mirror_id,
+        ).filter(WorkOrder.public_id == query.work_order_public_id)
+    if query.approver_system_user_id is not None:
+        review = review.filter(
+            or_(
+                FieldExpenseRequest.status != ExpenseRequestStatus.SUBMITTED.value,
+                FieldExpenseRequest.selected_approver_system_user_id.is_(None),
+                FieldExpenseRequest.selected_approver_system_user_id
+                == query.approver_system_user_id,
+            )
+        )
+    total = int(review.with_entities(func.count(FieldExpenseRequest.id)).scalar() or 0)
+    rows = (
+        review.order_by(FieldExpenseRequest.created_at.desc())
+        .offset(query.offset)
+        .limit(query.limit)
+        .all()
+    )
+    return ManagerExpenseReviewPage(
+        items=_expense_request_views(db, rows),
+        total=total,
+        limit=query.limit,
+        offset=query.offset,
+    )
+
+
 class FieldExpenseRequests:
     @staticmethod
     def list_mine(
@@ -1409,30 +2350,38 @@ class FieldExpenseRequests:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        profile = _profile_from_principal(db, principal)
-        ownership = _expense_request_ownership(profile)
-        query = (
-            db.query(FieldExpenseRequest)
-            .options(selectinload(FieldExpenseRequest.items))
-            .filter(ownership)
-            .filter(FieldExpenseRequest.is_active.is_(True))
-            .order_by(FieldExpenseRequest.created_at.desc())
+        page = list_requester_expense_requests(
+            db,
+            RequesterExpenseHistoryQuery(
+                system_user_id=_principal_system_user_id(principal),
+                work_order_id=crm_work_order_id,
+                status=ExpenseRequestStatus(_status(status)) if status else None,
+                limit=limit,
+                offset=offset,
+            ),
         )
-        if crm_work_order_id:
-            query = query.join(FieldExpenseRequest.work_order_mirror).filter(
-                WorkOrder.public_id == crm_work_order_id
-            )
-        if status:
-            query = query.filter(FieldExpenseRequest.status == _status(status))
-        requests = apply_pagination(query, limit, offset).all()
-        return _serialize_expense_requests(db, requests)
+        return [_legacy_expense_request_view(item) for item in page.items]
 
     @staticmethod
     def get(
         db: Session, principal: dict[str, Any], expense_request_id: str | UUID
     ) -> dict:
-        request = _get_scoped_request(db, principal, expense_request_id)
-        return _serialize_expense_requests(db, [request])[0]
+        try:
+            return _legacy_expense_request_view(
+                get_requester_expense_request(
+                    db,
+                    RequesterExpenseDetailQuery(
+                        system_user_id=_principal_system_user_id(principal),
+                        request_id=_expense_request_uuid(expense_request_id),
+                    ),
+                )
+            )
+        except FieldExpenseRequestError as exc:
+            if exc.code == "operations.expense_requests.request_not_found":
+                raise HTTPException(
+                    status_code=404, detail="Expense request not found"
+                ) from exc
+            raise
 
     @staticmethod
     def list_all(
@@ -1444,25 +2393,16 @@ class FieldExpenseRequests:
         offset: int = 0,
     ) -> list[dict]:
         """Manager view: expense requests across all technicians."""
-        query = (
-            db.query(FieldExpenseRequest)
-            .options(selectinload(FieldExpenseRequest.items))
-            .filter(FieldExpenseRequest.is_active.is_(True))
-            .order_by(FieldExpenseRequest.created_at.desc())
+        page = list_manager_expense_requests(
+            db,
+            ManagerExpenseReviewQuery(
+                approver_system_user_id=approver_system_user_id,
+                status=ExpenseRequestStatus(_status(status)) if status else None,
+                limit=limit,
+                offset=offset,
+            ),
         )
-        if status:
-            query = query.filter(FieldExpenseRequest.status == _status(status))
-        if approver_system_user_id is not None:
-            query = query.filter(
-                or_(
-                    FieldExpenseRequest.status != "submitted",
-                    FieldExpenseRequest.selected_approver_system_user_id.is_(None),
-                    FieldExpenseRequest.selected_approver_system_user_id
-                    == approver_system_user_id,
-                )
-            )
-        requests = apply_pagination(query, limit, offset).all()
-        return _serialize_expense_requests(db, requests)
+        return [_legacy_expense_request_view(item) for item in page.items]
 
 
 def _expense_request_uuid(expense_request_id: str | UUID) -> UUID:
@@ -1512,34 +2452,14 @@ def _locked_expense_request(
     return request
 
 
-def _get_scoped_request(
-    db: Session, principal: dict[str, Any], expense_request_id: str | UUID
-) -> FieldExpenseRequest:
-    profile = _profile_from_principal(db, principal)
-    request = (
-        db.query(FieldExpenseRequest)
-        .options(selectinload(FieldExpenseRequest.items))
-        .filter(FieldExpenseRequest.id == _expense_request_uuid(expense_request_id))
-        .filter(_expense_request_ownership(profile))
-        .filter(FieldExpenseRequest.is_active.is_(True))
-        .one_or_none()
-    )
-    if request is None:
-        raise HTTPException(status_code=404, detail="Expense request not found")
-    return request
-
-
-def _expense_request_ownership(profile: TechnicianProfile):
-    ownership = or_(
-        FieldExpenseRequest.requested_by_person_id == profile.person_id,
-        FieldExpenseRequest.requested_by_technician_id == profile.id,
-    )
-    if profile.system_user_id is not None:
-        ownership = or_(
-            ownership,
-            FieldExpenseRequest.requested_by_system_user_id == profile.system_user_id,
-        )
-    return ownership
+def _principal_system_user_id(principal: dict[str, Any]) -> UUID:
+    value = principal.get("principal_id")
+    try:
+        return coerce_uuid(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=401, detail="Authenticated user is required"
+        ) from exc
 
 
 def _require_staff_work_order_access(
@@ -1877,6 +2797,38 @@ def _enqueue_decision_backoffice(
     return result
 
 
+def _enqueue_submission_backoffice(
+    db: Session, request: FieldExpenseRequest
+) -> BackofficeEnqueueResult:
+    from app.services.backoffice import enqueue_expense_submission
+
+    result = enqueue_expense_submission(db, request)
+    db.flush()
+    return result
+
+
+def _redacted_exception_info(
+    exc: Exception,
+) -> tuple[type[BaseException], BaseException, TracebackType | None]:
+    """Retain traceback frames without serializing exception values or SQL params."""
+
+    return (
+        RuntimeError,
+        RuntimeError("ERP staging exception details redacted"),
+        exc.__traceback__,
+    )
+
+
+def _require_token_bound_request_identity(request: FieldExpenseRequest) -> None:
+    if request.client_ref is None or (
+        request.payment_destination_token and request.client_ref != request.id
+    ):
+        raise FieldExpenseRequestError(
+            code="operations.expense_requests.identity_mismatch",
+            message="Expense payment identity does not match this request.",
+        )
+
+
 def _note_approval_command(
     request: FieldExpenseRequest,
     command: ApproveFieldExpenseRequest,
@@ -1934,6 +2886,14 @@ def _approval_outcome(
         erp_sync_status=sync_status,
         erp_sync_event_id=delivery.event_id,
         erp_sync_error=_expense_sync_error(delivery),
+        requested_total_amount=request.requested_total_amount,
+        approved_total_amount=(request.approved_total_amount or Decimal("0")),
+        amounts_adjusted=(
+            request.approved_total_amount is not None
+            and request.approved_total_amount != request.requested_total_amount
+        ),
+        adjustment_reason=request.approval_adjustment_reason,
+        revision=request.revision,
     )
 
 

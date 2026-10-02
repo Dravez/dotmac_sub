@@ -27,6 +27,7 @@ from app.services.audit_adapter import stage_audit_event
 from app.services.domain_errors import DomainError
 from app.services.events import emit_event
 from app.services.events.types import EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -111,6 +112,9 @@ class InboxResolvedAction:
     pipelines: tuple[PipelineOption, ...] = ()
     leads: tuple[LeadOption, ...] = ()
     requires_link: bool = False
+    identity_channel: str | None = None
+    identity_label: str | None = None
+    provider_account_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +222,12 @@ def _exact_identity(
     )
 
 
+def _endpoint_identity(
+    db: Session, conversation: InboxConversation
+) -> team_inbox_contact_links.IdentityEvidence:
+    return team_inbox_contact_links.conversation_identity_evidence(db, conversation)
+
+
 def _structural_lead_id(db: Session, conversation_id: UUID) -> UUID | None:
     direct = conversation_lead_relationships.active_link(db, conversation_id)
     if direct is not None:
@@ -255,20 +265,21 @@ def resolve_action(
             conversation_id,
         )
     party_id, subscriber_id, ambiguous_exact = _exact_identity(db, conversation)
-    candidates = team_inbox_contact_links.contact_link_candidates(
-        db, [str(conversation.contact_address or "")]
-    )
-    potential_matches = bool(
-        candidates.get("subscribers") or candidates.get("resellers")
+    endpoint_evidence = _endpoint_identity(db, conversation)
+    if party_id is None:
+        party_id = endpoint_evidence.exact_party_id
+    ambiguous_identity = ambiguous_exact or (
+        endpoint_evidence.disposition
+        is team_inbox_contact_links.IdentityEvidenceDisposition.ambiguous_match
     )
 
     if intent == InboxActionIntent.profile:
-        if ambiguous_exact or (party_id is None and potential_matches):
+        if ambiguous_identity:
             return InboxResolvedAction(
                 intent,
                 InboxResolvedActionType.identity_review_required,
                 "Review Identity",
-                "Potential or conflicting identities require reviewed selection.",
+                "Conflicting exact identities require reviewed selection.",
                 conversation_id,
             )
         if subscriber_id is not None:
@@ -324,10 +335,17 @@ def resolve_action(
         return InboxResolvedAction(
             intent,
             InboxResolvedActionType.create_party_and_lead,
-            "Create Profile & Lead",
-            "No authoritative Party is linked. Submitted observations remain unverified.",
+            "Create Lead",
+            "No authoritative identity owns this endpoint. Creating the Lead will bind this observed inbound identity.",
             conversation_id,
             destination=f"/admin/sales/leads/new?inbox_conversation_id={conversation_id}",
+            identity_channel=endpoint_evidence.identity.channel_type,
+            identity_label=endpoint_evidence.identity.normalized_endpoint,
+            provider_account_scope=(
+                endpoint_evidence.identity.provider_account_scope
+                if endpoint_evidence.identity.provider_account_id is not None
+                else None
+            ),
         )
 
     structural_lead_id = _structural_lead_id(db, conversation_id)
@@ -360,12 +378,12 @@ def resolve_action(
                 f"?inbox_conversation_id={conversation_id}"
             ),
         )
-    if ambiguous_exact or (party_id is None and potential_matches):
+    if ambiguous_identity:
         return InboxResolvedAction(
             intent,
             InboxResolvedActionType.identity_review_required,
             "Review Identity",
-            "Potential or conflicting identities require reviewed selection.",
+            "Conflicting exact identities require reviewed selection.",
             conversation_id,
         )
     if party_id is None:
@@ -380,10 +398,17 @@ def resolve_action(
         return InboxResolvedAction(
             intent,
             InboxResolvedActionType.create_party_and_lead,
-            "Create Profile & Lead",
-            "No authoritative Party is linked. Submitted observations remain unverified.",
+            "Create Lead",
+            "No authoritative identity owns this endpoint. Creating the Lead will bind this observed inbound identity.",
             conversation_id,
             destination=f"/admin/sales/leads/new?inbox_conversation_id={conversation_id}",
+            identity_channel=endpoint_evidence.identity.channel_type,
+            identity_label=endpoint_evidence.identity.normalized_endpoint,
+            provider_account_scope=(
+                endpoint_evidence.identity.provider_account_scope
+                if endpoint_evidence.identity.provider_account_id is not None
+                else None
+            ),
         )
     if not permissions.can_read_leads:
         return InboxResolvedAction(
@@ -616,6 +641,7 @@ def create_lead_for_party(
                 db,
                 EventType.lead_created,
                 {
+                    "tenant_id": str(OPERATOR_TENANT_ID),
                     "lead_id": str(lead.id),
                     "party_id": str(command.party_id),
                     "origin_conversation_id": str(conversation.id),

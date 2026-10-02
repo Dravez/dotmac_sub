@@ -69,6 +69,7 @@ _ENDED_STATUSES = frozenset(
 _UNAVAILABLE_STATUSES = frozenset(
     {
         SubscriptionStatus.blocked,
+        SubscriptionStatus.paused,
         SubscriptionStatus.suspended,
         SubscriptionStatus.disabled,
     }
@@ -489,6 +490,15 @@ def _service_reason_and_action(
     access_block_reason: str | None,
 ) -> tuple[str, ServiceStatusAction | None]:
     service_name = s.offer.name if s.offer else "Your service"
+    if s.status == SubscriptionStatus.paused:
+        return (
+            "paused",
+            _contact_support_action(
+                f"{service_name} is paused while support resolves the linked issue. "
+                "Unused service time is preserved.",
+                resp.currency,
+            ),
+        )
     if s.status in _UNAVAILABLE_STATUSES:
         return _unavailable_service_action(
             service_name,
@@ -626,6 +636,7 @@ def _unavailable_service_action(
         EnforcementReason.customer_hold: "customer_hold",
         EnforcementReason.fraud: "fraud_review",
         EnforcementReason.system: "system_hold",
+        EnforcementReason.ticket_sla: "ticket_sla_breach",
     }
     reason = nonfinancial_reasons.get(lock_reason, "suspended")
     return (

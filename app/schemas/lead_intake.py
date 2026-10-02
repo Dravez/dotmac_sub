@@ -2,6 +2,7 @@
 
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -28,6 +29,32 @@ class AiLeadIntakeClassification(BaseModel):
     party_type: LeadIntakePartyType
     party_type_confidence: float = Field(ge=0, le=1)
     clarification_question: str | None = Field(default=None, max_length=240)
+
+
+class LeadCandidateAttribution(BaseModel):
+    """PII-free external acquisition evidence carried into Sales."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    campaign_ref: str | None = Field(default=None, max_length=255)
+    external_ad_id: str | None = Field(default=None, max_length=200)
+    referral_source: str | None = Field(default=None, max_length=80)
+    referral_type: str | None = Field(default=None, max_length=80)
+
+
+class AiLeadCandidateClassifiedEvent(BaseModel):
+    """Durable handoff from the AI classification owner to Sales."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, protected_namespaces=())
+    schema_version: Literal[1] = 1
+    tenant_id: UUID
+    conversation_id: UUID
+    message_id: UUID
+    classification: AiLeadIntakeClassification
+    provider_label: str | None = Field(default=None, max_length=80)
+    model_label: str | None = Field(default=None, max_length=160)
+    attribution: LeadCandidateAttribution = Field(
+        default_factory=LeadCandidateAttribution
+    )
 
 
 class LeadIntakeTemplateDraft(BaseModel):

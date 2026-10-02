@@ -182,7 +182,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "Public debit and reversal commands enter one "
                     "manifest-verified owner transaction. Explicit nested "
                     "staging collaborators flush only inside approved plan-"
-                    "change, add-on, or renewal coordinator transactions."
+                    "change, add-on, renewal, or reviewed legacy-renewal "
+                    "tax-invoice correction coordinator transactions."
                 ),
                 locking=(
                     "Debit confirmation locks the Subscriber account before "
@@ -217,6 +218,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.account_adjustments.invalid_command_context",
                     "financial.account_adjustments.nested_owner_command",
                     "financial.account_adjustments.nested_transaction_completion",
+                    "financial.account_adjustments.participant_owner_required",
                 ),
                 mapping_owner="API and enclosing financial coordinator adapters",
                 retryable_codes=("financial.account_adjustments.write_conflict",),
@@ -339,6 +341,7 @@ SERVICES: tuple[SOTService, ...] = (
             "deterministic payment-credit source selection",
             "oldest-payable-debt application orchestration",
             "exact invoice payment-backed funding preview",
+            "pre-issuance payment-credit reservation and atomic application",
             "all-or-nothing exact invoice credit application",
             "invoice-void release of exact account-credit allocations",
             "account-credit application invariant monitoring",
@@ -359,6 +362,10 @@ SERVICES: tuple[SOTService, ...] = (
             "separate commands because credit is spendable only once its "
             "settlement evidence exists; the settlement path calls "
             "offer_available_credit once it does."
+            " Invoice issuance reserves eligible payment credit while the document "
+            "is still a draft, then consumes that exact reservation after the "
+            "receivable is issued in the same transaction. The new invoice's own "
+            "debit therefore cannot hide the funding that must settle it."
         ),
     ),
 )

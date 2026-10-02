@@ -6,12 +6,14 @@
   rejection decision.
 - ERP owns the accounting claim, payment intent, transfer execution,
   reconciliation, and final paid fact.
-- Submission is local only and creates no ERP outbox event.
-- Manager approval is the sole release point. Approval and one versioned outbox
-  event commit atomically; rejection remains local.
-- The worker creates or retrieves an ERP draft, uploads every private receipt,
-  and only then delivers the trusted approval. Payment initiation remains a
-  separately authorized, ordered event.
+- Submission and `expense_submit_v3` commit atomically. The worker creates or
+  retrieves a hidden ERP draft, uploads every required receipt, invokes explicit
+  submit, and requires ERP status `SUBMITTED` before exposing the claim.
+- Manager approval or rejection and its separate `expense_approve_v4` or
+  `expense_reject_v3` event commit atomically. Each decision event waits for
+  accepted submission without consuming retry attempts.
+- Sub remains authoritative for the manager decision. ERP remains authoritative
+  for accounting, payment, reconciliation, and the final paid fact.
 
 ## Deployment prerequisites
 
@@ -27,12 +29,24 @@
    status, and Field manager decisions. Grant the separate exact
    `sub:expense:pay` scope only to the Sub integration identity that may request
    a transfer; do not grant broader human or finance-administration permissions.
-5. Confirm the ERP accepts stable Sub claim and line IDs, the
-   `exp-{request_id}-approved-release-v2` draft key, and receipt keys derived
-   from contract version, expense, line, and attachment.
+5. Confirm the ERP accepts stable Sub claim and line IDs, receipt keys derived
+   from contract version, expense, line, and attachment, and the versioned
+   keys: `exp-{request_id}-submitted-v3`,
+   `exp-{request_id}-approved-{decision_id}-v4`, and
+   `exp-{request_id}-rejected-{decision_id}-v3`.
+   The v4 approval must atomically apply every `source_line_id` and
+   `approved_amount` before approving the claim, and must retain the optional
+   adjustment reason. Keep v3 approval delivery available only for already
+   queued historical events.
+   For every new token-bearing canary, confirm the destination-verification
+   `source_claim_id`, submitted `client_ref`, `FieldExpenseRequest.id`, draft and
+   receipt `source_claim_id`, approval `source_claim_id`, and status-poll key are
+   the same UUID. A mismatch must block manager approval before any ERP event is
+   staged. Retain `release_approved_v2` behavior for already-staged legacy events.
 6. Confirm the previous expense sender is disabled before changing ownership.
 7. Verify every technician email and intended approver email has one exact
-   active match across Sub and ERP. Verify at least one eligible ERP approver,
+   active match across Sub and ERP. Verify the requester is absent from their
+   own approver choices and at least one other eligible ERP approver remains,
    an active ERP bank directory, and each technician's intended default bank
    profile. An incomplete profile is allowed only when the technician uses a
    verified one-expense override.
@@ -45,26 +59,40 @@
 1. Record and retain the pre-cutover legacy owner for
    `sync_flow_ownership.expense_claim` while deploying and validating the
    application change.
-2. Before ownership cutover, verify a submitted expense creates no outbox row.
+2. Before ownership cutover, verify submission fails closed without creating a
+   request or an event.
 3. Assign `expense_claim` ownership to `sub` through the reviewed production
    configuration procedure.
-4. Submit one newly created canary expense and verify it is work-order-bound and
-   creates no ERP outbox event.
-5. Approve the canary in the Field app and verify exactly one release event is
-   accepted, all required receipts are attached, and the ERP claim becomes
-   `APPROVED`, not `PENDING_APPROVAL`. Confirm the ERP claim names the selected
+4. Submit one newly created canary expense and verify exactly one submission
+   event is accepted, all required receipts are attached, and ERP reports
+   `SUBMITTED`. Confirm no ERP `DRAFT` is visible to normal ERP users.
+   If submission returns
+   `operations.expense_requests.erp_staging_failed` or
+   `operations.expense_requests.erp_delivery_not_configured`, treat HTTP 503 as
+   a temporary staging/configuration outage. Correlate the server log by the
+   non-secret expense request and command IDs, correct the outbox or capability
+   problem, and retry the original submission with the same client reference
+   and unchanged input. Do not call `retry-delivery`: no request or durable
+   outbox event committed, so that endpoint correctly has nothing to requeue.
+5. With the selected approver, who must be different from the requester, approve
+   the canary in the Field app and verify the separate approval event is
+   accepted and the same ERP claim becomes `APPROVED`, not `PENDING_APPROVAL`.
+   Confirm the ERP claim names the selected
    approver and contains the expected masked destination. Do not inspect or
    report the full account number.
 6. With a dedicated payment-authorized manager, select **Pay expense** and verify
-   one payment event is staged. Confirm ERP creates one payment intent and reports
-   `PROCESSING` (or `COMPLETED` for an immediate success).
+   one `work-order-expense-payment.v1` event is staged, then delivered through
+   the typed `initiate_expense_payment` capability. Confirm ERP creates one
+   payment intent and reports `PROCESSING` (or `COMPLETED` for an immediate
+   success). A queued Sub event is waiting for ERP and is not proof that ERP
+   created an intent.
 7. Exercise the webhook or polling path and verify `COMPLETED` changes the ERP
    claim and both Field views to `PAID`. Exercise an indeterminate sandbox result
    and verify no automatic duplicate transfer is attempted.
 
 ## No historical backfill
 
-Do not enqueue or replay previously submitted or approved expenses during this
+Do not enqueue or replay previously submitted, approved, or rejected expenses during this
 cutover. Existing records are intentionally excluded. This branch
 contains no migration, startup hook, scheduled scan, or repair command that
 backfills them. Any future historical repair requires a separate reviewed scope.
@@ -92,6 +120,18 @@ and never use this interface for a historical bulk backfill.
 Legacy pre-approval `submit`, `approve`, or `reject` events are intentionally
 left untouched and refused by the worker. They are not eligible for this
 recovery command.
+
+Permission-denied payment recovery is separate from approval recovery and
+requires `operations:expense_request:pay`. Start with
+`GET /api/v1/field/manager/expenses/payment-deliveries/{event_id}/recovery-preview`,
+then submit the returned fingerprint to the matching `recover` endpoint. The
+preview permits only a dead `initiate_payment` event whose allowlisted ERP
+diagnostic is `permission_denied`, HTTP 403, for `initiate_expense_payment`. It
+also requires ERP to report the claim as approved with no payment intent,
+payment status, or paid time. Recovery changes that same event back to pending
+with its original idempotency key; it never creates a second payment command or
+replacement key. Re-preview after any subsequent failure instead of repeatedly
+recovering stale evidence.
 
 ## Rollback
 

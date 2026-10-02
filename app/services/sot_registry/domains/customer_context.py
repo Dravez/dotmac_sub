@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationActionCapability,
+    AutomationActionInput,
+    AutomationConditionField,
+    AutomationDomainCapabilities,
+    AutomationOperator,
+    AutomationScriptTargetCapability,
+    AutomationTriggerCapability,
+    AutomationValueType,
+)
+from app.services.custom_field_contracts import (
+    CustomFieldDomainCapabilities,
+    CustomFieldTargetCapability,
+    LegacyCustomFieldSurface,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -20,10 +35,126 @@ from app.services.sot_manifest import (
 )
 from app.services.sot_registry.model import DomainSOT
 
+_CUSTOMER_STATUS_FIELD = AutomationConditionField(
+    key="status",
+    label="Account status",
+    value_type=AutomationValueType.enum,
+    operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+    enum_values=(
+        "new",
+        "active",
+        "blocked",
+        "suspended",
+        "disabled",
+        "canceled",
+        "delinquent",
+    ),
+)
+
 DOMAIN = DomainSOT(
     domain="customer_context",
     setting_domains=("subscriber",),
     services=(
+        SOTService(
+            name="customer.avatar",
+            module="app.services.avatar",
+            owns=("subscriber avatar selection and durable metadata",),
+            depends_on=("customer.accounts",),
+            notes=(
+                "Subscriber.avatar_url selects one public StoredFile. The storage "
+                "participant writes S3 before SQL and stages metadata without commit; "
+                "legacy static URLs remain readable until independently verified migration."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="subscriber avatar selection and durable metadata",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed avatar command",
+                            "canonical subscriber account",
+                        ),
+                        canonical_writer="customer.avatar",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed avatar command",
+                        owner="customer.avatar",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="authenticated subscriber upload or removal request",
+                    ),
+                    AuthorityInput(
+                        name="canonical subscriber account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="locked Subscriber row and selected avatar URL",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "execute_owner_command commits Subscriber selection and "
+                        "StoredFile metadata atomically; S3 upload precedes SQL."
+                    ),
+                    locking="Subscriber row is selected FOR UPDATE before selection changes.",
+                    idempotency=(
+                        "Object keys are content-addressed; deletion is metadata-only. "
+                        "A retry may create another StoredFile row but selects one URL."
+                    ),
+                    retries="Retry the entire owner command after a rolled-back failure.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "customer.avatar.invalid_file",
+                        "customer.avatar.stale_legacy_url",
+                        "customer.avatar.subscriber_missing",
+                        *owner_command_boundary_error_codes("customer.avatar"),
+                    ),
+                    mapping_owner="authenticated avatar API adapter",
+                    fail_closed_on=(
+                        "missing subscriber",
+                        "invalid image",
+                        "missing object",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The existing subscriber.updated envelope names only the "
+                        "subscriber and avatar_url in updated_fields."
+                    ),
+                    replay=(
+                        "The owner command stages a pending event in the same "
+                        "transaction; the durable dispatcher replays delivery."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.CUTOVER_READY,
+                    old_owner="local static avatar writer",
+                    new_owner="customer.avatar",
+                    verification=(
+                        "tests/test_avatar_services.py and "
+                        "tests/test_avatar_migration_tools.py"
+                    ),
+                    cutover_gate=(
+                        "digest-bound dry-run inventory, guarded backfill, and "
+                        "per-object verification in docs/storage_s3.md"
+                    ),
+                    fallback_retirement="remove static compatibility only after all old URLs are migrated",
+                ),
+                steward="customer operations",
+                design_refs=("docs/storage_s3.md", "docs/SOT_RELATIONSHIP_MAP.md"),
+                test_refs=(
+                    "tests/test_avatar_services.py",
+                    "tests/test_avatar_migration_tools.py",
+                    "tests/architecture/test_avatar_storage_boundary.py",
+                    "tests/architecture/test_avatar_ingress_contract.py",
+                ),
+            ),
+        ),
         SOTService(
             name="customer.accounts",
             module="app.services.subscriber",
@@ -43,6 +174,200 @@ DOMAIN = DomainSOT(
                 "Subscriber or Reseller rows or decide account lifecycle "
                 "state themselves. "
                 "Existing direct writers remain shrink-only migration debt."
+            ),
+        ),
+        SOTService(
+            name="customer.search",
+            module="app.services.customer_search",
+            owns=("bounded active customer search and customer identity selection",),
+            depends_on=("customer.accounts",),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="bounded active customer search and customer identity selection",
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "typed customer search query",
+                            "selected canonical customer identities",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed customer search query",
+                        owner="customer.search",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "validated CustomerSearchQuery provided by an authorized adapter"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected canonical customer identities",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="active Subscriber identities resolved by customer.search",
+                    ),
+                    AuthorityInput(
+                        name="canonical customer accounts",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="active Subscriber identity and account labels",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "Search and identity resolution read canonical customer rows; "
+                        "they do not change customer state or commit writes."
+                    ),
+                    locking="Read projections acquire no mutation locks.",
+                    idempotency=(
+                        "The same normalized query and account snapshot produce the "
+                        "same bounded customer matches."
+                    ),
+                    retries="Read-only search and identity resolution are safe to retry.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="customer search adapters",
+                    fail_closed_on=("selected active customer no longer exists",),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="customer.search",
+                    verification=(
+                        "customer search service and Automation Center customer-scope checks"
+                    ),
+                    cutover_gate=(
+                        "customer pickers resolve canonical active Subscriber identities"
+                    ),
+                    fallback_retirement=(
+                        "no picker may infer customer identity from display labels"
+                    ),
+                ),
+                steward="customer operations",
+                design_refs=(
+                    "docs/designs/AUTOMATION_CENTER_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_customer_search_services.py",
+                    "tests/architecture/test_customer_search_performance.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="customer.canonical_profile_patch",
+            module="app.services.customer_canonical_profile_patch",
+            owns=("typed transaction-neutral canonical Customer profile patches",),
+            depends_on=(
+                "customer.accounts",
+                "events.dispatcher",
+            ),
+            notes=(
+                "Registered coordinators use this participant to update an existing "
+                "Subscriber and its service address. It cannot create a Customer, "
+                "and it flushes without committing or rolling back."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name=(
+                            "typed transaction-neutral canonical Customer profile patches"
+                        ),
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed canonical Customer profile patch",
+                            "locked canonical Customer account",
+                        ),
+                        canonical_writer="customer.canonical_profile_patch",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed canonical Customer profile patch",
+                        owner="customer.canonical_profile_patch",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "explicit submitted field set, typed values, source, "
+                            "and actor identifier from a registered coordinator"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="locked canonical Customer account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "existing Subscriber and primary service Address selected "
+                            "FOR UPDATE"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.PARTICIPANT,
+                    boundary=(
+                        "Runs inside the calling owner's transaction, updates only "
+                        "explicit fields, stages subscriber.updated, flushes, and "
+                        "never commits or rolls back."
+                    ),
+                    locking=(
+                        "The existing Subscriber and service Address are selected "
+                        "FOR UPDATE before mutation. Canonical uniqueness constraints "
+                        "arbitrate concurrent writes."
+                    ),
+                    idempotency=(
+                        "Reapplying the same explicit values produces the same "
+                        "canonical profile; the coordinator owns command replay."
+                    ),
+                    retries=(
+                        "Retry only through the calling owner with the same command "
+                        "context after a rolled-back transient failure."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "customer.accounts.customer_not_found",
+                        "customer.accounts.invalid_email",
+                        "customer.accounts.invalid_name",
+                        "customer.accounts.verified_nin_locked",
+                    ),
+                    mapping_owner="the registered calling coordinator",
+                    fail_closed_on=(
+                        "missing Customer",
+                        "invalid Customer profile data",
+                        "attempted replacement of a verified NIN",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The event contains only Subscriber ID, explicit changed-field "
+                        "names, and decision source; profile values remain canonical."
+                    ),
+                    replay=(
+                        "The calling owner prevents duplicate command replay; an "
+                        "entire rolled-back transaction leaves no outbox event."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="customer.canonical_profile_patch",
+                    verification=(
+                        "Inbox completion tests assert canonical Subscriber and "
+                        "service Address persistence through this participant."
+                    ),
+                ),
+                steward="customer operations",
+                design_refs=(
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_inbox_customer_completion.py",
+                    "tests/architecture/test_inbox_customer_completion_boundary.py",
+                ),
             ),
         ),
         SOTService(
@@ -332,6 +657,7 @@ DOMAIN = DomainSOT(
                 "customer.accounts",
                 "access.subscription_lifecycle",
                 "financial.subscription_billing_treatments",
+                "financial.customer_chargeability",
                 "events.dispatcher",
                 "observability.audit_log",
             ),
@@ -340,8 +666,10 @@ DOMAIN = DomainSOT(
                 "not an independent runtime switch. Revocation disables "
                 "non-terminal service through access.subscription_lifecycle; "
                 "re-approval restores only a disable created by this owner. "
-                "Explicit billing treatments, not this flag, own complimentary "
-                "or sponsored service."
+                "Explicit billing treatments own account-specific complimentary "
+                "or sponsored service. Canonical chargeability recognizes a "
+                "genuinely free zero-priced catalog product without treating "
+                "missing pricing as free."
             ),
             contract=ServiceContract(
                 concerns=(
@@ -366,6 +694,7 @@ DOMAIN = DomainSOT(
                             "canonical account lifecycle state",
                             "canonical subscription lifecycle state",
                             "effective subscription billing treatment",
+                            "canonical customer chargeability",
                         ),
                     ),
                 ),
@@ -407,6 +736,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "effective, evidence-bound complimentary or sponsored "
                             "billing-treatment decision"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical customer chargeability",
+                        owner="financial.customer_chargeability",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "current service scope, effective treatments, and "
+                            "explicit catalog recurring-price evidence"
                         ),
                     ),
                 ),
@@ -472,17 +810,19 @@ DOMAIN = DomainSOT(
                             "canonical account billing-approval fact",
                             "canonical subscription lifecycle state",
                             "effective subscription billing treatment",
+                            "canonical customer chargeability",
                         ),
                         writer="customer.billing_approval",
                         freshness="Reconciled every fifteen minutes.",
                         stale_behavior=(
                             "An unapproved active service is fail-safe drift: an "
-                            "effective treatment repairs redundant approval to true; "
-                            "otherwise the account is disabled."
+                            "effective treatment or genuinely free catalog evidence "
+                            "repairs redundant approval to true; missing or "
+                            "contradictory pricing remains review-only."
                         ),
                         drift_signal=(
-                            "Subscriber.billing_enabled=false joined to an active "
-                            "Subscription."
+                            "Subscriber.billing_enabled=false joined to a current "
+                            "Subscription, including billing-owned disabled rows."
                         ),
                         rebuild_operation=(
                             "reconcile_account_billing_approval for the bounded "
@@ -839,6 +1179,10 @@ DOMAIN = DomainSOT(
                 "Paid prepaid subscription invoices are non-AR documents but "
                 "become exact customer-position service debits only when fully "
                 "paid and backed by exact active settlement applications. "
+                "When final paid status crosses a reviewed opening boundary, "
+                "settlement applications recorded through that boundary are "
+                "already absorbed by the opening and are excluded from the "
+                "post-opening consumption debit. "
                 "An exact direct-renewal adjustment and entitlement for the same "
                 "account, subscription, period, amount, and currency takes "
                 "precedence so a later documentary invoice cannot debit twice. "
@@ -939,7 +1283,9 @@ DOMAIN = DomainSOT(
                             "active fully paid positive Invoice with an active exact "
                             "prepaid Subscription line whose total is fully backed by "
                             "active PaymentAllocation and/or CreditNoteApplication "
-                            "evidence, plus paid time, period, total, and currency"
+                            "evidence, application record times relative to any "
+                            "reviewed opening, plus paid time, period, total, and "
+                            "currency"
                         ),
                     ),
                     AuthorityInput(
@@ -1013,7 +1359,8 @@ DOMAIN = DomainSOT(
                         drift_signal=(
                             "scalar and bounded-cohort results differ, or a paid prepaid "
                             "invoice total remains in spendable funding without an exact "
-                            "direct-renewal precedence match"
+                            "direct-renewal precedence match, or a pre-opening settlement "
+                            "application is debited again after the opening"
                         ),
                         rebuild_operation=(
                             "list_customer_financial_events and "
@@ -1203,7 +1550,10 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("subscriber.updated",),
+                    event_types=(
+                        "subscriber.updated",
+                        "customer.account.status_changed",
+                    ),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
                     compatibility=(
@@ -1245,6 +1595,152 @@ DOMAIN = DomainSOT(
                     "tests/test_account_status_commands.py",
                     "tests/test_web_customer_details.py",
                     "tests/architecture/test_generic_lifecycle_edit_boundary.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="customer.reseller_ticket_projection",
+            module="app.services.reseller_ticket_projection",
+            owns=("reseller-scoped native support ticket count and list projection",),
+            depends_on=(
+                "customer.identity_scope",
+                "support.ticket_lifecycle",
+                "ui.status_presentation",
+            ),
+            notes=(
+                "Dashboard and account-ticket reads enforce reseller ownership "
+                "and project native Support records without a retired CRM fallback."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name=(
+                            "reseller-scoped native support ticket count and list "
+                            "projection"
+                        ),
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "canonical reseller account scope",
+                            "canonical native support ticket facts",
+                            "support-ticket semantic presentation",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="canonical reseller account scope",
+                        owner="customer.identity_scope",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "canonical Reseller ownership of active Subscriber "
+                            "accounts, checked for every requested account"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical native support ticket facts",
+                        owner="support.ticket_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "committed native Ticket identity, subscriber scope, "
+                            "lifecycle status, priority, title, and timestamps"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="support-ticket semantic presentation",
+                        owner="ui.status_presentation",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "typed support-ticket status label, semantic tone, "
+                            "and icon projection"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "Reseller web and API adapters own the session; this query "
+                        "reads committed ownership and Ticket evidence without writes "
+                        "or transaction completion."
+                    ),
+                    locking=(
+                        "No read locks. Each requested account is admitted only after "
+                        "canonical reseller ownership is resolved."
+                    ),
+                    idempotency=(
+                        "The same reseller scope and committed Ticket evidence produce "
+                        "the same count and ordered summaries."
+                    ),
+                    retries=(
+                        "Transient database reads may be retried; missing or foreign "
+                        "account scope deterministically produces no ticket rows."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="reseller web and API adapters",
+                    fail_closed_on=(
+                        "missing or foreign reseller account ownership",
+                        "unknown support-ticket status presentation",
+                    ),
+                ),
+                projections=(
+                    ProjectionContract(
+                        name=(
+                            "reseller-scoped native support ticket count and list "
+                            "projection"
+                        ),
+                        input_names=(
+                            "canonical reseller account scope",
+                            "canonical native support ticket facts",
+                            "support-ticket semantic presentation",
+                        ),
+                        writer="customer.reseller_ticket_projection",
+                        freshness="rebuilt from committed source evidence on every query",
+                        stale_behavior=(
+                            "foreign scope returns no rows; database failures remain "
+                            "visible and never fall back to retired CRM data"
+                        ),
+                        drift_signal=(
+                            "reseller output contains a Ticket outside canonical "
+                            "account ownership or any reseller path queries "
+                            "crm.ticket_observation.v1"
+                        ),
+                        rebuild_operation=(
+                            "native_open_ticket_count and "
+                            "native_account_ticket_summaries recompute the view"
+                        ),
+                        repair_owner="customer.reseller_ticket_projection",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.COMPLETE,
+                    old_owner=(
+                        "retired crm.ticket_observation.v1 reseller dashboard and "
+                        "account-ticket projection"
+                    ),
+                    new_owner="customer.reseller_ticket_projection",
+                    verification=(
+                        "native projection behavior and architecture tests prevent "
+                        "reseller CRM ticket reads from returning"
+                    ),
+                    cutover_gate=(
+                        "All reseller dashboard counts and account ticket lists read "
+                        "canonical native Support records."
+                    ),
+                    fallback_retirement=(
+                        "Reseller web and API adapters contain no CRM ticket imports, "
+                        "capability calls, availability flags, or fallback paths."
+                    ),
+                ),
+                steward="customer support operations",
+                design_refs=(
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=(
+                    "tests/test_reseller_portal_services.py",
+                    "tests/test_api_reseller_self_scoped.py",
+                    "tests/architecture/test_crm_web_retirement.py",
                 ),
             ),
         ),
@@ -2017,7 +2513,10 @@ DOMAIN = DomainSOT(
             notes=(
                 "Authoritative zero is a valid total. Customer clients do "
                 "not replace server totals with loaded-session pages or "
-                "retention-limited chart series."
+                "retention-limited chart series. Operator-selected custom "
+                "date ranges are inclusive calendar-day windows; the Stats "
+                "Records CSV uses the same typed window and exports the full "
+                "filtered result rather than the visible page."
             ),
         ),
         SOTService(
@@ -2520,4 +3019,139 @@ DOMAIN = DomainSOT(
     "policy from subscription status or invoice rows, and consume usage "
     "totals with their server-owned provenance instead of reconstructing "
     "headlines from partial client data.",
+    automation=AutomationDomainCapabilities(
+        target_types=("customer.account",),
+        triggers=(
+            AutomationTriggerCapability(
+                key="customer.account.status_changed",
+                label="Customer account status changed",
+                event_type="customer.account.status_changed",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(_CUSTOMER_STATUS_FIELD,),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.created",
+                label="Customer account created",
+                event_type="subscriber.created",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.updated",
+                label="Customer account updated",
+                event_type="subscriber.updated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.suspended",
+                label="Customer account suspended",
+                event_type="subscriber.suspended",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.reactivated",
+                label="Customer account reactivated",
+                event_type="subscriber.reactivated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+        ),
+        actions=(
+            AutomationActionCapability(
+                key="customer.account.set_status",
+                label="Apply customer account status action",
+                entity_type="customer.account",
+                command_owner="customer.account_status_actions",
+                command_name="confirm_account_status_change",
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="action",
+                        label="Action",
+                        value_type=AutomationValueType.enum,
+                        enum_values=(
+                            "activate",
+                            "unsuspend",
+                            "suspend",
+                            "block",
+                            "disable",
+                        ),
+                    ),
+                ),
+                author_permission="customer:update",
+                runtime_scope="one customer account",
+                idempotency="tenant/customer/status/version",
+                runtime_enabled=True,
+            ),
+        ),
+        script_targets=(
+            AutomationScriptTargetCapability(
+                key="customer.account",
+                label="Customer",
+                entity_type="customer.account",
+                client_events=("form.load", "field.change", "form.validate"),
+                server_events=(
+                    "customer.account.status_changed",
+                    "subscriber.created",
+                    "subscriber.updated",
+                    "subscriber.suspended",
+                    "subscriber.reactivated",
+                ),
+                read_permission="customer:read",
+                write_permission="customer:update",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+            ),
+        ),
+    ),
+    custom_fields=CustomFieldDomainCapabilities(
+        targets=(
+            CustomFieldTargetCapability(
+                key="subscriber",
+                label="Subscribers",
+                entity_id_type="uuid",
+                read_permission="customer:read",
+                write_permission="customer:update",
+                create_permission="customer:write",
+                detail_path_template="/admin/customers/person/{target_id}",
+                maximum_active_fields=50,
+            ),
+        ),
+        legacy_surfaces=(
+            LegacyCustomFieldSurface(
+                key="subscriber.operator_defined_fields",
+                label="Legacy subscriber custom fields",
+                owner_service="customer.accounts",
+                management_path="/api/v1/subscribers/{target_id}/custom-fields",
+                migration_state="retained_no_migration",
+            ),
+        ),
+    ),
 )

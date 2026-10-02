@@ -36,6 +36,23 @@ class AccessType(enum.Enum):
     cable = "cable"
 
 
+class AccessRequirement(enum.Enum):
+    """Owned exclusively by ``service_intent.offer_access_requirement``.
+
+    Admitted only at :class:`OfferVersion` creation and immutable thereafter;
+    the only permitted transition is the reviewed classification command's
+    ``unclassified -> network_access | no_network_access``. ``unclassified``
+    is a temporary Release 1 marker for historical rows and an explicit,
+    accepted value for new rows — it is never a connection-type or PPPoE
+    fallback and must not be read as one. See
+    ``docs/designs/CATALOG_ACCESS_REQUIREMENT_AUTHORITY.md``.
+    """
+
+    network_access = "network_access"
+    no_network_access = "no_network_access"
+    unclassified = "unclassified"
+
+
 class PriceBasis(enum.Enum):
     flat = "flat"
     usage = "usage"
@@ -49,6 +66,13 @@ class BillingCycle(enum.Enum):
     monthly = "monthly"
     quarterly = "quarterly"
     annual = "annual"
+
+
+class UsageAllowanceResetBasis(enum.Enum):
+    """Authority that opens and closes a usage allowance bucket."""
+
+    calendar_month = "calendar_month"
+    renewal_cycle = "renewal_cycle"
 
 
 def billing_cycle_noun(cycle: "BillingCycle | None") -> str:
@@ -239,6 +263,7 @@ class SubscriptionStatus(enum.Enum):
       deleted  → canceled (soft-deleted, record preserved)
 
     DotMac-only statuses:
+      paused   — first-class non-billable pause with durable cause evidence
       suspended — generic suspension (local origin)
       archived  — generic archive (local origin)
       expired   — contract/prepaid period ended
@@ -248,6 +273,7 @@ class SubscriptionStatus(enum.Enum):
     active = "active"  # Service running, subscriber can connect
     blocked = "blocked"  # Temporarily blocked
     suspended = "suspended"  # Generic suspension (DotMac-native)
+    paused = "paused"  # Temporary non-billable pause; service identity preserved
     stopped = "stopped"  # Manually paused by admin
     disabled = "disabled"  # Administratively paused; explicit re-enable required
     hidden = "hidden"  # Not visible to customer
@@ -421,6 +447,16 @@ class PolicyDunningStep(Base):
 
 class UsageAllowance(Base):
     __tablename__ = "usage_allowances"
+    __table_args__ = (
+        CheckConstraint(
+            "reset_basis != 'renewal_cycle' OR validity_days IS NOT NULL",
+            name="ck_usage_allowances_renewal_validity",
+        ),
+        CheckConstraint(
+            "rollover_validity_cycles = 1",
+            name="ck_usage_allowances_rollover_one_cycle",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -429,9 +465,20 @@ class UsageAllowance(Base):
     included_gb: Mapped[int | None] = mapped_column(Integer)
     overage_rate: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     overage_cap_gb: Mapped[int | None] = mapped_column(Integer)
+    reset_basis: Mapped[UsageAllowanceResetBasis] = mapped_column(
+        Enum(
+            UsageAllowanceResetBasis,
+            name="usage_allowance_reset_basis",
+            values_callable=lambda values: [value.value for value in values],
+        ),
+        default=UsageAllowanceResetBasis.calendar_month,
+        nullable=False,
+    )
+    validity_days: Mapped[int | None] = mapped_column(Integer)
     # Unused allowance carries into next period's quota bucket (capped at one
     # period's included_gb). Sourced from imported fup_limits.rollover_data.
     rollover_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rollover_validity_cycles: Mapped[int] = mapped_column(Integer, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -643,6 +690,13 @@ class CatalogOffer(Base):
 
 class OfferVersion(Base):
     __tablename__ = "offer_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "offer_id",
+            "version_number",
+            name="uq_offer_versions_offer_id_version_number",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -681,6 +735,16 @@ class OfferVersion(Base):
     effective_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     effective_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Owned by service_intent.offer_access_requirement — admitted only at
+    # creation and immutable thereafter. The temporary server default exists
+    # only to initialize historical rows in the Release 1 migration; a new
+    # row's value always comes from the explicit admission command, never
+    # from this column default (docs/designs/CATALOG_ACCESS_REQUIREMENT_AUTHORITY.md).
+    access_requirement: Mapped[AccessRequirement] = mapped_column(
+        Enum(AccessRequirement, name="access_requirement"),
+        nullable=False,
+        server_default=AccessRequirement.unclassified.value,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -698,6 +762,57 @@ class OfferVersion(Base):
     policy_set = relationship("PolicySet")
     prices = relationship("OfferVersionPrice", back_populates="offer_version")
     subscriptions = relationship("Subscription", back_populates="offer_version")
+
+
+class OfferAccessRequirementClassification(Base):
+    """One immutable, replayable reviewed classification event.
+
+    Owned exclusively by ``service_intent.offer_access_requirement``. At most
+    one row per offer version — the reviewed command's only permitted
+    transition is ``unclassified -> network_access | no_network_access``, and
+    once that transition happens it cannot happen again for the same version.
+    An exact-key, exact-target replay reads this row instead of retransitioning
+    the offer version a second time.
+    """
+
+    __tablename__ = "offer_access_requirement_classifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "offer_version_id",
+            name="uq_offer_access_requirement_classifications_one_per_version",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_offer_access_requirement_classifications_idempotency_key",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    offer_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("offer_versions.id"), nullable=False
+    )
+    previous_access_requirement: Mapped[AccessRequirement] = mapped_column(
+        Enum(AccessRequirement, name="access_requirement"), nullable=False
+    )
+    new_access_requirement: Mapped[AccessRequirement] = mapped_column(
+        Enum(AccessRequirement, name="access_requirement"), nullable=False
+    )
+    review_reference: Mapped[str] = mapped_column(String(200), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    preview_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    classified_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    offer_version = relationship("OfferVersion")
 
 
 class OfferVersionPrice(Base):

@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.field import router
+from app.api.field.expense_requests import _expense_command_error
 from app.db import get_db
 from app.models.dispatch import TechnicianProfile
+from app.models.field_erp_sync import (
+    FieldErpSyncEvent,
+    FieldErpSyncFlow,
+    FieldErpSyncStatus,
+    SyncFlowOwner,
+    SyncFlowOwnership,
+)
 from app.models.field_expense import FieldExpenseRequest
 from app.models.stored_file import StoredFile
 from app.models.subscriber import Subscriber, UserType
 from app.models.system_user import SystemUser
 from app.models.vendor_routes import Vendor
 from app.models.work_order import WorkOrder
+from app.services import backoffice
 from app.services.auth_dependencies import require_user_auth
 from app.services.field import attachments as attachments_module
 from app.services.field import expense_categories as expense_categories_module
@@ -27,16 +37,21 @@ from app.services.field.expense_requests import (
     CancelFieldExpenseRequest,
     ExpenseCategoryRule,
     ExpenseRequestLineInput,
+    ExpenseRequestStatus,
     ExpenseWorkOrderIdentity,
     FieldExpenseRequestError,
     ListFieldExpenseVendors,
+    RequesterExpenseDetailQuery,
+    RequesterExpenseHistoryQuery,
     ResolvedFieldExpenseSubmissionContext,
     SelectedExpenseApprover,
     SubmitFieldExpenseRequest,
     VerifiedExpenseDestinationInput,
     cancel_field_expense_request_command,
     field_expense_requests,
+    get_requester_expense_request,
     list_expense_vendors,
+    list_requester_expense_requests,
     submit_field_expense_request_command,
 )
 from app.services.field.jobs import field_jobs
@@ -204,6 +219,19 @@ def _command_context(user: SystemUser, command_id=None) -> CommandContext:
     )
 
 
+def _enable_expense_flow(db_session) -> None:
+    flow = FieldErpSyncFlow.expense_claim.value
+    ownership = (
+        db_session.query(SyncFlowOwnership)
+        .filter(SyncFlowOwnership.flow == flow)
+        .one_or_none()
+    )
+    if ownership is None:
+        db_session.add(SyncFlowOwnership(flow=flow, owner=SyncFlowOwner.sub.value))
+    else:
+        ownership.owner = SyncFlowOwner.sub.value
+
+
 def _submit_expense(
     db_session,
     user: SystemUser,
@@ -214,6 +242,7 @@ def _submit_expense(
     notes=None,
     items=None,
 ):
+    _enable_expense_flow(db_session)
     resolved_id = request_id or uuid4()
     user_id = user.id
     work_order_public_id = work_order.public_id
@@ -253,6 +282,119 @@ def _submit_expense(
         ),
     )
     return field_expense_requests.get(db_session, _auth(user), str(outcome.id))
+
+
+def test_submission_enqueue_failure_logs_safe_context_and_retries_idempotently(
+    db_session, monkeypatch, caplog
+):
+    user = _user(db_session)
+    _profile(db_session, user)
+    subscriber = _subscriber(db_session)
+    work_order = _work_order(
+        db_session,
+        subscriber,
+        crm_work_order_id="wo-expense-staging-failure",
+    )
+    request_id = uuid4()
+    account_number = "0123456789"
+    destination_token = "secret-destination-token-value"
+    original_enqueue = backoffice.enqueue_expense_submission
+
+    def fail_enqueue(*_args, **_kwargs):
+        raise RuntimeError(
+            f"unsafe provider detail {destination_token} {account_number}"
+        )
+
+    monkeypatch.setattr(backoffice, "enqueue_expense_submission", fail_enqueue)
+    with caplog.at_level(logging.ERROR, logger="app.services.field.expense_requests"):
+        with pytest.raises(FieldExpenseRequestError) as raised:
+            _submit_expense(
+                db_session,
+                user,
+                work_order,
+                request_id=request_id,
+            )
+
+    assert raised.value.code == "operations.expense_requests.erp_staging_failed"
+    assert raised.value.details == {}
+    assert db_session.get(FieldExpenseRequest, request_id) is None
+    assert (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == request_id)
+        .count()
+        == 0
+    )
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "Field expense ERP delivery staging failed"
+    )
+    assert record.request_id == str(request_id)
+    assert record.expense_request_id == str(request_id)
+    assert record.command_id == str(request_id)
+    assert record.correlation_id == str(request_id)
+    assert record.work_order_public_id == work_order.public_id
+    assert record.requester_system_user_id == str(user.id)
+    assert record.exception_type == "RuntimeError"
+    assert "Traceback" in caplog.text
+    assert destination_token not in caplog.text
+    assert account_number not in caplog.text
+
+    monkeypatch.setattr(backoffice, "enqueue_expense_submission", original_enqueue)
+    created = _submit_expense(
+        db_session,
+        user,
+        work_order,
+        request_id=request_id,
+    )
+    replayed = _submit_expense(
+        db_session,
+        user,
+        work_order,
+        request_id=request_id,
+    )
+    assert created["id"] == replayed["id"] == request_id
+    assert db_session.query(FieldExpenseRequest).filter_by(id=request_id).count() == 1
+    assert (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == request_id)
+        .count()
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "operations.expense_requests.erp_staging_failed",
+        "operations.expense_requests.erp_delivery_not_configured",
+    ),
+)
+def test_mobile_expense_erp_staging_errors_are_service_unavailable(code):
+    error = _expense_command_error(
+        FieldExpenseRequestError(
+            code=code,
+            message="ERP delivery is temporarily unavailable. Please retry.",
+        )
+    )
+
+    assert error.status_code == 503
+    assert error.detail == {
+        "code": code,
+        "message": "ERP delivery is temporarily unavailable. Please retry.",
+        "details": {},
+    }
+
+
+def test_mobile_expense_genuine_idempotency_conflict_remains_conflict():
+    error = _expense_command_error(
+        FieldExpenseRequestError(
+            code="operations.expense_requests.idempotency_conflict",
+            message="Request identity was already used with different expense details.",
+        )
+    )
+
+    assert error.status_code == 409
 
 
 def _cancel_expense(db_session, user: SystemUser, request_id):
@@ -301,6 +443,8 @@ def test_create_submit_cancel_and_surface_expense_in_job_detail(db_session):
     )
 
     assert replayed["id"] == created["id"]
+    assert created["id"] == client_ref
+    assert created["client_ref"] == client_ref
     assert created["status"] == "submitted"
     assert str(created["total_amount"]) == "2500.00"
     db_session.refresh(work_order)
@@ -390,6 +534,137 @@ def test_expense_history_supports_person_and_legacy_user_ownership(db_session):
     assert field_expense_requests.list_mine(db_session, _auth(other)) == []
 
 
+def test_requester_expense_history_survives_inactive_profile_and_counts_total(
+    db_session,
+):
+    user = _user(db_session, "InactiveHistory")
+    profile = _profile(db_session, user, crm_person_id="inactive-expense-history-tech")
+    other = _user(db_session, "OtherHistory")
+    _profile(db_session, other, crm_person_id="other-inactive-expense-history-tech")
+    subscriber = _subscriber(db_session)
+    work_order = _work_order(
+        db_session,
+        subscriber,
+        crm_work_order_id="wo-inactive-expense-history",
+        assigned_to_crm_person_id="inactive-expense-history-tech",
+    )
+    db_session.commit()
+
+    first = _submit_expense(db_session, user, work_order, purpose="First history")
+    second = _submit_expense(db_session, user, work_order, purpose="Second history")
+    for request_id in (first["id"], second["id"]):
+        row = db_session.get(FieldExpenseRequest, request_id)
+        assert row is not None
+        row.requested_by_person_id = uuid4()
+        row.requested_by_system_user_id = None
+    profile.is_active = False
+    db_session.commit()
+
+    page = list_requester_expense_requests(
+        db_session,
+        RequesterExpenseHistoryQuery(
+            system_user_id=user.id,
+            status=ExpenseRequestStatus.SUBMITTED,
+            limit=1,
+        ),
+    )
+
+    assert page.total == 2
+    assert len(page.items) == 1
+    assert page.items[0].id == second["id"]
+    assert (
+        get_requester_expense_request(
+            db_session,
+            RequesterExpenseDetailQuery(
+                system_user_id=user.id,
+                request_id=first["id"],
+            ),
+        ).id
+        == first["id"]
+    )
+    assert (
+        list_requester_expense_requests(
+            db_session,
+            RequesterExpenseHistoryQuery(system_user_id=other.id),
+        ).items
+        == ()
+    )
+
+
+def test_requester_expense_history_uses_system_user_without_profile(db_session):
+    user = _user(db_session, "ProfilelessHistory")
+    profile = _profile(
+        db_session, user, crm_person_id="profileless-expense-history-tech"
+    )
+    subscriber = _subscriber(db_session)
+    work_order = _work_order(
+        db_session,
+        subscriber,
+        crm_work_order_id="wo-profileless-expense-history",
+        assigned_to_crm_person_id="profileless-expense-history-tech",
+    )
+    db_session.commit()
+
+    created = _submit_expense(
+        db_session, user, work_order, purpose="Profileless history"
+    )
+    row = db_session.get(FieldExpenseRequest, created["id"])
+    assert row is not None
+    row.requested_by_technician_id = None
+    db_session.delete(profile)
+    db_session.commit()
+
+    page = list_requester_expense_requests(
+        db_session,
+        RequesterExpenseHistoryQuery(system_user_id=user.id),
+    )
+
+    assert page.total == 1
+    assert [item.id for item in page.items] == [created["id"]]
+
+    with pytest.raises(FieldExpenseRequestError) as invalid_page:
+        list_requester_expense_requests(
+            db_session,
+            RequesterExpenseHistoryQuery(system_user_id=user.id, limit=0),
+        )
+    assert invalid_page.value.code == "operations.expense_requests.invalid_request"
+
+
+def test_accepted_historical_claim_identity_remains_readable_and_unchanged(
+    db_session,
+):
+    user = _user(db_session, "HistoricalIdentity")
+    _profile(db_session, user, crm_person_id="historical-expense-identity-tech")
+    subscriber = _subscriber(db_session)
+    work_order = _work_order(
+        db_session,
+        subscriber,
+        crm_work_order_id="wo-historical-expense-identity",
+        assigned_to_crm_person_id="historical-expense-identity-tech",
+    )
+    db_session.commit()
+
+    created = _submit_expense(db_session, user, work_order)
+    request = db_session.get(FieldExpenseRequest, created["id"])
+    assert request is not None
+    historical_client_ref = uuid4()
+    request.client_ref = historical_client_ref
+    request.status = "approved"
+    request.approved_at = datetime.now(UTC)
+    request.expense_claim_reference = "ERP-HISTORICAL-CLAIM"
+    db_session.commit()
+
+    detail = field_expense_requests.get(db_session, _auth(user), str(request.id))
+
+    assert detail["id"] == request.id
+    assert detail["client_ref"] == historical_client_ref
+    assert detail["status"] == "approved"
+    persisted = db_session.get(FieldExpenseRequest, request.id)
+    assert persisted is not None
+    assert persisted.client_ref == historical_client_ref
+    assert persisted.expense_claim_reference == "ERP-HISTORICAL-CLAIM"
+
+
 def test_expense_request_scope_and_receipt_attachment_validation(
     db_session, fake_uploads
 ):
@@ -453,10 +728,11 @@ def test_expense_request_api(db_session, fake_uploads, monkeypatch):
     approver = _user(db_session, "Approver")
     _profile(db_session, user)
     subscriber = _subscriber(db_session)
-    _work_order(db_session, subscriber, crm_work_order_id="wo-expense-api")
+    work_order = _work_order(db_session, subscriber, crm_work_order_id="wo-expense-api")
     alpha = _vendor(db_session, "Alpha Logistics")
     zed = _vendor(db_session, "Zed Supplies")
     _vendor(db_session, "Inactive Vendor", is_active=False)
+    _enable_expense_flow(db_session)
     db_session.commit()
 
     app = FastAPI()
@@ -508,10 +784,12 @@ def test_expense_request_api(db_session, fake_uploads, monkeypatch):
     receipt = client.post(
         "/api/v1/field/expense-requests/receipts",
         data={"work_order_id": "wo-expense-api"},
-        files={"file": ("taxi.jpg", b"receipt-bytes", "image/jpeg")},
+        files={"file": ("taxi.png", b"\x89PNG\r\n\x1a\n", "image/png")},
     )
     assert receipt.status_code == 201
     assert receipt.json()["work_order_id"] == "wo-expense-api"
+    assert receipt.json()["file_name"] == "taxi.png"
+    assert receipt.json()["mime_type"] == "image/png"
 
     retired = client.post(
         "/api/v1/field/expense-requests",
@@ -566,13 +844,34 @@ def test_expense_request_api(db_session, fake_uploads, monkeypatch):
     assert created.json()["work_order_id"] == "wo-expense-api"
     request_id = created.json()["id"]
 
-    listed = client.get("/api/v1/field/expense-requests?status=submitted")
+    second = _submit_expense(
+        db_session, user, work_order, purpose="Second paginated expense"
+    )
+    listed = client.get("/api/v1/field/expense-requests?status=submitted&limit=1")
     assert listed.status_code == 200
-    assert listed.json()["items"][0]["id"] == request_id
+    assert listed.json()["count"] == 2
+    assert len(listed.json()["items"]) == 1
+    assert listed.json()["items"][0]["id"] == str(second["id"])
+
+    detail = client.get(f"/api/v1/field/expense-requests/{request_id}")
+    assert detail.status_code == 200
+    assert detail.json()["id"] == request_id
+
+    delivery = (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == UUID(request_id))
+        .one()
+    )
+    delivery.status = FieldErpSyncStatus.dead.value
+    db_session.commit()
+    retried = client.post(f"/api/v1/field/expense-requests/{request_id}/retry-delivery")
+    assert retried.status_code == 200
+    assert retried.json()["erp_sync_status"] == "pending"
+    assert retried.json()["erp_sync_event_id"] == str(delivery.id)
 
     legacy_submit = client.post(f"/api/v1/field/expense-requests/{request_id}/submit")
     assert legacy_submit.status_code == 410
-    assert db_session.query(FieldExpenseRequest).count() == 1
+    assert db_session.query(FieldExpenseRequest).count() == 2
 
 
 def test_atomic_expense_submission_replays_and_rejects_changed_payload(
@@ -583,6 +882,7 @@ def test_atomic_expense_submission_replays_and_rejects_changed_payload(
     _profile(db_session, user)
     subscriber = _subscriber(db_session)
     _work_order(db_session, subscriber, crm_work_order_id="wo-expense-atomic")
+    _enable_expense_flow(db_session)
     db_session.commit()
 
     app = FastAPI()
@@ -654,6 +954,8 @@ def test_atomic_expense_submission_replays_and_rejects_changed_payload(
 
     assert created.status_code == 201
     assert created.json()["status"] == "submitted"
+    assert created.json()["id"] == client_ref
+    assert created.json()["client_ref"] == client_ref
     assert replayed.status_code == 201
     assert replayed.json()["id"] == created.json()["id"]
     assert listed.status_code == 200

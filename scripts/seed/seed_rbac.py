@@ -21,6 +21,11 @@ ADMIN_ONLY_PERMISSION_KEYS = {
     # so "accept inbound observations" cannot be attached to an ordinary role;
     # the read-only mirror scope beside it stays assignable on purpose.
     "integration:observations:write",
+    # Egress authority for a future ERP accounting-sync machine principal.
+    # Kept out of the ordinary role builder for the same reason as the
+    # ingress scope above: this is a credential scope for a machine caller,
+    # not a permission an admin attaches to a human role.
+    "integration:accounting_sync:read",
     "reseller:impersonate",
     "system:db_admin",
     "system:read",
@@ -34,6 +39,7 @@ ADMIN_ONLY_PERMISSION_KEYS = {
     "provisioning:service_change_reconcile",
     "network:write",
     "rbac:assign",
+    "communications:nextcloud_talk_staff:manage",
     "rbac:permissions:delete",
     "rbac:permissions:read",
     "rbac:permissions:write",
@@ -48,7 +54,16 @@ ADMIN_ONLY_PERMISSION_KEYS = {
 }
 
 DEFAULT_PERMISSIONS = [
-    ("*", "Full access (wildcard) — grants every permission"),
+    ("*", "Full access (wildcard) - grants every permission"),
+    # Automation Center (assignable, not granted to seeded non-admin roles)
+    ("automation:rule:read", "View Automation Center rules and versions"),
+    ("automation:rule:create", "Create Automation Center rule drafts"),
+    ("automation:rule:update", "Update Automation Center rule drafts"),
+    ("automation:rule:publish", "Publish Automation Center rule versions"),
+    ("automation:rule:operate", "Pause, resume, and retire automation rules"),
+    ("automation:hub:read", "Open the Automation Center"),
+    ("automation:run:read", "View Automation Center execution runs"),
+    ("automation:run:redrive", "Retry failed Automation Center runs"),
     # Audit
     ("audit:read", "Read audit events"),
     # Workforce attendance (pilot: intentionally not granted to seeded roles)
@@ -63,6 +78,10 @@ DEFAULT_PERMISSIONS = [
         "integration:observations:mirror",
         "Integrator inbound observation parity evidence, read-only",
     ),
+    (
+        "integration:accounting_sync:read",
+        "Integrator outbound accounting-sync feed access (Sub->ERP)",
+    ),
     # Auth & System
     ("auth:manage", "Manage authentication settings"),
     ("auth:credential:read", "View authentication credential metadata"),
@@ -71,9 +90,14 @@ DEFAULT_PERMISSIONS = [
     ("system:write", "Manage system administration resources"),
     ("notification:read", "View notification templates, queue, and history"),
     ("notification:write", "Manage notification templates and delivery"),
+    ("support:ticket_service_pause:resume", "Resume a ticket-linked service pause"),
     (
         "communications:customer:send",
         "Send customer notifications to selected customer scopes",
+    ),
+    (
+        "communications:nextcloud_talk_staff:manage",
+        "Manage ERP staff-to-Nextcloud Talk identity mappings",
     ),
     ("system:db_admin", "Perform restricted database administration"),
     ("system:settings:read", "View system settings"),
@@ -119,6 +143,11 @@ DEFAULT_PERMISSIONS = [
     (
         "billing:reconciliation:write",
         "Confirm reviewed billing reconciliation corrections",
+    ),
+    (
+        "billing:prepaid_reconciliation:repair",
+        "Repair one exact already-paid prepaid invoice's identity and coverage "
+        "after reviewed evidence",
     ),
     # Billing - Credit Notes
     ("billing:extension:read", "View service extensions"),
@@ -266,7 +295,10 @@ DEFAULT_PERMISSIONS = [
     ("operations:service_team:retire", "Activate or deactivate service teams"),
     # Operations - Field Expense Requests
     ("operations:expense_request:read", "View field expense requests"),
-    ("operations:expense_request:write", "Approve or reject field expense requests"),
+    (
+        "operations:expense_request:write",
+        "Adjust amounts and approve or reject field expense requests",
+    ),
     ("operations:expense_request:pay", "Initiate approved expense reimbursements"),
     ("operations:asset_custody:read", "View asset custody records"),
     ("operations:asset_custody:write", "Manage asset custody records"),
@@ -291,6 +323,10 @@ DEFAULT_PERMISSIONS = [
         "region, or assignment",
     ),
     ("support:inbox:self_assign", "Assign inbox conversations to yourself"),
+    (
+        "support:inbox:completion_override",
+        "Grant a one-transition legacy customer-completion resolution override",
+    ),
     ("support:automation:read", "View ticket automation rules"),
     ("support:automation:write", "Manage ticket automation rules"),
     ("support:inbox_ai:read", "Use manager AI for Team Inbox insight"),

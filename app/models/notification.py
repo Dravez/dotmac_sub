@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -36,10 +37,22 @@ class NotificationChannel(enum.Enum):
     webhook = "webhook"
 
 
+class NotificationTemplatePurpose(enum.StrEnum):
+    """Policy category used when an admin manually sends a template."""
+
+    general = "general"
+    billing = "billing"
+    service = "service"
+    account = "account"
+    credentials = "credentials"
+
+
 class NotificationStatus(enum.Enum):
     queued = "queued"
     sending = "sending"
+    submitted = "submitted"
     delivered = "delivered"
+    bounced = "bounced"
     failed = "failed"
     canceled = "canceled"
 
@@ -119,6 +132,10 @@ class NotificationTemplate(Base):
         UniqueConstraint(
             "code", "channel", name="uq_notification_templates_code_channel"
         ),
+        CheckConstraint(
+            "purpose IN ('general', 'billing', 'service', 'account', 'credentials')",
+            name="ck_notification_templates_purpose",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -127,6 +144,16 @@ class NotificationTemplate(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     code: Mapped[str] = mapped_column(String(120), nullable=False)
     channel: Mapped[NotificationChannel] = mapped_column(Enum(NotificationChannel))
+    purpose: Mapped[NotificationTemplatePurpose] = mapped_column(
+        Enum(
+            NotificationTemplatePurpose,
+            native_enum=False,
+            values_callable=lambda values: [value.value for value in values],
+        ),
+        default=NotificationTemplatePurpose.general,
+        server_default=NotificationTemplatePurpose.general.value,
+        nullable=False,
+    )
     subject: Mapped[str | None] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text, nullable=False)
     conditions: Mapped[dict] = mapped_column(

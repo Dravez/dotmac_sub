@@ -317,6 +317,13 @@ def test_meta_inbox_webhook_creates_instagram_dm_message(db_session, monkeypatch
                         "message": {
                             "mid": "m_ig_1",
                             "text": "Please check my account",
+                            "referral": {
+                                "ref": "campaign-ref-1",
+                                "ad_id": "ig-ad-1",
+                                "source": "ADS",
+                                "type": "OPEN_THREAD",
+                                "headline": "must not be persisted",
+                            },
                         },
                     }
                 ],
@@ -341,6 +348,13 @@ def test_meta_inbox_webhook_creates_instagram_dm_message(db_session, monkeypatch
     assert message.metadata_["instagram_account_id"] == "ig-1"
     assert message.metadata_["external_account_id"] == "ig-1"
     assert message.metadata_["provider_account_id"] == "ig-1"
+    assert message.metadata_["meta_referral_observation"] == {
+        "campaign_ref": "campaign-ref-1",
+        "external_ad_id": "ig-ad-1",
+        "referral_source": "ADS",
+        "referral_type": "OPEN_THREAD",
+    }
+    assert "campaign_attributed" not in message.metadata_
 
 
 def test_meta_inbox_webhook_creates_facebook_post_comment_thread(

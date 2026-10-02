@@ -8,7 +8,7 @@ unique ``(consumer, event_id)`` receipt.
 
 from __future__ import annotations
 
-import time
+import datetime as datetime_module
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -91,7 +91,7 @@ def test_resolution_grace_timer_auto_confirms_through_receipt(db_session):
     assert _fire(db_session, datetime.now(UTC) + timedelta(hours=3)) == ()
 
 
-def test_snooze_timer_wakes_conversation_through_receipt(db_session):
+def test_snooze_timer_wakes_conversation_through_receipt(db_session, monkeypatch):
     conversation = InboxConversation(
         subject="Snoozed thread",
         status="open",
@@ -100,7 +100,7 @@ def test_snooze_timer_wakes_conversation_through_receipt(db_session):
     db_session.add(conversation)
     db_session.commit()
 
-    wake_at = datetime.now(UTC) + timedelta(seconds=2)
+    wake_at = datetime.now(UTC) + timedelta(days=1)
     team_inbox_commands.update_workflow(
         db_session,
         conversation_id=str(conversation.id),
@@ -114,8 +114,18 @@ def test_snooze_timer_wakes_conversation_through_receipt(db_session):
     ).scalar_one()
     assert str(timer.entity_id) == str(conversation.id)
 
-    time.sleep(3)
-    fired = _fire(db_session, datetime.now(UTC))
+    # The timer scanner accepts an explicit clock. Its receipted consumer
+    # reads datetime.now(UTC), so advance that clock for this dispatch too.
+    fired_at = wake_at + timedelta(seconds=1)
+
+    class DispatchClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fired_at.astimezone(tz) if tz else fired_at.replace(tzinfo=None)
+
+    with monkeypatch.context() as clock:
+        clock.setattr(datetime_module, "datetime", DispatchClock)
+        fired = _fire(db_session, fired_at)
     assert len(fired) == 1
 
     db_session.refresh(conversation)

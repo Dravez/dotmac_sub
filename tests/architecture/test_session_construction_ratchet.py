@@ -45,7 +45,58 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: `sessionmaker`, mirroring the file's existing test fixture pattern.
 #: +2 from tests/integration/test_auth_session_refresh_concurrency.py: the
 #: setup/verification factory and two concurrent owner-command sessions.
-TEST_FIXTURE_BASELINE_TOTAL = 119
+#: +1 from tests/integration/test_tr069_active_cpe_identity_concurrency.py:
+#: a concurrent-write proof for migration 595_active_cpe_identity's new
+#: partial unique index (two sessions racing to activate the same
+#: cpe_device_id), reviewed test-fixture authorship for the CPE identity
+#: cardinality program.
+#: +1 from tests/integration/test_prepaid_funding_trigger_execution_rollback.py:
+#: a real-Postgres two-connection proof that a forced failure in the
+#: funding-consequence owner's own transaction rolls back only that
+#: transaction, following the established two-real-connection pattern.
+#: +2 from tests/integration/test_prepaid_renewal_nightly_isolation.py: two
+#: real-Postgres tests (ambiguous-account isolation, unclassified-failure
+#: abort) each with their own `sessionmaker`, driving the single-owner
+#: funding-consequence fix through the real nightly entry point.
+#: +1 from tests/integration/test_prepaid_account_lock_compatibility.py: a
+#: deterministic two-session PostgreSQL proof that account-writer
+#: serialization remains compatible with the prepaid review item's subscriber
+#: foreign key.
+#: +1 from tests/integration/test_prepaid_renewal_nightly_isolation.py: the
+#: teardown session that relinquishes the test-created global authority-cutover
+#: marker after independently committed nightly-owner transactions.
+#: +2 from tests/test_eg8145v5_wifi_capability_migration.py: isolated in-memory
+#: migration rehearsals for repairing and seeding the model capability each own
+#: the disposable engine that Alembic Operations executes against.
+#: +1 from tests/test_erp_staff_talk_mapping_permission_migration.py: one
+#: isolated in-memory rehearsal proves the permission migration is idempotent
+#: and reversible without sharing state with the application test database.
+#: +2 from tests/integration/test_team_inbox_contact_link_concurrency.py: two
+#: PostgreSQL concurrency proofs for reviewed endpoint links and first-inbound
+#: identity claims, each with its own `sessionmaker`.
+#: +1 from tests/integration/test_invoice_accounting_sync_keyset_postgres.py: a
+#: real dual-session PostgreSQL proof that the accounting-sync feed's keyset
+#: cursor does not skip a stationary row under a genuinely concurrent,
+#: independently-committing writer, with its own `sessionmaker`.
+#: +4 from tests/test_chat_widget_media_transaction.py: two isolated SQLite
+#: transaction-boundary proofs each construct one disposable Engine and Session.
+#: +8 from ADR 0017 enforcement evidence proofs: the out-of-band writer tests
+#: (tests/test_enforcement_application_writer.py) each bind a disposable SQLite
+#: Engine/sessionmaker in place of db_session_adapter.create_session, and the
+#: PostgreSQL durability proofs
+#: (tests/integration/test_enforcement_application_evidence_durability.py) use
+#: their own sessionmaker to observe the evidence from a fresh connection after
+#: the caller rolls back.
+#: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
+#: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
+#: isolated like the writer tests (EnforcementApplication carries no FKs).
+#: +1 from tests/integration/test_module_lineage_rehearsal.py: the disposable
+#: database fixture creates its stand-in schema before Alembic and disposes
+#: that bootstrap engine in a finally block.
+#: +3 from tests/integration/test_notification_template_seed_concurrency.py:
+#: one migrated PostgreSQL engine plus two independently committing sessions
+#: prove concurrent startup seeders safely converge on one template per key.
+TEST_FIXTURE_BASELINE_TOTAL = 150
 
 
 def _baseline() -> dict[str, int]:

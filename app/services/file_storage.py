@@ -456,7 +456,9 @@ class UnifiedFileUploadService:
             content_type=prepared.content_type,
             checksum=prepared.checksum,
             storage_provider="s3",
-            uploaded_by=prepared.uploaded_by,
+            uploaded_by=(
+                uuid.UUID(prepared.uploaded_by) if prepared.uploaded_by else None
+            ),
             uploaded_at=datetime.now(UTC),
         )
         db.add(record)

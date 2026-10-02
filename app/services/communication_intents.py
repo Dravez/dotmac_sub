@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.notification import (
@@ -16,6 +17,7 @@ from app.models.notification import (
     NotificationStatus,
 )
 from app.models.subscriber import Reseller, ResellerUser, Subscriber, SubscriberContact
+from app.models.system_user import SystemUser
 from app.schemas.notification import NotificationCreate, NotificationDeliveryLatency
 from app.services.communication_eligibility import suppression_reason
 from app.services.customer_notification_policy import (
@@ -180,12 +182,40 @@ def _reseller_addresses(
         if reseller.contact_phone:
             addresses.append(reseller.contact_phone)
     if channel == NotificationChannel.email:
+        # Guard against main-reseller-customer-mail-copy-leak: a ResellerUser
+        # row is customer-notification audience only when the identity behind
+        # it is actually a reseller. A row whose linked identity is ALSO a
+        # registered, active SystemUser (a platform administrator) is never
+        # eligible here, regardless of which reseller it is nominally
+        # attached to or whether that reseller is flagged `is_house` -- an
+        # admin account misfiled as a reseller-portal login must not become
+        # a silent copy target for every eligible customer notification.
+        # "Linked identity" is checked two ways because production data is
+        # inconsistent about which one is populated: a shared bound
+        # `person_party_id` (the canonical identity link), and a
+        # case-insensitive email match (the shape the historical incident
+        # row actually had -- no party binding, same address on both rows).
+        is_system_user_identity = (
+            db.query(SystemUser.id)
+            .filter(
+                SystemUser.is_active.is_(True),
+                or_(
+                    and_(
+                        ResellerUser.person_party_id.is_not(None),
+                        SystemUser.person_party_id == ResellerUser.person_party_id,
+                    ),
+                    func.lower(SystemUser.email) == func.lower(ResellerUser.email),
+                ),
+            )
+            .exists()
+        )
         addresses.extend(
             email
             for (email,) in db.query(ResellerUser.email)
             .filter(ResellerUser.reseller_id == reseller.id)
             .filter(ResellerUser.is_active.is_(True))
             .filter(ResellerUser.email.is_not(None))
+            .filter(~is_system_user_identity)
             .all()
             if email
         )
@@ -490,7 +520,8 @@ def record_delivery_outcome(db: Session, notification: Notification) -> None:
             campaign_recipient.delivered_at = notification.sent_at or datetime.now(UTC)
             campaign_recipient.failed_reason = None
         elif (
-            notification.status == NotificationStatus.failed
+            notification.status
+            in {NotificationStatus.failed, NotificationStatus.bounced}
             and notification.send_at is None
         ):
             campaign_recipient.status = CampaignRecipientStatus.failed.value
@@ -515,12 +546,17 @@ def record_delivery_outcome(db: Session, notification: Notification) -> None:
         .all()
     )
     states = {status for status, _send_at in delivery_rows}
-    if states & {NotificationStatus.queued, NotificationStatus.sending}:
+    if states & {
+        NotificationStatus.queued,
+        NotificationStatus.sending,
+        NotificationStatus.submitted,
+    }:
         intent_record.status = "delivering"
     elif states and states <= {NotificationStatus.delivered}:
         intent_record.status = "delivered"
     elif any(
-        status == NotificationStatus.failed and send_at is not None
+        status in {NotificationStatus.failed, NotificationStatus.bounced}
+        and send_at is not None
         for status, send_at in delivery_rows
     ):
         intent_record.status = "retrying"

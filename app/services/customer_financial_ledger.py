@@ -17,11 +17,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, func, or_, select, union_all
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.billing import (
     AccountAdjustment,
@@ -138,6 +139,19 @@ class PrepaidInvoiceConsumptionPreview:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class NativeFinancialPositionEvidence:
+    """Content-addressed native facts for one bounded account position."""
+
+    account_id: UUID
+    currency: str
+    after: datetime
+    before: datetime
+    amount: Decimal
+    event_count: int
+    fingerprint: str
+
+
 def _money(value: object) -> Decimal:
     return round_money(Decimal(str(value or 0)))
 
@@ -248,6 +262,8 @@ def _invoice_event(invoice: Invoice) -> CustomerFinancialEvent:
 
 def _paid_prepaid_invoice_consumption_event(
     invoice: Invoice,
+    *,
+    amount: Decimal | None = None,
 ) -> CustomerFinancialEvent:
     """Project one fully funded prepaid invoice as spent customer value.
 
@@ -261,7 +277,7 @@ def _paid_prepaid_invoice_consumption_event(
         account_id=invoice.account_id,
         entry_type=LedgerEntryType.debit,
         source=LedgerSource.invoice,
-        amount=_money(invoice.total),
+        amount=_money(invoice.total if amount is None else amount),
         currency=invoice.currency or "NGN",
         memo=(
             f"Prepaid service consumed by invoice "
@@ -271,6 +287,108 @@ def _paid_prepaid_invoice_consumption_event(
             invoice.paid_at or invoice.issued_at or invoice.created_at
         ),
         raw=invoice,
+    )
+
+
+def _settlement_amount_recorded_through(
+    db: Session,
+    *,
+    invoice: Invoice,
+    boundary: datetime,
+) -> Decimal:
+    """Return exact active invoice funding already absorbed by an opening.
+
+    A paid-prepaid invoice can cross a reviewed opening boundary because its
+    final settlement was recorded later even though part of its canonical
+    funding was recorded before the opening. That earlier part already shaped
+    the reviewed opening and must not become a second post-opening service
+    debit when the invoice is finally marked paid.
+    """
+    recorded_through = _event_date(boundary)
+
+    def allocation_crossed_opening(allocation: PaymentAllocation) -> bool:
+        """Recognize exact reviewed reclassification without falsifying record time."""
+
+        if _event_date(allocation.created_at) <= recorded_through:
+            return True
+        invoice_entry = allocation.ledger_entry
+        consumption_entry = allocation.consumption_ledger_entry
+        payment = allocation.payment
+        amount = _money(allocation.amount)
+        return bool(
+            invoice.billing_period_end is not None
+            and _event_date(invoice.billing_period_end) <= recorded_through
+            and payment is not None
+            and invoice_entry is not None
+            and consumption_entry is not None
+            and invoice_entry.is_active
+            and consumption_entry.is_active
+            and not invoice_entry.affects_customer_position
+            and not consumption_entry.affects_customer_position
+            and invoice_entry.invoice_id == invoice.id
+            and consumption_entry.invoice_id is None
+            and invoice_entry.payment_id == payment.id
+            and consumption_entry.payment_id == payment.id
+            and invoice_entry.entry_type is LedgerEntryType.credit
+            and consumption_entry.entry_type is LedgerEntryType.debit
+            and invoice_entry.source is LedgerSource.payment
+            and consumption_entry.source is LedgerSource.other
+            and _money(invoice_entry.amount) == amount
+            and _money(consumption_entry.amount) == amount
+            and _event_date(invoice_entry.effective_date or invoice_entry.created_at)
+            <= recorded_through
+            and _event_date(
+                consumption_entry.effective_date or consumption_entry.created_at
+            )
+            <= recorded_through
+        )
+
+    payment_amount = sum(
+        (
+            _money(allocation.amount)
+            for allocation in invoice.payment_allocations
+            if allocation.is_active
+            and allocation.payment is not None
+            and allocation.payment.is_active
+            and allocation.payment.status
+            in {
+                PaymentStatus.succeeded,
+                PaymentStatus.partially_refunded,
+                PaymentStatus.refunded,
+            }
+            and allocation_crossed_opening(allocation)
+        ),
+        Decimal("0.00"),
+    )
+    credit_note_amount = sum(
+        (
+            _money(application.amount)
+            for application in invoice.credit_note_applications
+            if application.credit_note is not None
+            and application.credit_note.is_active
+            and application.credit_note.status
+            in {
+                CreditNoteStatus.issued,
+                CreditNoteStatus.partially_applied,
+                CreditNoteStatus.applied,
+            }
+            and _event_date(application.created_at) <= recorded_through
+        ),
+        Decimal("0.00"),
+    )
+    opening_amount = _money(
+        db.scalar(
+            select(
+                func.coalesce(func.sum(PrepaidOpeningFundingConsumption.amount), 0)
+            ).where(
+                PrepaidOpeningFundingConsumption.invoice_id == invoice.id,
+                PrepaidOpeningFundingConsumption.created_at <= recorded_through,
+            )
+        )
+    )
+    return min(
+        _money(invoice.total),
+        round_money(payment_amount + credit_note_amount + opening_amount),
     )
 
 
@@ -671,10 +789,19 @@ def list_customer_financial_events(
         prepaid_consumption_query = prepaid_consumption_query.filter(
             Invoice.currency == currency
         )
-    events.extend(
-        _paid_prepaid_invoice_consumption_event(invoice)
-        for invoice in prepaid_consumption_query.all()
-    )
+    for invoice in prepaid_consumption_query.all():
+        baseline = baseline_by_currency.get(invoice.currency or "NGN")
+        amount = _money(invoice.total)
+        if baseline is not None:
+            amount = round_money(
+                amount
+                - _settlement_amount_recorded_through(
+                    db,
+                    invoice=invoice,
+                    boundary=baseline.position_at,
+                )
+            )
+        events.append(_paid_prepaid_invoice_consumption_event(invoice, amount=amount))
 
     writeoff_query = (
         db.query(InvoiceClosure)
@@ -918,11 +1045,114 @@ def customer_financial_balances_by_currency(
         )
     add(invoice_query.group_by(Invoice.account_id, invoice_currency).all())
 
+    prepaid_consumption_amount: ColumnElement[Any] = cast(
+        ColumnElement[Any], Invoice.total
+    )
+    if start is not None:
+        reviewed_invoice_entry = aliased(LedgerEntry)
+        reviewed_consumption_entry = aliased(LedgerEntry)
+        pre_boundary_payment_amount = (
+            select(func.coalesce(func.sum(PaymentAllocation.amount), 0))
+            .select_from(PaymentAllocation)
+            .join(Payment, Payment.id == PaymentAllocation.payment_id)
+            .outerjoin(
+                reviewed_invoice_entry,
+                reviewed_invoice_entry.id == PaymentAllocation.ledger_entry_id,
+            )
+            .outerjoin(
+                reviewed_consumption_entry,
+                reviewed_consumption_entry.id
+                == PaymentAllocation.consumption_ledger_entry_id,
+            )
+            .where(
+                PaymentAllocation.invoice_id == Invoice.id,
+                PaymentAllocation.is_active.is_(True),
+                Payment.is_active.is_(True),
+                Payment.status.in_(
+                    (
+                        PaymentStatus.succeeded,
+                        PaymentStatus.partially_refunded,
+                        PaymentStatus.refunded,
+                    )
+                ),
+                or_(
+                    PaymentAllocation.created_at <= start,
+                    and_(
+                        reviewed_invoice_entry.is_active.is_(True),
+                        reviewed_consumption_entry.is_active.is_(True),
+                        Invoice.billing_period_end.is_not(None),
+                        Invoice.billing_period_end <= start,
+                        reviewed_invoice_entry.affects_customer_position.is_(False),
+                        reviewed_consumption_entry.affects_customer_position.is_(False),
+                        reviewed_invoice_entry.invoice_id == Invoice.id,
+                        reviewed_consumption_entry.invoice_id.is_(None),
+                        reviewed_invoice_entry.payment_id == Payment.id,
+                        reviewed_consumption_entry.payment_id == Payment.id,
+                        reviewed_invoice_entry.entry_type == LedgerEntryType.credit,
+                        reviewed_consumption_entry.entry_type == LedgerEntryType.debit,
+                        reviewed_invoice_entry.source == LedgerSource.payment,
+                        reviewed_consumption_entry.source == LedgerSource.other,
+                        reviewed_invoice_entry.amount == PaymentAllocation.amount,
+                        reviewed_consumption_entry.amount == PaymentAllocation.amount,
+                        func.coalesce(
+                            reviewed_invoice_entry.effective_date,
+                            reviewed_invoice_entry.created_at,
+                        )
+                        <= start,
+                        func.coalesce(
+                            reviewed_consumption_entry.effective_date,
+                            reviewed_consumption_entry.created_at,
+                        )
+                        <= start,
+                    ),
+                ),
+            )
+            .correlate(Invoice)
+            .scalar_subquery()
+        )
+        pre_boundary_credit_note_amount = (
+            select(func.coalesce(func.sum(CreditNoteApplication.amount), 0))
+            .select_from(CreditNoteApplication)
+            .join(CreditNote, CreditNote.id == CreditNoteApplication.credit_note_id)
+            .where(
+                CreditNoteApplication.invoice_id == Invoice.id,
+                CreditNote.is_active.is_(True),
+                CreditNote.status.in_(
+                    (
+                        CreditNoteStatus.issued,
+                        CreditNoteStatus.partially_applied,
+                        CreditNoteStatus.applied,
+                    )
+                ),
+                CreditNoteApplication.created_at <= start,
+            )
+            .correlate(Invoice)
+            .scalar_subquery()
+        )
+        pre_boundary_opening_amount = (
+            select(func.coalesce(func.sum(PrepaidOpeningFundingConsumption.amount), 0))
+            .where(
+                PrepaidOpeningFundingConsumption.invoice_id == Invoice.id,
+                PrepaidOpeningFundingConsumption.created_at <= start,
+            )
+            .correlate(Invoice)
+            .scalar_subquery()
+        )
+        pre_boundary_settlement = (
+            pre_boundary_payment_amount
+            + pre_boundary_credit_note_amount
+            + pre_boundary_opening_amount
+        )
+        prepaid_consumption_amount = case(
+            (pre_boundary_settlement >= Invoice.total, Decimal("0.00")),
+            else_=Invoice.total - pre_boundary_settlement,
+        )
+
     prepaid_consumption_query = (
         db.query(
             Invoice.account_id,
             invoice_currency.label("currency"),
-            (-func.sum(Invoice.total)).label("balance"),
+            (-func.sum(prepaid_consumption_amount)).label("balance"),
         )
         .filter(Invoice.account_id.in_(account_uuids))
         .filter(Invoice.is_active.is_(True))
@@ -1069,6 +1299,76 @@ def native_customer_financial_balances_by_currency(
         account_ids,
         start=_event_date(after),
         end=_event_date(before) if before is not None else None,
+    )
+
+
+def native_customer_financial_position_evidence(
+    db: Session,
+    account_id: str | UUID,
+    *,
+    currency: str,
+    after: datetime,
+    before: datetime,
+) -> NativeFinancialPositionEvidence:
+    """Resolve and fingerprint every native fact admitted to a bounded position.
+
+    The window mirrors the aggregate reader's dual economic/recorded-time
+    boundary.  Persisted previews therefore become stale when a relevant row is
+    inserted, removed, reclassified, retimed, or changes monetary effect even
+    when an offsetting row happens to leave the final sum unchanged.
+    """
+
+    account_uuid = coerce_uuid(account_id)
+    unit = str(currency).strip().upper()
+    start = _event_date(after)
+    end = _event_date(before)
+    events = [
+        event
+        for event in list_customer_financial_events(db, account_uuid, currency=unit)
+        if _crosses_position_boundary(event, position_at=start)
+        and event.occurred_at <= end
+        and _recorded_at(event) <= end
+        and not event.id.startswith("prepaid-opening:")
+    ]
+    payload = [
+        {
+            "id": event.id,
+            "entry_type": event.entry_type.value,
+            "source": event.source.value,
+            "amount": str(round_money(event.amount)),
+            "signed_amount": str(round_money(event.signed_amount)),
+            "currency": event.currency,
+            "occurred_at": _event_date(event.occurred_at).isoformat(),
+            "recorded_at": _recorded_at(event).isoformat(),
+        }
+        for event in events
+    ]
+    amount = round_money(
+        sum((event.signed_amount for event in events), Decimal("0.00"))
+    )
+    aggregate = round_money(
+        native_customer_financial_balances_by_currency(
+            db,
+            [account_uuid],
+            after=start,
+            before=end,
+        )
+        .get(account_uuid, {})
+        .get(unit, Decimal("0.00"))
+    )
+    if amount != aggregate:
+        raise RuntimeError("native financial evidence disagrees with aggregate")
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return NativeFinancialPositionEvidence(
+        account_id=account_uuid,
+        currency=unit,
+        after=start,
+        before=end,
+        amount=amount,
+        event_count=len(events),
+        fingerprint=fingerprint,
     )
 
 

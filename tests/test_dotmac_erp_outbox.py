@@ -8,6 +8,7 @@ substrate is exercised end-to-end without a live ERP.
 from __future__ import annotations
 
 import importlib.util
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -38,9 +39,15 @@ from app.services.dotmac_erp.client import (
 from app.services.dotmac_erp.operational_contracts import ErpOperationalSyncOutcome
 from app.services.integrations.backoffice_contracts import (
     ERP_OPERATIONAL_SYNC_CAPABILITY,
+    ERP_OUTBOX_CAPABILITY,
     ERP_STAFF_ACCESS_RECONCILE_CAPABILITY,
 )
 from app.services.integrations.connectors.dotmac_erp import DotmacErpRunner
+from app.services.integrations.runtime import (
+    OperationEnvelope,
+    OperationStatus,
+    OperationTrigger,
+)
 from app.services.integrations.runtime_execution import (
     RuntimeExecutionContext,
     validate_connection,
@@ -113,6 +120,77 @@ class FakeOperationalValidationClient:
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
+
+
+def _expense_payment_envelope(
+    *, source_claim_id: str, command_id: str, idempotency_key: str
+) -> OperationEnvelope:
+    return OperationEnvelope(
+        operation_id=uuid4(),
+        correlation_id=idempotency_key,
+        installation_id=uuid4(),
+        config_revision_id=uuid4(),
+        capability_binding_id=uuid4(),
+        capability_id=ERP_OUTBOX_CAPABILITY,
+        connector_key="dotmac.erp",
+        connector_version="1.4.0",
+        manifest_digest="a" * 64,
+        trigger=OperationTrigger.scheduled,
+        idempotency_key=idempotency_key,
+        deadline_at=datetime.now(UTC) + timedelta(seconds=30),
+        payload={
+            "action": "initiate_expense_payment",
+            "params": {
+                "source_claim_id": source_claim_id,
+                "payload": {
+                    "command_id": command_id,
+                    "initiated_by_email": "manager@example.com",
+                    "initiated_at": "2026-09-13T10:00:00Z",
+                },
+                "idempotency_key": idempotency_key,
+            },
+        },
+    )
+
+
+def test_erp_runner_routes_typed_expense_payment_to_exact_endpoint():
+    source_claim_id = str(uuid4())
+    command_id = str(uuid4())
+    idempotency_key = f"exp-{source_claim_id}-pay-{command_id}-v1"
+    response = {
+        "claim_id": str(uuid4()),
+        "claim_number": "EXP-0001",
+        "claim_status": "approved",
+        "source_claim_id": source_claim_id,
+        "payment_intent_id": str(uuid4()),
+        "payment_status": "processing",
+        "retryable": False,
+    }
+    client = FakeERPClient([response])
+
+    result = DotmacErpRunner(client_override=client).execute(
+        _expense_payment_envelope(
+            source_claim_id=source_claim_id,
+            command_id=command_id,
+            idempotency_key=idempotency_key,
+        ),
+        config={"base_url": "https://erp.dotmac.io"},
+        secret_material={"service_credentials": "test-token"},
+    )
+
+    assert result.status is OperationStatus.succeeded
+    assert result.output == response
+    assert client.posts == [
+        {
+            "path": f"/api/v1/sync/sub/expense-claims/{source_claim_id}/payments",
+            "payload": {
+                "command_id": command_id,
+                "initiated_by_email": "manager@example.com",
+                "initiated_at": "2026-09-13T10:00:00Z",
+            },
+            "idempotency_key": idempotency_key,
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -697,3 +775,43 @@ def test_outbox_tables_registered_on_metadata():
 
     assert "field_erp_sync_events" in Base.metadata.tables
     assert "sync_flow_ownership" in Base.metadata.tables
+
+
+@pytest.mark.parametrize("action", [None, "", False, 0, "submit", "approve", "reject"])
+def test_retired_expense_is_terminal_and_cannot_starve_later_batches(
+    db_session, action
+):
+    from datetime import UTC, datetime, timedelta
+
+    _seed_ownership(
+        db_session,
+        sub_flows={_GENERIC_DELIVERY_FLOW.value, FieldErpSyncFlow.expense_claim.value},
+    )
+    retired = _enqueue(db_session, flow=FieldErpSyncFlow.expense_claim)
+    retired.payload = {} if action is None else {"_expense_action": action}
+    retired.created_at = datetime.now(UTC) - timedelta(days=1)
+    legitimate = _enqueue(db_session)
+    retired_id, legitimate_id = retired.id, legitimate.id
+    original_payload = dict(retired.payload)
+    db_session.commit()
+    client = FakeERPClient([{"request_id": "ERP-VALID", "status": "accepted"}])
+
+    first = outbox.deliver_pending(db_session, client=client, limit=1)
+    assert first.skipped_preapproval == first.dead == 1
+    assert client.posts == []
+    second = outbox.deliver_pending(db_session, client=client, limit=1)
+    assert second.accepted == 1
+    assert len(client.posts) == 1
+    assert (
+        db_session.get(FieldErpSyncEvent, retired_id).status
+        == FieldErpSyncStatus.dead.value
+    )
+    assert db_session.get(FieldErpSyncEvent, retired_id).payload == original_payload
+    assert db_session.get(FieldErpSyncEvent, retired_id).attempts == 0
+    assert (
+        db_session.get(FieldErpSyncEvent, legitimate_id).status
+        == FieldErpSyncStatus.accepted.value
+    )
+    again = outbox.deliver_pending(db_session, client=client, limit=1)
+    assert again.processed == 0
+    assert len(client.posts) == 1

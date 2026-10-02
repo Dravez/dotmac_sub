@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -841,6 +846,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -853,6 +859,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -892,6 +899,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "persisted recipient, event, category, status, and "
                             "creation time used by the dedupe window"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected template purpose category",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "purpose persisted on the selected NotificationTemplate "
+                            "for manual customer-page sends"
                         ),
                     ),
                     AuthorityInput(
@@ -976,6 +992,107 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.payment_template_adoption",
+            module="app.services.payment_template_adoption",
+            owns=("explicit payment email content adoption",),
+            depends_on=(
+                "communications.notification_service",
+                "tenancy.operator_tenant",
+            ),
+            notes=(
+                "Dormant explicit one-time coordinator. Template Studio alone owns "
+                "published content and subsequent authoring; Sub's legacy row "
+                "retains UUID, conditions, and active state until sealed cutover."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="explicit payment email content adoption",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "legacy payment email content",
+                            "operator tenant identity",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="legacy payment email content",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Current legacy NotificationTemplate EMAIL UUID, text, conditions, and active state.",
+                    ),
+                    AuthorityInput(
+                        name="operator tenant identity",
+                        owner="tenancy.operator_tenant",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Configured operator tenant UUID for Template Studio's tenant-scoped identity.",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.COORDINATOR_MANAGED,
+                    boundary=(
+                        "The explicit backfill enters execute_owner_command once on "
+                        "a transaction-free session. Studio service mutations "
+                        "flush and commit together in that transaction."
+                    ),
+                    locking=(
+                        "The Studio tenant/slug/channel unique constraint arbitrates "
+                        "concurrent creates; changed existing versions refuse adoption."
+                    ),
+                    idempotency=(
+                        "Legacy UUID and full snapshot digest bind each fixed Studio "
+                        "slug; exact replay performs no writes."
+                    ),
+                    retries=(
+                        "A conflict aborts the entire pair; an operator must resolve "
+                        "changed content before explicit retry."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        *owner_command_boundary_error_codes(
+                            "communications.payment_template_adoption"
+                        ),
+                        "payment_template_adoption.ambiguous_legacy",
+                        "payment_template_adoption.invalid_legacy",
+                        "payment_template_adoption.studio_conflict",
+                        "payment_template_adoption.invalid_contexts",
+                        "payment_template_adoption.invalid_tenant",
+                        "payment_template_adoption.unsafe_runtime_role",
+                    ),
+                    mapping_owner="Explicit operator backfill caller",
+                    fail_closed_on=(
+                        "ambiguous legacy email identity",
+                        "invalid receipt content",
+                        "Studio operator edits or draft changes",
+                        "PostgreSQL current role with SUPERUSER or BYPASSRLS",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.SHADOWING,
+                    old_owner="No contracted one-time backfill owner",
+                    new_owner="communications.payment_template_adoption",
+                    verification="Explicit backfill and representative read-only parity report.",
+                    cutover_gate=(
+                        "First prove installed Studio content and parity; then seal "
+                        "the old content writer and switch rendering together."
+                    ),
+                    fallback_retirement="Retire legacy content writing at the sealed switch.",
+                ),
+                steward="customer communications",
+                design_refs=(
+                    "docs/designs/PAYMENT_EMAIL_COMPOSITION_CUTOVER.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_payment_template_adoption.py",
+                    "tests/architecture/test_payment_template_adoption_boundary.py",
+                    "tests/integration/test_payment_template_adoption_runtime_role_pg.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="communications.customer_experience_intents",
             module="app.services.customer_experience_communications",
             owns=(
@@ -1021,6 +1138,7 @@ DOMAIN = DomainSOT(
             module="app.services.notification",
             owns=(
                 "notification template lifecycle and activation validity",
+                "notification-template purpose for customer-page sends",
                 "notification row lifecycle",
                 "delivery state",
                 "notification delivery latency class enforcement",
@@ -1038,7 +1156,10 @@ DOMAIN = DomainSOT(
                 "An explicit send_at always remains authoritative; otherwise "
                 "immediate delivery bypasses quiet-hours deferral while normal "
                 "and batch customer delivery continue to respect it. "
-                "Every web and API template mutation enters this owner. Inactive "
+                "For manual customer-page sends, the selected template's persisted "
+                "purpose supplies the customer-status policy category; automated "
+                "event categories remain owned by EventNotificationSpec. Every web "
+                "and API template mutation enters this owner. Inactive "
                 "drafts may remain incomplete, but activation validates the exact "
                 "renderer vocabulary and event-specific required fields. The "
                 "payment_received contract requires receipt_number and receipt_url "
@@ -1756,7 +1877,9 @@ DOMAIN = DomainSOT(
             ),
             notes=(
                 "Ticket and project owners stage a notification row in their "
-                "own transaction. This owner resolves the explicit staff mapping "
+                "own transaction. The ERP adapter enters typed owner commands to "
+                "set or disable the explicit staff mapping. This owner resolves "
+                "that mapping "
                 "and calls only the version-pinned collaboration capability from "
                 "the asynchronous notification worker."
             ),
@@ -1864,7 +1987,7 @@ DOMAIN = DomainSOT(
                 transaction=TransactionContract(
                     mode=TransactionMode.OWNER_MANAGED,
                     boundary=(
-                        "Admin mapping and connection-test commands enter "
+                        "ERP and admin mapping, disable, and connection-test commands enter "
                         "execute_owner_command on a transaction-free session. Business "
                         "owners stage notification outbox rows as transaction-neutral "
                         "participants, and the worker completes only delivery-owned rows."
@@ -1896,7 +2019,8 @@ DOMAIN = DomainSOT(
                         ),
                     ),
                     mapping_owner=(
-                        "admin system routes and the notification delivery worker"
+                        "app.api.staff_sync, admin system routes, and the notification "
+                        "delivery worker"
                     ),
                     retryable_codes=(
                         "communications.nextcloud_talk_staff.room_create_failed",
@@ -1959,10 +2083,12 @@ DOMAIN = DomainSOT(
                 steward="customer experience platform",
                 design_refs=(
                     "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/designs/ERP_WORKFORCE_ACCOUNT_PROVISIONING.md",
                     "docs/designs/INTEGRATION_PLATFORM_SOT.md",
                     "docs/designs/NOTIFICATION_CHANNEL_POLICY.md",
                 ),
                 test_refs=(
+                    "tests/test_api_staff_sync.py",
                     "tests/test_nextcloud_talk_staff_notifications.py",
                     "tests/architecture/test_sot_manifest_contracts.py",
                     "tests/architecture/test_adapter_transaction_ownership.py",
@@ -1995,13 +2121,23 @@ DOMAIN = DomainSOT(
         SOTService(
             name="communications.team_inbox_participants",
             module="app.services.team_inbox_participants",
-            owns=("conversation participant endpoint projection",),
-            depends_on=("communications.team_inbox_routing",),
+            owns=(
+                "conversation participant endpoint projection",
+                "reviewed conversation participant relationship classification",
+            ),
+            depends_on=(
+                "auth.permission_gate",
+                "communications.team_inbox_routing",
+            ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_participants",
                 concerns=(
                     (
                         "conversation participant endpoint projection",
+                        OwnerRole.PROJECTION_WRITER,
+                    ),
+                    (
+                        "reviewed conversation participant relationship classification",
                         OwnerRole.PROJECTION_WRITER,
                     ),
                 ),
@@ -2017,6 +2153,12 @@ DOMAIN = DomainSOT(
                         owner="communications.team_inbox_routing",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source="Configured team inbox email routes and intake recipients, so our own mailboxes are never admitted as participants.",
+                    ),
+                    AuthorityInput(
+                        name="reviewed participant relationship command",
+                        owner="auth.permission_gate",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Authenticated operator, exact conversation participant, typed relationship, source, and review reason.",
                     ),
                 ),
                 transaction_mode=TransactionMode.PARTICIPANT,
@@ -2473,13 +2615,135 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.team_inbox_customer_completion_policy",
+            module="app.services.team_inbox_customer_completion_policy",
+            owns=("immutable Customer resolution-completion policy versions",),
+            depends_on=("auth.permission_gate", "observability.audit_log"),
+            contract=_team_inbox_contract(
+                service_name="communications.team_inbox_customer_completion_policy",
+                concerns=(
+                    (
+                        "immutable Customer resolution-completion policy versions",
+                        OwnerRole.COMMAND_WRITER,
+                    ),
+                ),
+                inputs=(
+                    AuthorityInput(
+                        name="authorized Inbox settings decision",
+                        owner="auth.permission_gate",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "Typed administrator-selected Customer fields, identity-guard "
+                            "decision, actor, decision source, and command provenance."
+                        ),
+                    ),
+                ),
+                transaction_mode=TransactionMode.OWNER_MANAGED,
+                event_types=("team_inbox.customer_completion_policy_created.v1",),
+                design_refs=(
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=("tests/test_inbox_customer_completion.py",),
+            ),
+        ),
+        SOTService(
+            name="communications.team_inbox_customer_completion",
+            module="app.services.team_inbox_customer_completion",
+            owns=(
+                "Inbox Customer completion and classified-Lead resolution readiness",
+                "canonical Inbox Customer profile completion coordination",
+            ),
+            depends_on=(
+                "communications.team_inbox_customer_completion_policy",
+                "communications.team_inbox_threads",
+                "communications.conversation_lead_relationships",
+                "ai.intake",
+                "customer.accounts",
+                "customer.canonical_profile_patch",
+                "party.registry",
+                "sales.lead_intake",
+                "observability.audit_log",
+            ),
+            contract=_team_inbox_contract(
+                service_name="communications.team_inbox_customer_completion",
+                concerns=(
+                    (
+                        "Inbox Customer completion and classified-Lead resolution readiness",
+                        OwnerRole.RESOLVER,
+                    ),
+                    (
+                        "canonical Inbox Customer profile completion coordination",
+                        OwnerRole.APPLICATION_COORDINATOR,
+                    ),
+                ),
+                inputs=(
+                    AuthorityInput(
+                        name="snapshotted Customer completion policy",
+                        owner="communications.team_inbox_customer_completion_policy",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Immutable policy version bound to the conversation at creation.",
+                    ),
+                    AuthorityInput(
+                        name="conversation Customer or Lead identity",
+                        owner="communications.team_inbox_threads",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Active conversation and explicit canonical Customer link.",
+                    ),
+                    AuthorityInput(
+                        name="canonical Lead relationship",
+                        owner="communications.conversation_lead_relationships",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Active reviewed conversation-to-Lead link.",
+                    ),
+                    AuthorityInput(
+                        name="final Inbox sales classification",
+                        owner="ai.intake",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Final classified inbound message metadata for a "
+                            "new-connection or coverage request with known party type."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical Customer profile",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Subscriber identity, contact, address, and Party binding.",
+                    ),
+                    AuthorityInput(
+                        name="canonical Party profile",
+                        owner="party.registry",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Party identity, profile metadata, and contact points.",
+                    ),
+                ),
+                transaction_mode=TransactionMode.COORDINATOR_MANAGED,
+                event_types=("subscriber.updated",),
+                projections=("Customer resolution ActionReadiness verdict",),
+                design_refs=(
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=(
+                    "tests/test_inbox_customer_completion.py",
+                    "tests/architecture/test_inbox_customer_completion_boundary.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="communications.team_inbox_threads",
             module="app.services.team_inbox_receive",
             owns=(
                 "conversation identity and threading",
                 "authoritative conversation and message records",
             ),
-            depends_on=("communications.team_inbox_observations",),
+            depends_on=(
+                "communications.team_inbox_observations",
+                "communications.team_inbox_customer_completion_policy",
+            ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_threads",
                 concerns=(
@@ -2496,6 +2760,12 @@ DOMAIN = DomainSOT(
                         kind=AuthorityKind.OBSERVATION,
                         source="Provider/account/message identity, channel, observed time, references, subject, participant address, and bounded content.",
                     ),
+                    AuthorityInput(
+                        name="active Customer completion policy",
+                        owner="communications.team_inbox_customer_completion_policy",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Latest immutable policy ID captured only when a conversation is created.",
+                    ),
                 ),
                 transaction_mode=TransactionMode.PARTICIPANT,
                 event_types=(
@@ -2511,11 +2781,16 @@ DOMAIN = DomainSOT(
                 "contact subscriber reseller and ticket association resolution",
                 "reviewed contact association and projection repair",
                 "bounded trusted support customer-identity projection",
+                "conversation-aware lazy Customer link-option projection",
+                "conversation-scoped representative customer association resolution",
+                "exact provider-scoped Party identity evidence",
+                "Inbox-origin Lead endpoint identity repair",
             ),
             depends_on=(
                 "party.registry",
                 "customer.identity_scope",
                 "communications.team_inbox_threads",
+                "communications.team_inbox_participants",
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_contact_resolution",
@@ -2532,6 +2807,22 @@ DOMAIN = DomainSOT(
                         "bounded trusted support customer-identity projection",
                         OwnerRole.RESOLVER,
                     ),
+                    (
+                        "conversation-aware lazy Customer link-option projection",
+                        OwnerRole.RESOLVER,
+                    ),
+                    (
+                        "conversation-scoped representative customer association resolution",
+                        OwnerRole.RESOLVER,
+                    ),
+                    (
+                        "exact provider-scoped Party identity evidence",
+                        OwnerRole.RESOLVER,
+                    ),
+                    (
+                        "Inbox-origin Lead endpoint identity repair",
+                        OwnerRole.RECONCILER,
+                    ),
                 ),
                 inputs=(
                     AuthorityInput(
@@ -2544,7 +2835,7 @@ DOMAIN = DomainSOT(
                         name="customer identity scope",
                         owner="customer.identity_scope",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                        source="Active Subscriber and reseller ownership identifiers; never fuzzy name or shared-address inference.",
+                        source="Active Subscriber identifiers and profile search fields plus reseller ownership identifiers; fuzzy discovery results never decide identity.",
                     ),
                     AuthorityInput(
                         name="conversation contact route",
@@ -2552,18 +2843,60 @@ DOMAIN = DomainSOT(
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source="Conversation channel and normalized contact address.",
                     ),
+                    AuthorityInput(
+                        name="conversation participant relationship",
+                        owner="communications.team_inbox_participants",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source="Exact active participant and reviewed conversation-scoped representative classification.",
+                    ),
                 ),
                 transaction_mode=TransactionMode.OWNER_MANAGED,
+                transaction_contract=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "Operator adapters enter the Team Inbox command coordinator once; "
+                        "reviewed repair enters the contact-resolution owner once; the "
+                        "contact writer remains flush-only inside either boundary."
+                    ),
+                    locking=(
+                        "Normalize the exact channel endpoint, acquire its PostgreSQL "
+                        "transaction advisory lock, then lock the conversation, active "
+                        "contact route, selected target, and eligible historical "
+                        "conversations in stable order."
+                    ),
+                    idempotency=(
+                        "An active route already pointing at the selected target is reused; "
+                        "only missing conversation projections are repaired. A reviewed "
+                        "different target preserves the old inactive row and creates one "
+                        "replacement guarded by active-route uniqueness."
+                    ),
+                    retries=(
+                        "Retry only the complete owner or coordinator command after rollback. "
+                        "Stale route evidence is a domain refusal; the partial unique index "
+                        "remains the final concurrent-winner arbiter."
+                    ),
+                ),
+                domain_error_codes=(
+                    "communications.team_inbox_contact_resolution.owner_command_required",
+                    "communications.team_inbox_contact_resolution.stale_contact_route",
+                    "communications.team_inbox_contact_resolution.stale_contact_link",
+                ),
                 event_types=("team_inbox.contact_link_changed.v1",),
-                projections=("InboxContactLink canonical contact-point projection",),
+                projections=(
+                    "InboxContactLink canonical contact-point projection",
+                    "bounded lazy Customer link options",
+                    "conversation-scoped represented Customer association",
+                ),
                 design_refs=(
                     "docs/designs/TEAM_INBOX_SOURCE_OF_TRUTH.md",
                     "docs/runbooks/TEAM_INBOX_SUBSCRIBER_LINK_REPAIR.md",
                     "docs/SOT_RELATIONSHIP_MAP.md",
                     "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                    "docs/designs/INBOX_CONVERSATION_PARTICIPANTS.md",
                 ),
                 test_refs=(
                     "tests/test_team_inbox_contact_links.py",
+                    "tests/test_team_inbox_admin_contact_links.py",
                     "tests/test_repair_team_inbox_subscriber_links.py",
                     "tests/architecture/test_team_inbox_sot_contracts.py",
                 ),
@@ -2585,6 +2918,7 @@ DOMAIN = DomainSOT(
                 "current agent presence state and freshness",
                 "agent presence transitions",
                 "immutable agent presence transition evidence",
+                "expired WhatsApp assignment and FIFO release",
             ),
             depends_on=(
                 "ai.intake",
@@ -2594,6 +2928,7 @@ DOMAIN = DomainSOT(
                 "operations.sla_escalation",
                 "auth.permission_gate",
                 "control.settings_spec",
+                "communications.team_inbox_reply_window",
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_routing",
@@ -2639,6 +2974,10 @@ DOMAIN = DomainSOT(
                     (
                         "immutable agent presence transition evidence",
                         OwnerRole.AUTHORITATIVE_RECORD,
+                    ),
+                    (
+                        "expired WhatsApp assignment and FIFO release",
+                        OwnerRole.COMMAND_WRITER,
                     ),
                 ),
                 inputs=(
@@ -2719,6 +3058,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "Comms default active-conversation capacity and the "
                             "existing per-agent presence override."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="WhatsApp service-window state",
+                        owner="communications.team_inbox_reply_window",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Canonical latest qualifying customer inbound and expiry "
+                            "cutoff used by assignment, FIFO, release, and capacity."
                         ),
                     ),
                 ),
@@ -2920,9 +3268,14 @@ DOMAIN = DomainSOT(
         SOTService(
             name="communications.team_inbox_status",
             module="app.services.team_inbox_status",
-            owns=("conversation status transitions and immutable evidence",),
+            owns=(
+                "conversation status transitions and immutable evidence",
+                "audited expired conversation resolution",
+            ),
             depends_on=(
                 "communications.team_inbox_threads",
+                "communications.team_inbox_customer_completion",
+                "communications.team_inbox_reply_window",
                 "auth.permission_gate",
             ),
             contract=_team_inbox_contract(
@@ -2930,6 +3283,10 @@ DOMAIN = DomainSOT(
                 concerns=(
                     (
                         "conversation status transitions and immutable evidence",
+                        OwnerRole.COMMAND_WRITER,
+                    ),
+                    (
+                        "audited expired conversation resolution",
                         OwnerRole.COMMAND_WRITER,
                     ),
                 ),
@@ -2946,13 +3303,126 @@ DOMAIN = DomainSOT(
                         kind=AuthorityKind.CONTROL_INPUT,
                         source="Actor, target status, typed reason, occurrence time and idempotency identity.",
                     ),
+                    AuthorityInput(
+                        name="Customer resolution readiness",
+                        owner="communications.team_inbox_customer_completion",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source="Transaction-current Customer-only ActionReadiness verdict for agent resolution.",
+                    ),
+                    AuthorityInput(
+                        name="Meta channel resolution state",
+                        owner="communications.team_inbox_reply_window",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Transaction-current active, expired, unavailable, or "
+                            "not-applicable channel state."
+                        ),
+                    ),
                 ),
                 transaction_mode=TransactionMode.PARTICIPANT,
                 event_types=("team_inbox.status_changed.v1",),
                 projections=("current conversation status",),
+                design_refs=(
+                    "docs/designs/TEAM_INBOX_SOURCE_OF_TRUTH.md",
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
                 test_refs=(
                     "tests/test_team_inbox_lifecycle_audit.py",
+                    "tests/test_inbox_customer_completion.py",
+                    "tests/architecture/test_inbox_customer_completion_boundary.py",
                     "tests/architecture/test_team_inbox_lifecycle_audit_boundary.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="communications.team_inbox_completion_override",
+            module="app.services.team_inbox_completion_override",
+            owns=("single-use legacy customer-completion resolution override",),
+            depends_on=(
+                "communications.team_inbox_threads",
+                "communications.team_inbox_customer_completion",
+                "communications.team_inbox_status",
+                "auth.permission_gate",
+            ),
+            contract=_team_inbox_contract(
+                service_name="communications.team_inbox_completion_override",
+                concerns=(
+                    (
+                        "single-use legacy customer-completion resolution override",
+                        OwnerRole.COMMAND_WRITER,
+                    ),
+                ),
+                inputs=(
+                    AuthorityInput(
+                        name="pre-cutover eligibility marker",
+                        owner="communications.team_inbox_threads",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Locked conversation and its immutable "
+                            "completion_gate_precutover_at marker, written "
+                            "exactly once by the legacy-override migration."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="live Customer resolution readiness",
+                        owner="communications.team_inbox_customer_completion",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Transaction-current missing-fields and "
+                            "canonical-values verdict reviewed at grant time "
+                            "and re-verified at consumption time."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="typed override grant/consumption command",
+                        owner="auth.permission_gate",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "Actor holding support:inbox:completion_override, "
+                            "typed reviewed reason, and command provenance."
+                        ),
+                    ),
+                ),
+                transaction_mode=TransactionMode.OWNER_MANAGED,
+                # No dedicated event is emitted for issuance/consumption today
+                # (deliberately not declaring `completion_override_granted.v1`
+                # / `completion_override_consumed.v1` here, since neither is
+                # actually wired to `emit_event` -- the grant row itself, plus
+                # its FK to the resolved `InboxStatusTransitionEvent`, is the
+                # durable evidence). Omitting `event_types` takes the shared
+                # placeholder default like other non-event-emitting owners in
+                # this domain (e.g. `team_inbox_audit_projection` above).
+                projections=(
+                    "single-use legacy customer-completion resolution override",
+                ),
+                domain_error_codes=(
+                    "communications.team_inbox_completion_override.override_post_cutover_conversation",
+                    "communications.team_inbox_completion_override.override_conversation_already_resolved",
+                    "communications.team_inbox_completion_override.override_conversation_not_blocked",
+                    "communications.team_inbox_completion_override.override_requires_customer_identity",
+                    "communications.team_inbox_completion_override.override_stale_evidence",
+                    "communications.team_inbox_completion_override.override_grant_already_pending",
+                    "communications.team_inbox_completion_override.override_idempotency_key_required",
+                    "communications.team_inbox_completion_override.override_idempotency_key_conflict",
+                    "communications.team_inbox_completion_override.invalid_reason_code",
+                    "communications.team_inbox_completion_override.permission_denied",
+                    "communications.team_inbox_completion_override.override_absent",
+                    "communications.team_inbox_completion_override.override_already_consumed",
+                    "communications.team_inbox_completion_override.override_conversation_mismatch",
+                    "communications.team_inbox_completion_override.override_superseded",
+                    "communications.team_inbox_completion_override.override_expired",
+                    "communications.team_inbox_completion_override.override_not_required",
+                ),
+                design_refs=(
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=(
+                    "tests/test_team_inbox_completion_override.py",
+                    "tests/architecture/test_inbox_completion_override_boundary.py",
                 ),
             ),
         ),
@@ -2962,6 +3432,7 @@ DOMAIN = DomainSOT(
             owns=("reviewed Team Inbox historical audit reconstruction",),
             depends_on=(
                 "communications.team_inbox_routing",
+                "communications.team_inbox_reply_window",
                 "communications.team_inbox_status",
             ),
             contract=_team_inbox_contract(
@@ -3181,6 +3652,54 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.zeptomail_delivery_reconciliation",
+            module="app.services.zeptomail_delivery_reconciliation",
+            owns=("ZeptoMail provider delivery reconciliation",),
+            depends_on=(
+                "communications.notification_service",
+                "communications.team_inbox_outbound_intents",
+            ),
+            contract=_team_inbox_contract(
+                service_name="communications.zeptomail_delivery_reconciliation",
+                concerns=(
+                    (
+                        "ZeptoMail provider delivery reconciliation",
+                        OwnerRole.RECONCILER,
+                    ),
+                ),
+                inputs=(
+                    AuthorityInput(
+                        name="authenticated ZeptoMail delivery observation",
+                        owner="external:zeptomail",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "Signed webhook or OAuth email-log status, provider "
+                            "references, observed time, and bounded failure reason."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="submitted notification client reference",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Notification UUID sent as X-TM-CLIENT-REF and its current "
+                            "provider-submission state."
+                        ),
+                    ),
+                ),
+                transaction_mode=TransactionMode.OWNER_MANAGED,
+                projections=(
+                    "provider-confirmed Notification and Inbox delivery state",
+                ),
+                test_refs=("tests/test_zeptomail_delivery_tracking.py",),
+            ),
+            notes=(
+                "SMTP acceptance is recorded as submitted, never delivered. Signed "
+                "callbacks handle delivered and bounce outcomes; the OAuth log "
+                "reconciler repairs missed callbacks and Process failed outcomes."
+            ),
+        ),
+        SOTService(
             name="communications.team_inbox_delivery_receipts",
             module="app.services.team_inbox_delivery_receipts",
             owns=("provider delivery receipt reconciliation",),
@@ -3226,6 +3745,7 @@ DOMAIN = DomainSOT(
                 "auth.permission_gate",
                 "communications.nextcloud_talk_staff",
                 "communications.staff_notifications",
+                "communications.conversation_lead_relationships",
                 "communications.team_inbox_threads",
                 "communications.team_inbox_contact_resolution",
                 "communications.team_inbox_routing",
@@ -3279,7 +3799,19 @@ DOMAIN = DomainSOT(
                         name="contact association decision",
                         owner="communications.team_inbox_contact_resolution",
                         kind=AuthorityKind.DERIVED_PROJECTION,
-                        source="Reviewed subscriber/reseller/contact-point outcome.",
+                        source=(
+                            "Reviewed subscriber/reseller/contact-point outcome or "
+                            "conversation-scoped represented Customer association."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="conversation Lead relationship decision",
+                        owner="communications.conversation_lead_relationships",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Durable represented-Lead selection with exact Lead "
+                            "Party provenance and idempotent active link."
+                        ),
                     ),
                     AuthorityInput(
                         name="routing transition decision",
@@ -3338,6 +3870,7 @@ DOMAIN = DomainSOT(
                 domain_error_codes=(
                     "communications.team_inbox_commands.conversation_busy",
                     "communications.team_inbox_commands.assigned_to_other",
+                    "communications.team_inbox_commands.command_rejected",
                     "communications.team_inbox_commands.ai_owned",
                     "communications.team_inbox_commands.takeover_conflict",
                     "communications.team_inbox_commands.takeover_permission_denied",
@@ -3372,7 +3905,9 @@ DOMAIN = DomainSOT(
                 "Party-first prospect capture only for unmatched identity, and "
                 "retain ambiguous identity for human review. The first persisted "
                 "widget visitor message requests optional, exact-scope AI intake; "
-                "missing or inactive policy leaves the human Inbox path unchanged."
+                "missing or inactive policy leaves the human Inbox path unchanged. "
+                "Visitor photo messages are stored by the same owner with "
+                "bounded image uploads and session-scoped private media reads."
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_widget",
@@ -3399,6 +3934,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "Exact-origin typed name, email, optional phone, first "
                             "message, page provenance, client session id, and spam evidence."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="typed visitor message and photo command",
+                        owner="communications.team_inbox_widget",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "Session-scoped text and up to five validated private "
+                            "image uploads bound to one native Inbox message."
                         ),
                     ),
                     AuthorityInput(
@@ -3434,6 +3978,16 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 transaction_mode=TransactionMode.OWNER_MANAGED,
+                domain_error_codes=(
+                    "communications.team_inbox_widget.message_required",
+                    "communications.team_inbox_widget.message_too_long",
+                    "communications.team_inbox_widget.too_many_photos",
+                    "communications.team_inbox_widget.invalid_photo",
+                    "communications.team_inbox_widget.invalid_message_id",
+                    "communications.team_inbox_widget.message_id_conflict",
+                    "communications.team_inbox_widget.media_not_found",
+                    "communications.team_inbox_widget.session_mismatch",
+                ),
                 event_types=(
                     "team_inbox.widget_message_recorded.v1",
                     "team_inbox.widget_read_state_changed.v1",
@@ -3558,6 +4112,7 @@ DOMAIN = DomainSOT(
                 "communications.team_inbox_threads",
                 "communications.team_inbox_participants",
                 "communications.team_inbox_contact_resolution",
+                "communications.team_inbox_customer_completion",
                 "party.registry",
                 "customer.identity_scope",
                 "sales.lead_lifecycle",
@@ -3650,6 +4205,15 @@ DOMAIN = DomainSOT(
                         ),
                     ),
                     AuthorityInput(
+                        name="Customer resolution readiness",
+                        owner="communications.team_inbox_customer_completion",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Customer-only resolution verdict and canonical values; "
+                            "Lead profile gaps remain advisory."
+                        ),
+                    ),
+                    AuthorityInput(
                         name="operator authorization",
                         owner="auth.permission_gate",
                         kind=AuthorityKind.CONTROL_INPUT,
@@ -3666,12 +4230,14 @@ DOMAIN = DomainSOT(
                 ),
                 design_refs=(
                     "docs/designs/INBOX_CUSTOMER_CONTEXT_AND_LEAD_ACTIONS.md",
+                    "docs/designs/INBOX_CUSTOMER_COMPLETION_GATE.md",
                     "docs/designs/ADMIN_INBOX_WORKSPACE.md",
                     "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
                     "docs/SOT_RELATIONSHIP_MAP.md",
                 ),
                 test_refs=(
                     "tests/test_inbox_contact_context.py",
+                    "tests/test_inbox_customer_completion.py",
                     "tests/test_admin_inbox_workspace_integrity.py",
                 ),
             ),
@@ -4062,13 +4628,17 @@ DOMAIN = DomainSOT(
         SOTService(
             name="communications.team_inbox_maintenance",
             module="app.services.team_inbox_maintenance",
-            owns=("scheduled Inbox projection maintenance and repair",),
+            owns=(
+                "scheduled Inbox projection maintenance and repair",
+                "WhatsApp expiry routing-state convergence",
+            ),
             depends_on=(
                 "ai.intake",
                 "communications.team_inbox_threads",
                 "communications.team_inbox_outbound_intents",
                 "communications.team_inbox_projection",
                 "communications.team_inbox_routing",
+                "communications.team_inbox_reply_window",
                 "integration.inbox",
                 "integration.runtime",
             ),
@@ -4077,6 +4647,10 @@ DOMAIN = DomainSOT(
                 concerns=(
                     (
                         "scheduled Inbox projection maintenance and repair",
+                        OwnerRole.RECONCILER,
+                    ),
+                    (
+                        "WhatsApp expiry routing-state convergence",
                         OwnerRole.RECONCILER,
                     ),
                 ),
@@ -4108,9 +4682,28 @@ DOMAIN = DomainSOT(
                         owner="ai.intake",
                         kind=AuthorityKind.DERIVED_PROJECTION,
                         source=(
-                            "Long-term AI awaiting-customer session expiry and "
-                            "customer-reply or human-takeover race evidence. Inactivity "
-                            "expires the AI session without human routing or assignment."
+                            "Ten-minute AI awaiting-customer handoff, legacy deadline "
+                            "normalization, and customer-reply or human-takeover race "
+                            "evidence. A due wait enters normal agent assignment or "
+                            "durable FIFO queue admission."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="normal human routing and FIFO state",
+                        owner="communications.team_inbox_routing",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Active destination team, strict FIFO head, agent "
+                            "presence, capacity, assignment, and durable queue state."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="WhatsApp expiry worklist",
+                        owner="communications.team_inbox_reply_window",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "The canonical latest qualifying customer inbound SQL "
+                            "projection and rollout-bounded expiry cutoff."
                         ),
                     ),
                     AuthorityInput(
@@ -4139,6 +4732,8 @@ DOMAIN = DomainSOT(
                     "communications.team_inbox_maintenance.conversation_not_found",
                     "communications.team_inbox_maintenance.profile_target_changed",
                     "communications.team_inbox_maintenance.profile_name_missing",
+                    "communications.team_inbox_maintenance.invalid_ai_wait_deadline",
+                    "communications.team_inbox_maintenance.ai_intake_timeout_handoff_failed",
                 ),
                 event_types=("team_inbox.projection_repaired.v1",),
                 projections=(
@@ -4216,10 +4811,14 @@ DOMAIN = DomainSOT(
                 ),
                 inputs=(
                     AuthorityInput(
-                        name="exact synthetic SMTP message",
+                        name="exact synthetic provider-stable probe ID",
                         owner="communications.team_inbox_threads",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                        source="Exact runtime-generated Message-ID and bounded probe marker on the committed Inbox message.",
+                        source=(
+                            "Exact runtime-generated probe ID and bounded probe marker "
+                            "on the committed Inbox message, independent of a "
+                            "provider-rewritten Message-ID."
+                        ),
                     ),
                 ),
                 transaction_mode=TransactionMode.OWNER_MANAGED,
@@ -4434,4 +5033,169 @@ DOMAIN = DomainSOT(
     "communication services. Survey adapters delegate lifecycle, invitation "
     "and response writes to communications.surveys. Admin inbox mutation "
     "routes delegate to the committed team-inbox command boundary.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="communications.event_notifications",
+                label="Event-based customer notifications",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Notifications are triggered by fixed application events today; configurable rule actions are not connected.",
+            ),
+            AutomationCatalogItem(
+                key="communications.notification_delivery",
+                label="Notification delivery queue",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Delivery is managed by the notification service and cannot yet be configured as a rule.",
+            ),
+            AutomationCatalogItem(
+                key="communications.zeptomail_reconciliation",
+                label="ZeptoMail delivery reconciliation",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="This scheduled integration job has no Automation Center trigger or action yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.campaign_processing",
+                label="Campaign processing",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Campaign processing is currently handled by its existing scheduled service.",
+            ),
+            AutomationCatalogItem(
+                key="communications.operational_escalation_delivery",
+                label="Operational escalation delivery",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Escalation delivery is currently managed by its policy and delivery services.",
+            ),
+            AutomationCatalogItem(
+                key="communications.outgoing_webhooks",
+                label="Outgoing platform webhooks",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Webhook delivery is governed by registered integrations, not configurable rule steps yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.inbound_message_processing",
+                label="Inbound message processing",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Inbound messages use fixed identity, safety, and routing checks that are not rule steps yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.inbox_automation_rules",
+                label="Inbox automation rules",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing Inbox rule engine is not connected to the Automation Center's audited run history.",
+            ),
+            AutomationCatalogItem(
+                key="communications.fifo_queue_promotion",
+                label="FIFO queue promotion",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Queue promotion follows the current routing policy and is not configurable as a rule step.",
+            ),
+            AutomationCatalogItem(
+                key="communications.queue_position_notification",
+                label="Queue-position notification",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Queue notices are produced by the queue owner and are not configurable rule actions yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.scheduled_reply_release",
+                label="Scheduled reply release",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Scheduled replies are handled by the Inbox scheduler; no Center schedule trigger exists yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.snooze_wakeup",
+                label="Snooze wake-up",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Snooze timing is owned by the Inbox lifecycle and is not a configurable rule step yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.whatsapp_window_expiry",
+                label="WhatsApp service-window expiry",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The provider reply window is checked by existing message delivery safeguards.",
+            ),
+            AutomationCatalogItem(
+                key="communications.reply_reminders",
+                label="Reply reminders",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reminder timing and cancellation are owned by the reply-reminder service, not Center rules yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.ai_intake_processing",
+                label="AI intake processing",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="AI ownership and hand-off checks are protected by the AI intake owner and are not configurable rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="communications.ai_intake_recovery",
+                label="AI intake recovery",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="AI recovery is handled by its existing recovery worker and has no Center trigger yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.failed_outbound_retry",
+                label="Failed outbound message retry",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Retry limits and exact-message safeguards are not exposed as configurable rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="communications.media_promotion",
+                label="Media promotion",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Media handling is performed by the existing upload and Inbox delivery services.",
+            ),
+            AutomationCatalogItem(
+                key="communications.participant_backfill",
+                label="Participant backfill",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Participant repair is a maintenance action and is not available as a business rule step.",
+            ),
+            AutomationCatalogItem(
+                key="communications.stale_conversation_resolution",
+                label="Stale-conversation auto-resolution",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The active policy is code-managed and does not yet expose a safe Center rule contract.",
+            ),
+            AutomationCatalogItem(
+                key="communications.durable_timer_dispatcher",
+                label="Durable timer dispatcher",
+                group="Service levels",
+                state=AutomationCatalogState.unavailable,
+                explanation="Timer delivery is protected infrastructure; business timer rules are listed separately.",
+            ),
+            AutomationCatalogItem(
+                key="communications.retired_stale_auto_resolution",
+                label="Retired Team Inbox auto-resolution",
+                group="Team Inbox",
+                state=AutomationCatalogState.retired,
+                explanation="This automation is retired. Developers must restore and review its code before it can become available.",
+            ),
+            AutomationCatalogItem(
+                key="reports.ncc_weekly_report",
+                label="NCC weekly report",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="The report delivery owner controls its local-time schedule and duplicate-send protection; the Center cannot reschedule it yet.",
+            ),
+        ),
+    ),
 )

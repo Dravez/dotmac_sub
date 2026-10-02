@@ -60,6 +60,7 @@ class EmailTransportHeaders:
     in_reply_to: str | None = None
     references: tuple[str, ...] = ()
     x_dotmac_probe: str | None = None
+    x_dotmac_probe_id: str | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -67,6 +68,7 @@ class EmailTransportHeaders:
             self.in_reply_to,
             *self.references,
             self.x_dotmac_probe,
+            self.x_dotmac_probe_id,
         )
         if any("\r" in value or "\n" in value for value in values if value):
             raise ValueError("Email transport header values cannot contain newlines")
@@ -81,6 +83,8 @@ class EmailTransportHeaders:
             items.append(("References", " ".join(self.references)))
         if self.x_dotmac_probe:
             items.append(("X-Dotmac-Probe", self.x_dotmac_probe))
+        if self.x_dotmac_probe_id:
+            items.append(("X-Dotmac-Probe-ID", self.x_dotmac_probe_id))
         return tuple(items)
 
 
@@ -305,13 +309,19 @@ def _setting_value(db: Session | None, key: str) -> str | None:
 
 
 def _secret_setting_value(db: Session | None, key: str) -> str | None:
-    """A secret notification setting, read through the resolver that decrypts it.
+    """A secret notification setting, decrypted before it reaches a provider.
 
     `_setting_value` reads `DomainSetting.value_text` straight off the row, and
     a secret setting's column now holds `enc:<key_id>:<token>`. Only the kernel
-    resolver decrypts — it is the one reader that knows the row is secret and
-    holds the key — so a direct row read would hand SMTP a ciphertext string
-    and authentication would fail with a password-shaped error.
+    crypto boundary decrypts it, so a direct row read would hand SMTP a
+    ciphertext string and authentication would fail with a password-shaped
+    error.
+
+    Registered settings resolve through the settings kernel. SMTP sender
+    profiles use dynamic keys (`smtp_sender.<sender_key>.password`) that are not
+    registered specs, so ask the notification settings owner for their stored
+    row and resolve it with the same kernel crypto primitive instead of
+    returning the raw ciphertext.
 
     `resolve_secret` afterwards is the transition tolerance, not the mechanism:
     a row the conversion script has not reached still holds a `bao://` reference,
@@ -325,6 +335,17 @@ def _secret_setting_value(db: Session | None, key: str) -> str | None:
     if db is None:
         return None
     resolved = resolve_value(db, _Domain.notification, key)
+    if resolved is None:
+        setting = notification_settings.get_optional_by_key(
+            db,
+            key,
+            active_only=True,
+        )
+        if not setting or not setting.is_secret or not setting.value_text:
+            return None
+        from dotmac_kernel.settings_crypto import decrypt_value
+
+        resolved = decrypt_value(setting.value_text, tenant_id=setting.tenant_id)
     if not isinstance(resolved, str) or not resolved.strip():
         return None
     return _resolve_secret_value(resolved)
@@ -695,9 +716,11 @@ def _resolve_smtp_sender_config(
 
     selected = dict(available[selected_key])
     if selected.get("has_password"):
-        password = _setting_value(db, _sender_setting_key(selected_key, "password"))
+        password = _secret_setting_value(
+            db, _sender_setting_key(selected_key, "password")
+        )
         if password:
-            selected["password"] = _resolve_secret_value(password)
+            selected["password"] = password
     selected["user"] = selected.get("username")
     selected["from_addr"] = selected.get("from_email")
     selected["sender_key"] = selected_key
@@ -1001,6 +1024,11 @@ def _smtp_timeout_seconds(db: Session | None = None) -> int:
         return 10
 
 
+def _is_zeptomail_config(config: dict[str, Any]) -> bool:
+    host = str(config.get("host") or "").strip().lower().rstrip(".")
+    return host == "smtp.zeptomail.com" or host.endswith(".smtp.zeptomail.com")
+
+
 def send_email_with_config(
     config: dict,
     to_email: str,
@@ -1213,6 +1241,15 @@ def send_email(
             body=None if sensitive_content else tracked_body,
             commit=True,
         )
+        if _is_zeptomail_config(config):
+            client_reference = str(notification.id)
+            msg["X-TM-CLIENT-REF"] = client_reference
+            notification.metadata_ = {
+                **dict(notification.metadata_ or {}),
+                "delivery_provider": "zeptomail",
+                "provider_client_reference": client_reference,
+            }
+            db.commit()
 
     provider_name = f"smtp:{config.get('sender_key', 'default')}"
 
@@ -1237,7 +1274,12 @@ def send_email(
         server.quit()
 
         if notification and db is not None:
-            notification.status = NotificationStatus.delivered
+            is_zeptomail = _is_zeptomail_config(config)
+            notification.status = (
+                NotificationStatus.submitted
+                if is_zeptomail
+                else NotificationStatus.delivered
+            )
             notification.last_error = None
             notification.sent_at = datetime.now(UTC)
             db.add(
@@ -1245,9 +1287,17 @@ def send_email(
                     notification_id=notification.id,
                     provider=provider_name,
                     provider_message_id=None,
-                    status=DeliveryStatus.delivered,
-                    response_code="sent",
-                    response_body="SMTP send completed",
+                    status=(
+                        DeliveryStatus.accepted
+                        if is_zeptomail
+                        else DeliveryStatus.delivered
+                    ),
+                    response_code="accepted" if is_zeptomail else "sent",
+                    response_body=(
+                        "ZeptoMail accepted the SMTP submission"
+                        if is_zeptomail
+                        else "SMTP send completed"
+                    ),
                 )
             )
             db.commit()

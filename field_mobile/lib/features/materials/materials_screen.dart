@@ -13,7 +13,6 @@ import 'material_models.dart';
 import 'materials_providers.dart';
 
 const _priorities = ['low', 'medium', 'high', 'urgent'];
-const _statusOrder = ['draft', 'submitted', 'approved', 'issued', 'fulfilled'];
 
 class MaterialsScreen extends ConsumerWidget {
   const MaterialsScreen({super.key});
@@ -23,6 +22,7 @@ class MaterialsScreen extends ConsumerWidget {
     final requests = ref.watch(materialRequestsProvider);
     final drafts = ref.watch(materialRequestDraftsProvider);
     final inventory = ref.watch(inventorySearchProvider);
+    final requestCount = requests.asData?.value.totalCount;
 
     return Scaffold(
       appBar: AppBar(
@@ -45,7 +45,9 @@ class MaterialsScreen extends ConsumerWidget {
           padding: const EdgeInsets.all(16),
           children: [
             Text(
-              'Requests',
+              requestCount == null
+                  ? 'My requests'
+                  : 'My requests ($requestCount)',
               style: Theme.of(
                 context,
               ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
@@ -77,7 +79,8 @@ class MaterialsScreen extends ConsumerWidget {
               error: (_, _) => const SizedBox.shrink(),
             ),
             requests.when(
-              data: (items) {
+              data: (history) {
+                final items = history.items;
                 if (items.isEmpty) {
                   return const Padding(
                     padding: EdgeInsets.symmetric(vertical: 48),
@@ -190,7 +193,9 @@ class _MaterialRequestTile extends StatelessWidget {
           runSpacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            _MaterialStatusChip(status: request.status),
+            _MaterialStatusChip(
+              status: request.fulfillmentStatus ?? request.status,
+            ),
             if (request.supportStatus != null)
               Text('ERP ${request.supportStatus}'),
             if (request.priority != null) Text(request.priority!),
@@ -204,61 +209,163 @@ class _MaterialRequestTile extends StatelessWidget {
   }
 }
 
-class MaterialRequestDetailScreen extends ConsumerWidget {
+class MaterialRequestDetailScreen extends ConsumerStatefulWidget {
   const MaterialRequestDetailScreen({super.key, required this.id});
 
   final String id;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final request = ref.watch(materialRequestProvider(id));
+  ConsumerState<MaterialRequestDetailScreen> createState() =>
+      _MaterialRequestDetailScreenState();
+}
+
+class _MaterialRequestDetailScreenState
+    extends ConsumerState<MaterialRequestDetailScreen> {
+  bool _canceling = false;
+
+  Future<void> _cancelRequest() async {
+    final controller = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancel material request?'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 500,
+          decoration: const InputDecoration(labelText: 'Cancellation reason'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Keep request'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text.trim();
+              if (value.isNotEmpty) Navigator.pop(context, value);
+            },
+            child: const Text('Cancel request'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (reason == null || !mounted) return;
+    setState(() => _canceling = true);
+    try {
+      final updated = await ref
+          .read(materialsRepositoryProvider)
+          .cancelRequest(
+            id: widget.id,
+            clientRef: const Uuid().v4(),
+            reason: reason,
+          );
+      ref.invalidate(materialRequestProvider(widget.id));
+      ref.invalidate(materialRequestsProvider);
+      if (!mounted) return;
+      final message = updated.status == 'cancellation_pending'
+          ? 'Cancellation sent to ERP'
+          : 'Material request canceled';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } on DioException catch (error) {
+      if (!mounted) return;
+      final detail = error.response?.data;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not cancel request: ${detail ?? error.message}'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _canceling = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final request = ref.watch(materialRequestProvider(widget.id));
     return Scaffold(
       appBar: AppBar(title: const Text('Material request')),
       body: request.when(
-        data: (data) => ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Text(
-              data.displayNumber,
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _MaterialStatusChip(status: data.status),
-                if (data.priority != null) Chip(label: Text(data.priority!)),
+        data: (data) => RefreshIndicator(
+          onRefresh: () async {
+            ref.invalidate(materialRequestProvider(widget.id));
+            await ref.read(materialRequestProvider(widget.id).future);
+          },
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                data.displayNumber,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _MaterialStatusChip(
+                    status: data.fulfillmentStatus ?? data.status,
+                  ),
+                  if (data.priority != null) Chip(label: Text(data.priority!)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _MaterialStatusTimeline(request: data),
+              if (data.sourceLocationLabel != null ||
+                  data.destinationLocationLabel != null) ...[
+                const SizedBox(height: 16),
+                _MaterialLocationSummary(request: data),
               ],
-            ),
-            const SizedBox(height: 16),
-            _MaterialStatusTimeline(request: data),
-            if (data.sourceLocationLabel != null ||
-                data.destinationLocationLabel != null) ...[
-              const SizedBox(height: 16),
-              _MaterialLocationSummary(request: data),
+              if (data.notes != null && data.notes!.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text(
+                  'Description',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                Text(data.notes!),
+              ],
+              if (data.approvalNotes != null ||
+                  data.rejectionReason != null ||
+                  data.issueNotes != null) ...[
+                const SizedBox(height: 16),
+                _MaterialStatusNotes(request: data),
+              ],
+              const SizedBox(height: 24),
+              Text('Items', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              if (data.items.isEmpty)
+                const Text('No items on this request')
+              else
+                for (final item in data.items)
+                  _MaterialRequestItemTile(item: item),
+              if (data.canCancel) ...[
+                const SizedBox(height: 24),
+                OutlinedButton.icon(
+                  onPressed: _canceling ? null : _cancelRequest,
+                  icon: _canceling
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cancel_outlined),
+                  label: const Text('Cancel request'),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'ERP-backed cancellations are confirmed by ERP before they are final.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                  textAlign: TextAlign.center,
+                ),
+              ],
             ],
-            if (data.notes != null && data.notes!.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text(data.notes!),
-            ],
-            if (data.approvalNotes != null ||
-                data.rejectionReason != null ||
-                data.issueNotes != null) ...[
-              const SizedBox(height: 16),
-              _MaterialStatusNotes(request: data),
-            ],
-            const SizedBox(height: 24),
-            Text('Items', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            if (data.items.isEmpty)
-              const Text('No items on this request')
-            else
-              for (final item in data.items)
-                _MaterialRequestItemTile(item: item),
-          ],
+          ),
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) =>
@@ -422,6 +529,10 @@ class _StatusNote extends StatelessWidget {
   }
 }
 
+String _materialQuantity(num value) => value == value.roundToDouble()
+    ? value.toInt().toString()
+    : value.toString();
+
 class _MaterialRequestItemTile extends StatelessWidget {
   const _MaterialRequestItemTile({required this.item});
 
@@ -430,7 +541,9 @@ class _MaterialRequestItemTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final issued = item.issuedQuantity ?? item.fulfilledQuantity;
-    final progress = issued == null ? null : '$issued/${item.quantity} issued';
+    final progress = issued == null
+        ? null
+        : '${_materialQuantity(issued)}/${item.quantity} issued';
     return ListTile(
       contentPadding: EdgeInsets.zero,
       title: Text(item.itemName ?? item.itemId),
@@ -439,6 +552,9 @@ class _MaterialRequestItemTile extends StatelessWidget {
           if (item.approvedQuantity != null)
             '${item.approvedQuantity}/${item.quantity} approved',
           ?progress,
+          if (item.outstandingQuantity != null)
+            '${_materialQuantity(item.outstandingQuantity!)} outstanding',
+          if (item.outOfStock) 'Out of stock',
           if (item.notes != null && item.notes!.isNotEmpty) item.notes!,
         ].join(' · '),
       ),
@@ -607,7 +723,7 @@ class _NewMaterialRequestScreenState
                     });
                   },
             child: InputDecorator(
-              isEmpty: selected == null,
+              isEmpty: false,
               decoration: InputDecoration(
                 labelText: 'Work order',
                 helperText: selected == null
@@ -1063,7 +1179,7 @@ class _MaterialWorkOrderAvailability extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         InputDecorator(
-          isEmpty: true,
+          isEmpty: false,
           decoration: const InputDecoration(labelText: 'Work order'),
           child: Row(
             children: [
@@ -1284,13 +1400,18 @@ class _LocationSelectors extends StatelessWidget {
         DropdownButtonFormField<String?>(
           key: const Key('source-location'),
           initialValue: sourceValue,
+          isExpanded: true,
           decoration: const InputDecoration(labelText: 'Source location'),
           items: [
             const DropdownMenuItem(value: null, child: Text('Any location')),
             for (final location in locations)
               DropdownMenuItem(
                 value: location.id,
-                child: Text(_locationLabel(location)),
+                child: Text(
+                  _locationLabel(location),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
           ],
           onChanged: onSourceChanged,
@@ -1299,13 +1420,18 @@ class _LocationSelectors extends StatelessWidget {
         DropdownButtonFormField<String?>(
           key: const Key('destination-location'),
           initialValue: destinationValue,
+          isExpanded: true,
           decoration: const InputDecoration(labelText: 'Destination location'),
           items: [
             const DropdownMenuItem(value: null, child: Text('Not selected')),
             for (final location in locations)
               DropdownMenuItem(
                 value: location.id,
-                child: Text(_locationLabel(location)),
+                child: Text(
+                  _locationLabel(location),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
           ],
           onChanged: onDestinationChanged,
@@ -1401,16 +1527,18 @@ Color _materialStatusColor(BuildContext context, String status) {
   final scheme = Theme.of(context).colorScheme;
   return switch (status) {
     'approved' => Colors.green.shade700,
+    'accepted_by_erp' => Colors.indigo.shade700,
+    'pending_stock' => Colors.amber.shade900,
     'issued' => Colors.blue.shade700,
     'fulfilled' || 'completed' => Colors.teal.shade700,
-    'rejected' || 'cancelled' => scheme.error,
+    'rejected' || 'cancelled' || 'canceled' || 'sync_failed' => scheme.error,
     'submitted' || 'pending_approval' => Colors.orange.shade800,
     _ => scheme.outline,
   };
 }
 
 List<_StatusStep> _timelineSteps(MaterialRequest request) {
-  if (request.status == 'rejected') {
+  if (request.status == 'rejected' || request.status == 'canceled') {
     return [
       _StatusStep(
         label: 'Submitted',
@@ -1419,7 +1547,7 @@ List<_StatusStep> _timelineSteps(MaterialRequest request) {
         active: false,
       ),
       _StatusStep(
-        label: 'Rejected',
+        label: request.status == 'rejected' ? 'Rejected' : 'Canceled',
         date: request.rejectedAt,
         complete: true,
         active: true,
@@ -1427,39 +1555,33 @@ List<_StatusStep> _timelineSteps(MaterialRequest request) {
     ];
   }
 
-  final currentIndex = _statusOrder.indexOf(request.status);
-  final activeIndex = currentIndex < 0 ? 0 : currentIndex;
+  final labels = switch (request.status) {
+    'queued' => ['Queued'],
+    'draft' => ['Draft'],
+    'submitted' => ['Submitted'],
+    'accepted_by_erp' => ['Submitted', 'Accepted by ERP'],
+    'pending_stock' => ['Submitted', 'Accepted by ERP', 'Awaiting stock'],
+    'sync_failed' => ['Submitted', 'Sync failed'],
+    'approved' => ['Submitted', 'Approved'],
+    'issued' => ['Submitted', 'Approved', 'Issued'],
+    'fulfilled' => ['Submitted', 'Approved', 'Issued', 'Fulfilled'],
+    _ => [_statusLabel(request.status)],
+  };
   return [
-    _StatusStep(
-      label: 'Draft',
-      date: request.createdAt,
-      complete: activeIndex >= 0,
-      active: activeIndex == 0,
-    ),
-    _StatusStep(
-      label: 'Submitted',
-      date: request.submittedAt,
-      complete: activeIndex >= 1,
-      active: activeIndex == 1,
-    ),
-    _StatusStep(
-      label: 'Approved',
-      date: request.approvedAt,
-      complete: activeIndex >= 2,
-      active: activeIndex == 2,
-    ),
-    _StatusStep(
-      label: 'Issued',
-      date: request.issuedAt,
-      complete: activeIndex >= 3,
-      active: activeIndex == 3,
-    ),
-    _StatusStep(
-      label: 'Fulfilled',
-      date: request.fulfilledAt,
-      complete: activeIndex >= 4,
-      active: activeIndex == 4,
-    ),
+    for (var index = 0; index < labels.length; index++)
+      _StatusStep(
+        label: labels[index],
+        date: switch (labels[index]) {
+          'Queued' || 'Draft' => request.createdAt,
+          'Submitted' => request.submittedAt ?? request.createdAt,
+          'Approved' => request.approvedAt,
+          'Issued' => request.issuedAt,
+          'Fulfilled' => request.fulfilledAt,
+          _ => null,
+        },
+        complete: true,
+        active: index == labels.length - 1,
+      ),
   ];
 }
 

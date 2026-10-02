@@ -2,8 +2,8 @@
     {
         "current": true,
         "key": "fiber.inquiry.http",
-        "manifest_digest": "ad7d0c65b4796d83484c8d842657824a36b102d575428035caf8405654cd1aef",
-        "version": "1.0.0"
+        "manifest_digest": "e28042a9e37a198210a04b60f518684078bd780eeecd54aef4e3e0e341a08c7a",
+        "version": "1.1.0"
     },
     {
         "current": true,
@@ -20,14 +20,14 @@
     {
         "current": true,
         "key": "webhook.http",
-        "manifest_digest": "cd12010918d2171928d5ab7ba3b117ccfe90189ec4842f0595bd33545cd20871",
-        "version": "1.0.0"
+        "manifest_digest": "4aae3baf1e9ec68afbc84d7574c288a1a14934eafdcea8b06bb6bed7e6af55f0",
+        "version": "1.1.0"
     },
     {
         "current": true,
         "key": "dotmac.crm",
-        "manifest_digest": "b70114070615f3ca5f41cd348c8747c405542509a3b1d43f8df372d7e6598dce",
-        "version": "1.3.0"
+        "manifest_digest": "d3de1f51baa8879bd796eb2e278a19267c4534a10a667d0fc9de4aed2d004d87",
+        "version": "1.4.0"
     },
     {
         "current": true,
@@ -39,6 +39,12 @@
         "current": true,
         "key": "nextcloud.talk",
         "manifest_digest": "c6939956ac02d8697c9a0e41ee4d759354d433235acb5bdced9abd30ef272bf2",
+        "version": "1.0.0"
+    },
+    {
+        "current": true,
+        "key": "meta.capi",
+        "manifest_digest": "4ba859b88a33bdca0adbf1711f35f5289e7a67393aaf7fb1fa74d5016b816d98",
         "version": "1.0.0"
     },
     {
@@ -79,6 +85,18 @@
     },
     {
         "current": false,
+        "key": "fiber.inquiry.http",
+        "manifest_digest": "ad7d0c65b4796d83484c8d842657824a36b102d575428035caf8405654cd1aef",
+        "version": "1.0.0"
+    },
+    {
+        "current": false,
+        "key": "webhook.http",
+        "manifest_digest": "cd12010918d2171928d5ab7ba3b117ccfe90189ec4842f0595bd33545cd20871",
+        "version": "1.0.0"
+    },
+    {
+        "current": false,
         "key": "dotmac.integrator.http",
         "manifest_digest": "66a5963fcffe6e950a496644606225deefabef63533f09409e015d9b153b7b85",
         "version": "1.0.0"
@@ -112,6 +130,12 @@
         "key": "dotmac.erp",
         "manifest_digest": "5c0b5f58d5b9e10b30e2bbb329b32f0e2b0e1eddb3512ab16af5efac6e126454",
         "version": "1.0.0"
+    },
+    {
+        "current": false,
+        "key": "dotmac.crm",
+        "manifest_digest": "b70114070615f3ca5f41cd348c8747c405542509a3b1d43f8df372d7e6598dce",
+        "version": "1.3.0"
     },
     {
         "current": false,

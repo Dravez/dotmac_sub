@@ -92,6 +92,7 @@ def execute_subscription_command(
     *,
     actor_id: str | None = None,
     actor_type: AuditActorType = AuditActorType.system,
+    requested_by_subscriber_id: str | None = None,
     now: datetime | None = None,
 ) -> SubscriptionCommandOutcome:
     """Validate and execute one reviewed lifecycle command.
@@ -169,6 +170,7 @@ def execute_subscription_command(
             preview,
             actor_id=actor_id,
             actor_type=actor_type,
+            requested_by_subscriber_id=requested_by_subscriber_id,
         )
         # Account lifecycle commands intentionally flush so callers can compose
         # them. Catalog and scheduler owners currently commit internally; this is
@@ -223,6 +225,7 @@ def confirm_subscription_service_change(
     *,
     actor_id: str | None = None,
     actor_type: AuditActorType = AuditActorType.system,
+    requested_by_subscriber_id: str | None = None,
     now: datetime | None = None,
 ) -> SubscriptionCommandOutcome:
     """Apply or queue one confirmed service change by its delivery mode.
@@ -252,6 +255,7 @@ def confirm_subscription_service_change(
             command,
             actor_id=actor_id,
             actor_type=actor_type,
+            requested_by_subscriber_id=requested_by_subscriber_id,
             now=effective_now,
         )
 
@@ -335,7 +339,7 @@ def confirm_subscription_service_change(
         subscription_id=command.subscription_id,
         new_offer_id=str(command.target_offer_id),
         effective_date=preview.effective_at.date(),
-        requested_by_person_id=actor_id,
+        requested_by_subscriber_id=requested_by_subscriber_id,
         notes=command.reason,
         confirmation_preview_fingerprint=fingerprint,
         confirmation_idempotency_key=idempotency_key,
@@ -581,6 +585,7 @@ def _dispatch_command(
     *,
     actor_id: str | None,
     actor_type: AuditActorType,
+    requested_by_subscriber_id: str | None,
 ) -> tuple[SubscriptionCommandOutcomeStatus, tuple[str, ...], str]:
     if command.kind == SubscriptionCommandKind.change_plan:
         return _dispatch_plan_change(
@@ -589,6 +594,7 @@ def _dispatch_command(
             command,
             preview,
             actor_id=actor_id,
+            requested_by_subscriber_id=requested_by_subscriber_id,
         )
     if command.effective_timing != SubscriptionEffectiveTiming.immediate:
         from app.services.subscription_lifecycle_schedules import (
@@ -761,6 +767,7 @@ def _dispatch_plan_change(
     preview: SubscriptionLifecyclePreview,
     *,
     actor_id: str | None,
+    requested_by_subscriber_id: str | None,
 ) -> tuple[SubscriptionCommandOutcomeStatus, tuple[str, ...], str]:
     target_offer_id = str(command.target_offer_id)
     if command.effective_timing == SubscriptionEffectiveTiming.immediate:
@@ -805,7 +812,7 @@ def _dispatch_plan_change(
             ),
             confirmation_origin=command.source,
             confirmation_snapshot=json.loads(json.dumps(quote, default=str)),
-            requested_by_person_id=actor_id,
+            requested_by_subscriber_id=requested_by_subscriber_id,
             actor_id=actor_id,
             notes=command.reason or "Confirmed by subscription lifecycle command",
         )
@@ -822,7 +829,7 @@ def _dispatch_plan_change(
         subscription_id=str(subscription.id),
         new_offer_id=target_offer_id,
         effective_date=preview.effective_at.date(),
-        requested_by_person_id=None,
+        requested_by_subscriber_id=requested_by_subscriber_id,
         notes=command.reason or f"Scheduled by {command.source}",
     )
     return (

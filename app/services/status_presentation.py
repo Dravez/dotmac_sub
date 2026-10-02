@@ -63,6 +63,7 @@ _ACCOUNT_PRESENTATIONS: dict[str, tuple[str, StatusTone, StatusIcon]] = {
         StatusTone.warning,
         StatusIcon.alert,
     ),
+    SubscriberStatus.paused.value: ("Paused", StatusTone.info, StatusIcon.minus),
     SubscriberStatus.blocked.value: ("Blocked", StatusTone.negative, StatusIcon.x),
     SubscriberStatus.disabled.value: ("Disabled", StatusTone.negative, StatusIcon.x),
     SubscriberStatus.canceled.value: ("Canceled", StatusTone.negative, StatusIcon.x),
@@ -85,6 +86,11 @@ _SUBSCRIPTION_PRESENTATIONS: dict[str, tuple[str, StatusTone, StatusIcon]] = {
         "Suspended",
         StatusTone.warning,
         StatusIcon.alert,
+    ),
+    SubscriptionStatus.paused.value: (
+        "Paused",
+        StatusTone.info,
+        StatusIcon.minus,
     ),
     SubscriptionStatus.stopped.value: (
         "Stopped",
@@ -1163,6 +1169,14 @@ def field_expense_status_presentation(status: str | None) -> StatusPresentation:
 _FIELD_MATERIAL_REQUEST_PRESENTATIONS: dict[str, tuple[str, StatusTone, StatusIcon]] = {
     "draft": ("Draft", StatusTone.neutral, StatusIcon.archive),
     "submitted": ("Submitted", StatusTone.info, StatusIcon.clock),
+    "accepted_by_erp": ("Accepted by ERP", StatusTone.info, StatusIcon.clock),
+    "pending_stock": ("Pending stock", StatusTone.warning, StatusIcon.clock),
+    "cancellation_pending": (
+        "Cancellation pending",
+        StatusTone.warning,
+        StatusIcon.clock,
+    ),
+    "sync_failed": ("Sync failed", StatusTone.negative, StatusIcon.alert),
     "approved": ("Approved", StatusTone.positive, StatusIcon.check),
     "rejected": ("Rejected", StatusTone.negative, StatusIcon.x),
     "issued": ("Issued", StatusTone.info, StatusIcon.info),

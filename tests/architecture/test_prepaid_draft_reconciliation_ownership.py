@@ -54,6 +54,23 @@ def test_prepaid_draft_reconciliation_has_one_contracted_owner():
     )
     assert missing_invoice_repair.role is OwnerRole.RECONCILER
     assert missing_invoice_repair.canonical_writer == service.name
+    reviewed_draft = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed existing prepaid draft settlement"
+    )
+    assert reviewed_draft.role is OwnerRole.RECONCILER
+    assert reviewed_draft.canonical_writer == service.name
+    assert "canonical funded service entitlement" in reviewed_draft.input_names
+    sequence = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed prepaid invoice sequence reconstruction"
+    )
+    assert sequence.role is OwnerRole.RECONCILER
+    assert sequence.canonical_writer == service.name
+    assert "reviewed invoice-sequence reconstruction command" in sequence.input_names
+    assert "canonical reviewed service calendar" in sequence.input_names
     opening_settlement = next(
         item
         for item in service.contract.concerns
@@ -77,13 +94,41 @@ def test_funding_change_checks_existing_draft_before_new_funded_invoice():
 
 
 def test_funded_prepaid_renewal_uses_invoice_and_credit_participants_only():
-    source = inspect.getsource(prepaid_service_renewals.confirm_prepaid_service_renewal)
+    """Neither settlement lane re-enters the generic draft write path.
 
-    assert "Invoices.stage_system_invoice_for_owner(" in source
-    assert "InvoiceLines.stage_system_line_for_owner(" in source
-    assert "stage_prepaid_draft_after_funding_change(" in source
-    assert "stage_system_account_adjustment(" not in source
-    assert "ensure_prepaid_entitlement_for_wallet_debit(" not in source
+    Single-owner funding-consequence cutover (2026-09, round 2): the
+    original defect was `confirm_prepaid_service_renewal` re-entering
+    `stage_prepaid_draft_after_funding_change` to settle a document it had
+    just created itself. Both settlement lanes now settle directly
+    (`_settle_exact_payment_fundable_renewal`/
+    `_settle_reviewed_opening_fundable_renewal`) and neither calls that
+    function or its private `_stage_action` write path at all -- this
+    assertion is intentionally inverted from what it required before that
+    cutover.
+    """
+    confirm_source = inspect.getsource(
+        prepaid_service_renewals.confirm_prepaid_service_renewal
+    )
+    exact_source = inspect.getsource(
+        prepaid_service_renewals._settle_exact_payment_fundable_renewal
+    )
+    opening_source = inspect.getsource(
+        prepaid_service_renewals._settle_reviewed_opening_fundable_renewal
+    )
+    combined = confirm_source + exact_source + opening_source
+
+    assert "Invoices.stage_system_invoice_for_owner(" in confirm_source
+    assert "InvoiceLines.stage_system_line_for_owner(" in confirm_source
+    assert "AccountCreditApplications.apply_invoice_fully(" in exact_source
+    assert (
+        "AccountCreditApplications.apply_invoice_from_selected_payment_fully("
+        in exact_source
+    )
+    assert "AccountCreditApplications.apply_invoice_available(" in opening_source
+    assert "stage_prepaid_draft_after_funding_change(" not in combined
+    assert "_stage_action(" not in combined
+    assert "stage_system_account_adjustment(" not in combined
+    assert "ensure_prepaid_entitlement_for_wallet_debit(" not in combined
 
 
 def test_duplicate_draft_transition_stays_under_reconciliation_owner():
@@ -162,6 +207,7 @@ def test_reconciliation_cli_is_dry_run_first():
     assert "read_session()" in source
     assert 'parser.add_argument("--adopt-proforma", action="store_true")' in source
     assert 'parser.add_argument("--subscription-id", type=_uuid)' in source
+    assert 'parser.add_argument("--line-id", type=_uuid)' in source
     assert 'parser.add_argument("--repair-paid-invoice", action="store_true")' in source
     assert (
         'parser.add_argument("--repair-missing-paid-invoice", action="store_true")'
@@ -181,6 +227,46 @@ def test_reconciliation_cli_is_dry_run_first():
     assert "reconcile_opening_settlement_correction(" in source
 
 
+def test_sequence_reconstruction_cli_is_dry_run_first_and_permission_gated():
+    source = (
+        ROOT / "scripts/billing/reconstruct_reviewed_prepaid_invoice_sequence.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--apply", action="store_true")' in source
+    assert "if not args.apply:" in source
+    assert "read_session()" in source
+    assert "owner_command_session()" in source
+    assert "preview_reviewed_prepaid_invoice_sequence_reconstruction(" in source
+    assert "reconstruct_reviewed_prepaid_invoice_sequence(" in source
+    assert "system_user_role_names(" in source
+    assert "has_permission(auth, db, REPAIR_SCOPE)" in source
+
+
+def test_reviewed_sequence_uses_one_typed_calendar_owner_and_locked_periods():
+    preview = inspect.getsource(
+        prepaid_draft_reconciliation.preview_reviewed_prepaid_invoice_sequence_reconstruction
+    )
+    apply = inspect.getsource(
+        prepaid_draft_reconciliation.reconstruct_reviewed_prepaid_invoice_sequence
+    )
+    assert "resolve_reviewed_prepaid_service_period(" in preview
+    assert "ReviewedPrepaidServicePeriodQuery(" in preview
+    assert "expected_initial_anchor_at" in preview
+    for source in (preview, apply):
+        assert "_business_midnight(" not in source
+        assert "datetime.combine(" not in source
+    assert "current.service_periods" in apply
+    assert "db.expire_all()" in apply
+    service = service_relationship("financial.prepaid_service_renewals")
+    concern = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed prepaid documentary service-period resolution"
+    )
+    assert concern.role is OwnerRole.RESOLVER
+    assert "canonical documentary service period" in concern.input_names
+
+
 def test_admin_invoice_adapter_calls_only_the_authoritative_reconciler():
     source = inspect.getsource(web_prepaid_draft_reconciliation)
     invoice_adapter = (ROOT / "app/services/web_billing_invoices.py").read_text()
@@ -189,3 +275,104 @@ def test_admin_invoice_adapter_calls_only_the_authoritative_reconciler():
     assert "reconcile_prepaid_draft_invoice(" in source
     assert "settle_prepaid_recovery_invoice" not in source
     assert "prepaid_recovery_billing" not in invoice_adapter
+
+
+def test_historical_paid_invoice_repair_has_a_permission_gate():
+    """The reviewed paid-invoice repair authoritative input names a real gate.
+
+    PR #3092's independent risk review found this command reachable with no
+    application-level permission check at all -- a free-text ``actor`` label
+    through ``CommandContext.system(...)``. This pins the fix's shape so a
+    later edit cannot quietly drop the gate.
+    """
+
+    service = service_relationship("financial.prepaid_draft_reconciliation")
+    assert "auth.permission_gate" in service.depends_on
+
+    repair_concern = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "historical paid prepaid invoice identity and coverage repair"
+    )
+    assert "reviewed historical paid-invoice repair command" in (
+        repair_concern.input_names
+    )
+
+    gate_input = next(
+        item
+        for item in service.contract.authoritative_inputs
+        if item.name == "reviewed historical paid-invoice repair command"
+    )
+    assert gate_input.owner == "auth.permission_gate"
+    assert "billing:prepaid_reconciliation:repair" in gate_input.source
+
+    assert (
+        "financial.prepaid_draft_reconciliation.permission_denied"
+        in service.contract.errors.domain_codes
+    )
+
+    source = inspect.getsource(prepaid_draft_reconciliation)
+    assert 'REPAIR_SCOPE = "billing:prepaid_reconciliation:repair"' in source
+    assert "permission_granted: bool" in source
+    assert (
+        "command.context.scope != REPAIR_SCOPE or not command.permission_granted"
+        in source
+    )
+
+
+def test_paid_invoice_coverage_correction_is_registered():
+    service = service_relationship("financial.prepaid_draft_reconciliation")
+
+    concern = next(
+        item
+        for item in service.contract.concerns
+        if item.name == "reviewed paid prepaid invoice coverage correction"
+    )
+    assert concern.role.value == "reconciler"
+    assert "canonical paid prepaid coverage document" in concern.input_names
+    assert "canonical prepaid subscription contract" in concern.input_names
+    assert "canonical paid invoice allocation evidence" in concern.input_names
+    assert "canonical funded service entitlement" in concern.input_names
+    assert concern.canonical_writer == "financial.prepaid_draft_reconciliation"
+
+    coverage_document = next(
+        item
+        for item in service.contract.authoritative_inputs
+        if item.name == "canonical paid prepaid coverage document"
+    )
+    assert coverage_document.owner == "financial.invoices"
+
+
+def test_reconciliation_cli_checks_a_real_staff_permission_before_repair():
+    """The CLI resolves a real principal's RBAC grants, not a free-text actor.
+
+    A caller could previously type any ``--actor`` string it liked; nothing
+    checked it against an actual granted role. This pins that the CLI now
+    resolves an operator-supplied staff identifier's real permissions via
+    ``system_user_role_names`` (the real ``Role``/``SystemUserRole`` join,
+    not ``auth_dependencies.user_role_names``, which reads a ``roles``
+    attribute ``SystemUser`` does not have and always returns ``None``) and
+    ``has_permission`` before treating the repair as authorized. This is a
+    source-grep supplement only: ``tests/test_reconcile_prepaid_drafts_cli.py``
+    is the non-vacuous proof that the resolver can actually return ``True``.
+    """
+
+    with open(
+        "scripts/billing/reconcile_prepaid_drafts.py",
+        encoding="utf-8",
+    ) as handle:
+        source = handle.read()
+
+    assert "from app.services.auth_dependencies import has_permission" in source
+    assert (
+        "from app.services.system_user_assignments import system_user_role_names"
+        in source
+    )
+    assert "auth_dependencies import has_permission, user_role_names" not in source
+    assert "system_user.is_active" in source
+    assert 'parser.add_argument("--actor-system-user-id", type=_uuid)' in source
+    assert "_resolve_repair_permission_granted(" in source
+    assert "permission_granted=repair_permission_granted" in source
+    assert "actor_system_user_id=args.actor_system_user_id" in source
+    assert "REPAIR_SCOPE" in source
+    assert '("--actor-system-user-id", args.actor_system_user_id)' in source

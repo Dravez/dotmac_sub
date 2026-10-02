@@ -159,6 +159,29 @@ def _message_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _meta_referral_observation(event: dict[str, Any]) -> dict[str, str] | None:
+    """Normalize the allowlisted, PII-free acquisition fields on a DM event."""
+
+    raw = event.get("referral")
+    if not isinstance(raw, dict):
+        message = event.get("message")
+        raw = message.get("referral") if isinstance(message, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    aliases = {
+        "ref": ("campaign_ref", 255),
+        "ad_id": ("external_ad_id", 200),
+        "source": ("referral_source", 80),
+        "type": ("referral_type", 80),
+    }
+    normalized = {}
+    for source, (target, maximum) in aliases.items():
+        value = _text(raw.get(source))
+        if value is not None:
+            normalized[target] = value[:maximum]
+    return normalized or None
+
+
 def _text(value: object) -> str | None:
     candidate = str(value or "").strip()
     return candidate or None
@@ -338,6 +361,11 @@ def _iter_meta_social_messages(payload: dict[str, Any]):
                 "attachments": _message_attachments(message),
                 "reply_window_qualifying": True,
             }
+            referral = _meta_referral_observation(event)
+            if referral is None:
+                referral = _meta_referral_observation(message)
+            if referral is not None:
+                metadata["meta_referral_observation"] = referral
             if channel_type == InboxChannelType.facebook_messenger.value:
                 metadata["page_id"] = page_or_account_id
             if channel_type == InboxChannelType.instagram_dm.value:

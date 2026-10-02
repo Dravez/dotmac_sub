@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     SOTService,
 )
@@ -56,4 +61,22 @@ DOMAIN = DomainSOT(
     "adapters and device-access code do not build WireGuard config, "
     "mutate peers, or write the system interface directly. The Redis "
     "vpn_cache is a rebuildable projection, never a source of truth.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="maintenance.wireguard_housekeeping",
+                label="WireGuard log and token cleanup",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Cleanup deletes expired security records and tokens; the existing owner must define a safe maintenance contract before Center management.",
+            ),
+            AutomationCatalogItem(
+                key="network.vpn_control_and_health_jobs",
+                label="VPN control and health jobs",
+                group="Network and monitoring",
+                state=AutomationCatalogState.unavailable,
+                explanation="VPN control and health checks remain operator-started or schedule-managed; no Center trigger/action contract is registered.",
+            ),
+        ),
+    ),
 )

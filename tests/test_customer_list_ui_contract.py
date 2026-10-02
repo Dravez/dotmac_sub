@@ -128,7 +128,7 @@ def test_customer_filter_form_keeps_canonical_query_state_in_browser_history():
     assert "data-dynamic-table" not in template
     assert "/api/v1/tables/customers" not in template
     assert 'filter_select("billing_mode"' in template
-    assert '{"value": "non_billable", "label": "Non-billable"}' in template
+    assert '{"value": "non_billable", "label": "Non-billable / review"}' in template
     assert "currentBillingMode" in template
     assert "billingModeLabel()" in template
 
@@ -235,6 +235,9 @@ def test_customer_multi_column_exports_project_the_complete_backend_csv():
         "service_ip_addresses",
         "nas_devices",
         "contact_completeness",
+        "open_ticket_ids",
+        "total_payment",
+        "last_billing_date",
     ):
         assert f"sourceColumn: '{source_column}'" in template
 

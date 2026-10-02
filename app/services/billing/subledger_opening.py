@@ -16,23 +16,44 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.audit import AuditActorType
+from app.models.billing import Invoice, Payment, PaymentAllocation, PaymentStatus
+from app.models.billing_contract import BillingRecordAuthority
 from app.models.billing_shadow_verification import BillingCutoverVerificationRun
 from app.models.customer_subledger import (
+    CustomerPostingGroup,
     CustomerSubledgerAuthorityCutover,
+    CustomerSubledgerOpeningCorrection,
     CustomerSubledgerOpeningPosition,
+    NativePrepaidOpeningRepair,
     PositionEffectKind,
     PostingCommandKind,
     PostingProducer,
     PostingSourceKind,
 )
+from app.models.prepaid_funding import (
+    PrepaidFundingBaseline,
+    PrepaidFundingReconstructionBatch,
+)
+from app.models.splynx_transaction import SplynxBillingTransaction
 from app.models.subscriber import Subscriber
+from app.models.system_user import SystemUser
+from app.schemas.audit import AuditEventCreate
+from app.services.audit import AuditEvents
+from app.services.auth_dependencies import has_permission
 from app.services.billing.customer_subledger import (
     EffectInput,
     StagePostingGroupCommand,
+    resolve_position_evidence_at,
     stage_posting_group,
+)
+from app.services.billing.opening_balance_history import (
+    OpeningBalanceSourceIdentityDisposition,
+    OpeningBalanceSourceIdentityQuery,
+    classify_opening_balance_source_identities,
 )
 from app.services.common import round_money
 from app.services.domain_errors import DomainError
@@ -42,8 +63,11 @@ from app.services.locking import lock_for_update
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
+    current_command_context,
     execute_owner_command,
+    owner_command_active,
 )
+from app.services.system_user_assignments import system_user_role_names
 
 
 def _object_dict(value: object) -> dict[str, object]:
@@ -62,6 +86,8 @@ def _object_dict_rows(value: object) -> list[dict[str, object]]:
 
 OWNER = "financial.customer_subledger_opening_positions"
 CONCERN = "reviewed customer-subledger opening-position capture"
+CORRECTION_SCOPE = "billing:customer_subledger_opening:correct"
+NATIVE_REPAIR_SCOPE = "billing:prepaid_funding:native_opening_repair"
 _CAPTURE_COMMAND = OwnerCommandDefinition(
     owner=OWNER,
     concern=CONCERN,
@@ -71,6 +97,16 @@ _CUTOVER_COMMAND = OwnerCommandDefinition(
     owner=OWNER,
     concern="customer-subledger authority cutover activation",
     name="activate_customer_subledger_authority",
+)
+_CORRECTION_COMMAND = OwnerCommandDefinition(
+    owner=OWNER,
+    concern="reviewed customer-subledger opening-position correction",
+    name="correct_customer_subledger_opening_position",
+)
+_NATIVE_REPAIR_COMMAND = OwnerCommandDefinition(
+    owner=OWNER,
+    concern="account-scoped native prepaid opening repair",
+    name="repair_native_prepaid_opening",
 )
 
 
@@ -134,6 +170,720 @@ class CustomerSubledgerAuthorityResult:
     verification_run_id: UUID
     cutover_at: datetime
     replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewCustomerSubledgerOpeningCorrectionQuery:
+    account_id: UUID
+    currency: str
+    corrected_opening_amount: Decimal
+    reason: str
+    review_reference: str
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerSubledgerOpeningCorrectionPreview:
+    opening_position_id: UUID
+    account_id: UUID
+    currency: str
+    previous_opening_amount: Decimal
+    corrected_opening_amount: Decimal
+    delta: Decimal
+    preview_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectCustomerSubledgerOpeningCommand:
+    context: CommandContext
+    query: PreviewCustomerSubledgerOpeningCorrectionQuery
+    expected_preview_fingerprint: str
+    permission_granted: bool
+    authorized_system_user_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerSubledgerOpeningCorrectionResult:
+    correction_id: UUID
+    posting_group_id: UUID
+    previous_opening_amount: Decimal
+    corrected_opening_amount: Decimal
+    delta: Decimal
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPreopeningAllocationReleaseQuery:
+    """Exact legacy allocation omitted from an approved opening position."""
+
+    account_id: UUID
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    currency: str
+    amount: Decimal
+    reason: str
+    review_reference: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedPreopeningAllocationReleasePreview:
+    opening_position_id: UUID
+    allocation_id: UUID
+    allocation_created_at: datetime
+    opening_occurred_at: datetime
+    previous_opening_amount: Decimal
+    corrected_opening_amount: Decimal
+    delta: Decimal
+    preview_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativePrepaidOpeningApproval:
+    finance_approver_system_user_id: UUID
+    finance_approver_name: str
+    approved_at: datetime
+    ticket_reference: str
+    evidence_ref: str
+    evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewNativePrepaidOpeningRepairQuery:
+    account_id: UUID
+    approval: NativePrepaidOpeningApproval
+    currency: str = "NGN"
+
+
+@dataclass(frozen=True, slots=True)
+class NativePrepaidOpeningRepairPreview:
+    account_id: UUID
+    currency: str
+    account_created_at: datetime
+    legacy_handoff_at: datetime
+    original_cutover_batch_id: UUID
+    original_cutover_at: datetime
+    cutover_evidence_fingerprint: str
+    source_classification: str
+    splynx_transaction_count: int
+    calculated_amount: Decimal
+    native_event_count: int
+    shadow_position_before: Decimal
+    opening_delta: Decimal
+    source_identity_fingerprint: str
+    native_evidence_fingerprint: str
+    shadow_evidence_fingerprint: str
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepairNativePrepaidOpeningCommand:
+    context: CommandContext
+    query: PreviewNativePrepaidOpeningRepairQuery
+    expected_preview_fingerprint: str
+    operator_system_user_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class NativePrepaidOpeningRepairResult:
+    repair_id: UUID
+    opening_position_id: UUID
+    posting_group_id: UUID
+    account_id: UUID
+    currency: str
+    calculated_amount: Decimal
+    original_cutover_batch_id: UUID
+    original_cutover_at: datetime
+    preview_fingerprint: str
+    replayed: bool
+
+
+def _canonical_system_user_name(user: SystemUser) -> str:
+    return (user.display_name or f"{user.first_name} {user.last_name}").strip()
+
+
+def _validate_native_repair_approval(
+    db: Session, approval: NativePrepaidOpeningApproval
+) -> SystemUser:
+    digest = approval.evidence_sha256.strip()
+    reference = approval.evidence_ref.strip()
+    ticket = approval.ticket_reference.strip()
+    if approval.approved_at.tzinfo is None:
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approval time must include a timezone.",
+        )
+    if not ticket or len(ticket) > 120:
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approval requires a bounded ticket reference.",
+        )
+    if (
+        not reference
+        or len(reference) > 500
+        or any(
+            marker in reference.casefold()
+            for marker in (
+                "password=",
+                "token=",
+                "access_token=",
+                "secret=",
+                "api_key=",
+                "apikey=",
+                "authorization=",
+            )
+        )
+        or reference.casefold().startswith(("bao://", "env://"))
+    ):
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approval requires a bounded non-secret evidence reference.",
+        )
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approval evidence digest must be lowercase SHA-256 hex.",
+        )
+    approver = db.get(
+        SystemUser,
+        approval.finance_approver_system_user_id,
+        populate_existing=True,
+    )
+    if (
+        approver is None
+        or not approver.is_active
+        or _canonical_system_user_name(approver).casefold()
+        != approval.finance_approver_name.strip().casefold()
+    ):
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approver identity is inactive or does not match.",
+        )
+    return approver
+
+
+def _verify_native_repair_operator(db: Session, system_user_id: UUID) -> SystemUser:
+    user = lock_for_update(db, SystemUser, system_user_id)
+    if user is None or not user.is_active:
+        raise _error(
+            "permission_denied",
+            "Native opening repair requires an active staff principal.",
+        )
+    granted = has_permission(
+        {
+            "principal_id": str(system_user_id),
+            "principal_type": "system_user",
+            "roles": set(system_user_role_names(db, system_user_id)),
+        },
+        db,
+        NATIVE_REPAIR_SCOPE,
+    )
+    if not granted:
+        raise _error(
+            "permission_denied",
+            f"Native opening repair requires {NATIVE_REPAIR_SCOPE}.",
+        )
+    return user
+
+
+def preview_native_prepaid_opening_repair(
+    db: Session,
+    query: PreviewNativePrepaidOpeningRepairQuery,
+) -> NativePrepaidOpeningRepairPreview:
+    """Calculate one omitted native opening from canonical Sub facts only."""
+
+    from app.services.customer_financial_ledger import (
+        native_customer_financial_position_evidence,
+    )
+    from app.services.prepaid_enforcement_planner import (
+        candidate_prepaid_funding_account_ids,
+    )
+    from app.services.prepaid_funding_reconstruction import (
+        LEGACY_FINANCIAL_HANDOFF_AT,
+        authority_cutover_batch,
+    )
+
+    unit = query.currency.strip().upper()
+    if len(unit) != 3 or not unit.isalpha():
+        raise _error("invalid_currency", "Native opening currency is invalid.")
+    _validate_native_repair_approval(db, query.approval)
+    account = db.get(Subscriber, query.account_id, populate_existing=True)
+    if account is None:
+        raise _error(
+            "account_not_found",
+            "The selected prepaid account does not exist.",
+            account_id=str(query.account_id),
+        )
+    created_at = _utc(account.created_at)
+    cutover = authority_cutover_batch(db)
+    if cutover is None:
+        raise _error(
+            "authority_not_active",
+            "Prepaid funding authority cutover evidence is missing.",
+        )
+    cutover_at = _utc(cutover.position_at)
+    cutover_evidence_fingerprint = _digest(
+        {
+            "id": str(cutover.id),
+            "manifest_sha256": cutover.manifest_sha256,
+            "manifest_payload_sha256": cutover.manifest_payload_sha256,
+            "attestation_sha256": cutover.attestation_sha256,
+            "attestation_key_fingerprint_sha256": (
+                cutover.attestation_key_fingerprint_sha256
+            ),
+            "attestation_signed_at": _utc(cutover.attestation_signed_at).isoformat(),
+            "blocker_manifest_sha256": cutover.blocker_manifest_sha256,
+            "candidate_cohort_sha256": cutover.candidate_cohort_sha256,
+            "source": cutover.source,
+            "evidence_ref": cutover.evidence_ref,
+            "position_at": cutover_at.isoformat(),
+            "currency": cutover.currency,
+            "account_count": cutover.account_count,
+            "total_amount": str(cutover.total_amount),
+            "approved_by": cutover.approved_by,
+            "approved_at": _utc(cutover.approved_at).isoformat(),
+        }
+    )
+    if created_at <= LEGACY_FINANCIAL_HANDOFF_AT:
+        raise _error(
+            "account_not_native_after_handoff",
+            "Account creation does not prove native-after-handoff provenance.",
+        )
+    if created_at > cutover_at:
+        raise _error(
+            "account_not_in_original_cutover",
+            "Account did not exist at the prepaid funding authority cutover.",
+        )
+    if query.account_id not in candidate_prepaid_funding_account_ids(db):
+        raise _error(
+            "account_not_in_funding_cohort",
+            "Account is not in the applicable prepaid funding cohort.",
+        )
+    identity = classify_opening_balance_source_identities(
+        db,
+        OpeningBalanceSourceIdentityQuery(
+            account_ids=(query.account_id,),
+            native_after=LEGACY_FINANCIAL_HANDOFF_AT,
+            position_at=cutover_at,
+        ),
+    )
+    identity_row = identity.rows[0]
+    if (
+        identity_row.disposition
+        is not OpeningBalanceSourceIdentityDisposition.native_after_handoff
+        or identity_row.splynx_customer_id is not None
+    ):
+        raise _error(
+            "splynx_identity_present",
+            "Account has carried-source identity evidence and is outside this repair.",
+        )
+    splynx_count = int(
+        db.scalar(
+            select(func.count(SplynxBillingTransaction.id)).where(
+                SplynxBillingTransaction.subscriber_id == query.account_id
+            )
+        )
+        or 0
+    )
+    if splynx_count:
+        raise _error(
+            "splynx_transactions_present",
+            "Account has carried-source transaction evidence and is outside this repair.",
+        )
+    baseline = db.scalar(
+        select(PrepaidFundingBaseline.id).where(
+            PrepaidFundingBaseline.account_id == query.account_id,
+            PrepaidFundingBaseline.currency == unit,
+            PrepaidFundingBaseline.is_active.is_(True),
+        )
+    )
+    if baseline is not None:
+        raise _error(
+            "funding_baseline_already_exists",
+            "Account already has an active prepaid funding baseline.",
+        )
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition.id).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == unit,
+        )
+    )
+    if opening is not None:
+        raise _error(
+            "opening_position_already_captured",
+            "Account already has an immutable opening position.",
+        )
+    authority = db.scalar(select(CustomerSubledgerAuthorityCutover).limit(1))
+    if authority is None:
+        raise _error(
+            "authority_not_active",
+            "Customer-subledger authority must be active before repair.",
+        )
+    try:
+        native = native_customer_financial_position_evidence(
+            db,
+            query.account_id,
+            currency=unit,
+            after=LEGACY_FINANCIAL_HANDOFF_AT,
+            before=cutover_at,
+        )
+    except RuntimeError as exc:
+        raise _error(
+            "native_evidence_incomplete",
+            "Canonical Sub-native financial evidence is not exactly reconstructable.",
+        ) from exc
+    shadow = resolve_position_evidence_at(
+        db,
+        account_id=query.account_id,
+        currency=unit,
+        authority=BillingRecordAuthority.shadow,
+        as_of=cutover_at,
+    )
+    shadow_position = round_money(
+        shadow.position.unapplied_customer_credit
+        + shadow.position.prepaid_funding_reserved
+    )
+    opening_delta = round_money(native.amount - shadow_position)
+    payload = {
+        "account_id": str(query.account_id),
+        "account_created_at": created_at.isoformat(),
+        "legacy_handoff_at": LEGACY_FINANCIAL_HANDOFF_AT.isoformat(),
+        "original_cutover_batch_id": str(cutover.id),
+        "original_cutover_at": cutover_at.isoformat(),
+        "cutover_evidence_fingerprint": cutover_evidence_fingerprint,
+        "currency": unit,
+        "source_classification": identity_row.disposition.value,
+        "source_identity_fingerprint": identity_row.evidence_fingerprint,
+        "splynx_customer_id": None,
+        "splynx_transaction_count": splynx_count,
+        "active_baseline_id": None,
+        "opening_position_id": None,
+        "calculated_amount": str(native.amount),
+        "native_event_count": native.event_count,
+        "native_evidence_fingerprint": native.fingerprint,
+        "shadow_position_before": str(shadow_position),
+        "shadow_evidence_fingerprint": shadow.fingerprint,
+        "opening_delta": str(opening_delta),
+        "funding_cohort_member": True,
+        "finance_approver_system_user_id": str(
+            query.approval.finance_approver_system_user_id
+        ),
+        "finance_approver_name": query.approval.finance_approver_name.strip(),
+        "approved_at": _utc(query.approval.approved_at).isoformat(),
+        "ticket_reference": query.approval.ticket_reference.strip(),
+        "evidence_ref": query.approval.evidence_ref.strip(),
+        "evidence_sha256": query.approval.evidence_sha256.strip(),
+    }
+    return NativePrepaidOpeningRepairPreview(
+        account_id=query.account_id,
+        currency=unit,
+        account_created_at=created_at,
+        legacy_handoff_at=LEGACY_FINANCIAL_HANDOFF_AT,
+        original_cutover_batch_id=cutover.id,
+        original_cutover_at=cutover_at,
+        cutover_evidence_fingerprint=cutover_evidence_fingerprint,
+        source_classification=identity_row.disposition.value,
+        splynx_transaction_count=splynx_count,
+        calculated_amount=native.amount,
+        native_event_count=native.event_count,
+        shadow_position_before=shadow_position,
+        opening_delta=opening_delta,
+        source_identity_fingerprint=identity_row.evidence_fingerprint,
+        native_evidence_fingerprint=native.fingerprint,
+        shadow_evidence_fingerprint=shadow.fingerprint,
+        fingerprint=_digest(payload),
+    )
+
+
+def _native_repair_result(
+    db: Session,
+    repair: NativePrepaidOpeningRepair,
+    *,
+    replayed: bool,
+) -> NativePrepaidOpeningRepairResult:
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.native_repair_id == repair.id
+        )
+    )
+    if opening is None:
+        raise _error(
+            "native_repair_incomplete",
+            "Native opening repair has no immutable opening position.",
+        )
+    posting_id = db.scalar(
+        select(CustomerPostingGroup.id).where(
+            CustomerPostingGroup.producer_owner
+            == PostingProducer.customer_subledger_opening_positions.value,
+            CustomerPostingGroup.source_kind
+            == PostingSourceKind.customer_subledger_opening_position.value,
+            CustomerPostingGroup.source_id == opening.id,
+        )
+    )
+    if posting_id is None:
+        raise _error(
+            "native_repair_incomplete",
+            "Native opening repair has no matching customer posting.",
+        )
+    return NativePrepaidOpeningRepairResult(
+        repair_id=repair.id,
+        opening_position_id=opening.id,
+        posting_group_id=posting_id,
+        account_id=repair.account_id,
+        currency=repair.currency,
+        calculated_amount=round_money(Decimal(repair.calculated_amount)),
+        original_cutover_batch_id=repair.original_cutover_batch_id,
+        original_cutover_at=_utc(repair.original_cutover_at),
+        preview_fingerprint=repair.preview_fingerprint,
+        replayed=replayed,
+    )
+
+
+def repair_native_prepaid_opening(
+    db: Session,
+    command: RepairNativePrepaidOpeningCommand,
+) -> NativePrepaidOpeningRepairResult:
+    """Append one permissioned native omission repair and opening atomically."""
+
+    return execute_owner_command(
+        db,
+        definition=_NATIVE_REPAIR_COMMAND,
+        context=command.context,
+        operation=lambda: _repair_native_prepaid_opening(db, command),
+    )
+
+
+def _repair_native_prepaid_opening(
+    db: Session,
+    command: RepairNativePrepaidOpeningCommand,
+) -> NativePrepaidOpeningRepairResult:
+    if command.context.scope != NATIVE_REPAIR_SCOPE:
+        raise _error("permission_denied", "Native opening repair scope is invalid.")
+    operator = _verify_native_repair_operator(db, command.operator_system_user_id)
+    if command.context.actor != f"system_user:{command.operator_system_user_id}":
+        raise _error(
+            "permission_denied",
+            "Repair actor must match the authenticated operator identity.",
+        )
+    key = (command.context.idempotency_key or "").strip()
+    if not key or len(key) > 120:
+        raise _error(
+            "invalid_idempotency_key",
+            "Native opening repair requires a bounded idempotency key.",
+        )
+    expected = command.expected_preview_fingerprint.strip()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise _error(
+            "invalid_result_fingerprint",
+            "Native opening repair requires the exact lowercase preview SHA-256.",
+        )
+    account = lock_for_update(db, Subscriber, command.query.account_id)
+    if account is None:
+        raise _error("account_not_found", "The selected prepaid account is missing.")
+    approver = lock_for_update(
+        db,
+        SystemUser,
+        command.query.approval.finance_approver_system_user_id,
+    )
+    if approver is None:
+        raise _error(
+            "invalid_finance_approval",
+            "Finance approver identity is inactive or does not match.",
+        )
+    existing = db.scalar(
+        select(NativePrepaidOpeningRepair)
+        .where(NativePrepaidOpeningRepair.idempotency_key == key)
+        .with_for_update()
+    )
+    if existing is not None:
+        if (
+            existing.account_id != command.query.account_id
+            or existing.preview_fingerprint != expected
+            or existing.operator_system_user_id != command.operator_system_user_id
+            or existing.reason != command.context.reason.strip()
+        ):
+            raise _error(
+                "idempotency_conflict",
+                "Idempotency key belongs to different native repair evidence.",
+            )
+        return _native_repair_result(db, existing, replayed=True)
+
+    # Lock authority and competing source records before recomputing evidence.
+    db.scalar(
+        select(PrepaidFundingReconstructionBatch)
+        .where(PrepaidFundingReconstructionBatch.is_authority_cutover.is_(True))
+        .with_for_update()
+    )
+    db.scalar(select(CustomerSubledgerAuthorityCutover).with_for_update())
+    db.scalars(
+        select(PrepaidFundingBaseline)
+        .where(PrepaidFundingBaseline.account_id == command.query.account_id)
+        .with_for_update()
+    ).all()
+    db.scalars(
+        select(CustomerSubledgerOpeningPosition)
+        .where(CustomerSubledgerOpeningPosition.account_id == command.query.account_id)
+        .with_for_update()
+    ).all()
+    db.scalars(
+        select(SplynxBillingTransaction)
+        .where(SplynxBillingTransaction.subscriber_id == command.query.account_id)
+        .with_for_update()
+    ).all()
+    preview = preview_native_prepaid_opening_repair(db, command.query)
+    if preview.fingerprint != expected:
+        raise _error(
+            "stale_reviewed_preview",
+            "Native opening evidence changed after preview; preview again.",
+        )
+    approval = command.query.approval
+    occurred_at = datetime.now(UTC)
+    repair = NativePrepaidOpeningRepair(
+        account_id=preview.account_id,
+        original_cutover_batch_id=preview.original_cutover_batch_id,
+        currency=preview.currency,
+        source_classification=preview.source_classification,
+        account_created_at=preview.account_created_at,
+        legacy_handoff_at=preview.legacy_handoff_at,
+        original_cutover_at=preview.original_cutover_at,
+        calculated_amount=preview.calculated_amount,
+        splynx_transaction_count=preview.splynx_transaction_count,
+        native_event_count=preview.native_event_count,
+        cutover_evidence_fingerprint=preview.cutover_evidence_fingerprint,
+        source_identity_fingerprint=preview.source_identity_fingerprint,
+        native_evidence_fingerprint=preview.native_evidence_fingerprint,
+        shadow_evidence_fingerprint=preview.shadow_evidence_fingerprint,
+        preview_fingerprint=preview.fingerprint,
+        finance_approver_system_user_id=approval.finance_approver_system_user_id,
+        finance_approver_name=approval.finance_approver_name.strip(),
+        approved_at=_utc(approval.approved_at),
+        ticket_reference=approval.ticket_reference.strip(),
+        evidence_ref=approval.evidence_ref.strip(),
+        evidence_sha256=approval.evidence_sha256.strip(),
+        operator_system_user_id=command.operator_system_user_id,
+        reason=command.context.reason.strip(),
+        idempotency_key=key,
+        applied_by=command.context.actor,
+        command_id=command.context.command_id,
+        correlation_id=command.context.correlation_id,
+        occurred_at=occurred_at,
+    )
+    db.add(repair)
+    db.flush()
+    opening = CustomerSubledgerOpeningPosition(
+        verification_run_id=None,
+        native_repair_id=repair.id,
+        baseline_id=None,
+        account_id=preview.account_id,
+        currency=preview.currency,
+        legacy_position=preview.calculated_amount,
+        shadow_position_before=preview.shadow_position_before,
+        opening_delta=preview.opening_delta,
+        evidence_fingerprint=preview.fingerprint,
+        review_reference=approval.evidence_ref.strip(),
+        captured_by=command.context.actor,
+        command_id=command.context.command_id,
+        correlation_id=command.context.correlation_id,
+        occurred_at=preview.original_cutover_at,
+    )
+    db.add(opening)
+    db.flush()
+    effects: tuple[EffectInput, ...] = ()
+    if preview.opening_delta > 0:
+        effects = (
+            EffectInput(
+                effect=PositionEffectKind.customer_credit_created,
+                amount=preview.opening_delta,
+            ),
+        )
+    elif preview.opening_delta < 0:
+        effects = (
+            EffectInput(
+                effect=PositionEffectKind.customer_credit_consumed,
+                amount=abs(preview.opening_delta),
+            ),
+        )
+    group = stage_posting_group(
+        db,
+        StagePostingGroupCommand(
+            account_id=preview.account_id,
+            currency=preview.currency,
+            command_kind=PostingCommandKind.opening_position,
+            producer_owner=PostingProducer.customer_subledger_opening_positions,
+            source_kind=PostingSourceKind.customer_subledger_opening_position,
+            source_id=opening.id,
+            occurred_at=preview.original_cutover_at,
+            effects=effects,
+            idempotency_key=(
+                f"posting:customer_subledger_opening:{preview.account_id}:"
+                f"{preview.currency}"
+            ),
+        ),
+        context=command.context,
+    )
+    AuditEvents.stage(
+        db,
+        AuditEventCreate(
+            actor_type=AuditActorType.user,
+            actor_id=str(command.operator_system_user_id),
+            actor_label=_canonical_system_user_name(operator),
+            action="repair_native_prepaid_opening",
+            entity_type="native_prepaid_opening_repair",
+            entity_id=str(repair.id),
+            metadata_={
+                "account_id": str(preview.account_id),
+                "opening_position_id": str(opening.id),
+                "posting_group_id": str(group.id),
+                "original_cutover_batch_id": str(preview.original_cutover_batch_id),
+                "original_cutover_at": preview.original_cutover_at.isoformat(),
+                "currency": preview.currency,
+                "calculated_amount": str(preview.calculated_amount),
+                "source_classification": preview.source_classification,
+                "cutover_evidence_fingerprint": (preview.cutover_evidence_fingerprint),
+                "source_identity_fingerprint": preview.source_identity_fingerprint,
+                "native_evidence_fingerprint": preview.native_evidence_fingerprint,
+                "shadow_evidence_fingerprint": preview.shadow_evidence_fingerprint,
+                "preview_fingerprint": preview.fingerprint,
+                "finance_approver_system_user_id": str(
+                    approval.finance_approver_system_user_id
+                ),
+                "approved_at": _utc(approval.approved_at).isoformat(),
+                "ticket_reference": approval.ticket_reference.strip(),
+                "evidence_ref": approval.evidence_ref.strip(),
+                "evidence_sha256": approval.evidence_sha256.strip(),
+                "command_id": str(command.context.command_id),
+                "correlation_id": str(command.context.correlation_id),
+            },
+        ),
+    )
+    emit_event(
+        db,
+        EventType.native_prepaid_opening_repaired,
+        {
+            "schema_version": 1,
+            "repair_id": str(repair.id),
+            "opening_position_id": str(opening.id),
+            "posting_group_id": str(group.id),
+            "account_id": str(preview.account_id),
+            "currency": preview.currency,
+            "calculated_amount": str(preview.calculated_amount),
+            "original_cutover_batch_id": str(preview.original_cutover_batch_id),
+            "original_cutover_at": preview.original_cutover_at.isoformat(),
+            "source_classification": preview.source_classification,
+            "cutover_evidence_fingerprint": preview.cutover_evidence_fingerprint,
+            "source_identity_fingerprint": preview.source_identity_fingerprint,
+            "native_evidence_fingerprint": preview.native_evidence_fingerprint,
+            "shadow_evidence_fingerprint": preview.shadow_evidence_fingerprint,
+            "preview_fingerprint": preview.fingerprint,
+            "ticket_reference": approval.ticket_reference.strip(),
+        },
+        actor=command.context.actor,
+    )
+    db.flush()
+    return _native_repair_result(db, repair, replayed=False)
 
 
 def capture_customer_subledger_opening_positions(
@@ -513,6 +1263,379 @@ def _result(
     )
 
 
+def preview_customer_subledger_opening_correction(
+    db: Session,
+    query: PreviewCustomerSubledgerOpeningCorrectionQuery,
+) -> CustomerSubledgerOpeningCorrectionPreview:
+    """Preview one explicit replacement value without changing any records."""
+
+    currency = query.currency.strip().upper()
+    reason = query.reason.strip()
+    review_reference = query.review_reference.strip()
+    if len(currency) != 3:
+        raise _error("invalid_currency", "Opening correction requires a currency.")
+    if not reason:
+        raise _error("missing_reason", "Opening correction requires a reason.")
+    if not review_reference:
+        raise _error(
+            "missing_review_reference",
+            "Opening correction requires a durable review reference.",
+        )
+    corrected = round_money(Decimal(query.corrected_opening_amount))
+    if not corrected.is_finite():
+        raise _error(
+            "invalid_corrected_amount", "Corrected opening amount must be finite."
+        )
+    if db.scalar(select(CustomerSubledgerAuthorityCutover.id).limit(1)) is None:
+        raise _error(
+            "authority_not_active",
+            "Opening corrections require active customer-subledger authority.",
+        )
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == currency,
+        )
+    )
+    if opening is None:
+        raise _error(
+            "opening_position_not_found",
+            "The account has no immutable opening position to correct.",
+            account_id=str(query.account_id),
+            currency=currency,
+        )
+    prior_delta = db.scalar(
+        select(
+            func.coalesce(
+                func.sum(CustomerSubledgerOpeningCorrection.delta),
+                0,
+            )
+        ).where(CustomerSubledgerOpeningCorrection.opening_position_id == opening.id)
+    )
+    previous = round_money(Decimal(opening.legacy_position) + Decimal(prior_delta or 0))
+    delta = round_money(corrected - previous)
+    if delta == 0:
+        raise _error(
+            "no_change", "Corrected opening amount already matches the current value."
+        )
+    fingerprint = _digest(
+        {
+            "opening_position_id": str(opening.id),
+            "account_id": str(query.account_id),
+            "currency": currency,
+            "previous_opening_amount": str(previous),
+            "corrected_opening_amount": str(corrected),
+            "delta": str(delta),
+            "reason": reason,
+            "review_reference": review_reference,
+        }
+    )
+    return CustomerSubledgerOpeningCorrectionPreview(
+        opening_position_id=opening.id,
+        account_id=query.account_id,
+        currency=currency,
+        previous_opening_amount=previous,
+        corrected_opening_amount=corrected,
+        delta=delta,
+        preview_fingerprint=fingerprint,
+    )
+
+
+def correct_customer_subledger_opening_position(
+    db: Session,
+    command: CorrectCustomerSubledgerOpeningCommand,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    """Append an audited correction and matching customer-position effect."""
+
+    return execute_owner_command(
+        db,
+        definition=_CORRECTION_COMMAND,
+        context=command.context,
+        operation=lambda: _correct_opening(db, command),
+    )
+
+
+def preview_reviewed_preopening_allocation_release(
+    db: Session,
+    query: ReviewedPreopeningAllocationReleaseQuery,
+) -> ReviewedPreopeningAllocationReleasePreview:
+    """Prove that releasing one legacy allocation must amend the opening."""
+
+    currency = query.currency.strip().upper()
+    amount = round_money(Decimal(query.amount))
+    if len(currency) != 3 or amount <= Decimal("0.00"):
+        raise _error(
+            "invalid_preopening_release",
+            "Pre-opening allocation release requires a positive amount and currency.",
+        )
+    allocation = db.get(PaymentAllocation, query.allocation_id)
+    payment = db.get(Payment, query.payment_id)
+    invoice = db.get(Invoice, query.invoice_id)
+    opening = db.scalar(
+        select(CustomerSubledgerOpeningPosition).where(
+            CustomerSubledgerOpeningPosition.account_id == query.account_id,
+            CustomerSubledgerOpeningPosition.currency == currency,
+        )
+    )
+    if (
+        allocation is None
+        or not allocation.is_active
+        or allocation.payment_id != query.payment_id
+        or allocation.invoice_id != query.invoice_id
+        or round_money(allocation.amount) != amount
+        or allocation.consumption_ledger_entry_id is not None
+        or payment is None
+        or not payment.is_active
+        or payment.status is not PaymentStatus.succeeded
+        or payment.account_id != query.account_id
+        or payment.currency.upper() != currency
+        or invoice is None
+        or invoice.account_id != query.account_id
+        or invoice.currency.upper() != currency
+        or opening is None
+    ):
+        raise _error(
+            "preopening_release_evidence_mismatch",
+            "Allocation, payment, invoice, or opening evidence does not match.",
+        )
+    allocation_created_at = _utc(allocation.created_at)
+    opening_occurred_at = _utc(opening.occurred_at)
+    if allocation_created_at > opening_occurred_at:
+        raise _error(
+            "allocation_not_preopening",
+            "Only an allocation carried into the approved opening may amend it.",
+            allocation_id=str(allocation.id),
+        )
+    prior_delta = db.scalar(
+        select(
+            func.coalesce(func.sum(CustomerSubledgerOpeningCorrection.delta), 0)
+        ).where(CustomerSubledgerOpeningCorrection.opening_position_id == opening.id)
+    )
+    previous = round_money(Decimal(opening.legacy_position) + Decimal(prior_delta or 0))
+    corrected = round_money(previous + amount)
+    fingerprint = _digest(
+        {
+            "opening_position_id": str(opening.id),
+            "allocation_id": str(allocation.id),
+            "payment_id": str(payment.id),
+            "invoice_id": str(invoice.id),
+            "account_id": str(query.account_id),
+            "currency": currency,
+            "allocation_created_at": allocation_created_at,
+            "opening_occurred_at": opening_occurred_at,
+            "previous_opening_amount": str(previous),
+            "corrected_opening_amount": str(corrected),
+            "delta": str(amount),
+            "reason": query.reason.strip(),
+            "review_reference": query.review_reference.strip(),
+        }
+    )
+    return ReviewedPreopeningAllocationReleasePreview(
+        opening_position_id=opening.id,
+        allocation_id=allocation.id,
+        allocation_created_at=allocation_created_at,
+        opening_occurred_at=opening_occurred_at,
+        previous_opening_amount=previous,
+        corrected_opening_amount=corrected,
+        delta=amount,
+        preview_fingerprint=fingerprint,
+    )
+
+
+def stage_reviewed_preopening_allocation_release_for_owner(
+    db: Session,
+    query: ReviewedPreopeningAllocationReleaseQuery,
+    *,
+    expected_preview_fingerprint: str,
+    authorized_system_user_id: UUID,
+    idempotency_key: str,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    """Stage the correction inside the historical-tax coordinator transaction."""
+
+    if not owner_command_active(
+        db, owner="financial.historical_invoice_tax_corrections"
+    ):
+        raise _error(
+            "owner_context_required",
+            "Pre-opening release correction requires the historical-tax owner.",
+        )
+    preview = preview_reviewed_preopening_allocation_release(db, query)
+    if preview.preview_fingerprint != expected_preview_fingerprint:
+        raise _error(
+            "stale_preopening_release_preview",
+            "Pre-opening allocation evidence changed after review.",
+        )
+    opening_query = PreviewCustomerSubledgerOpeningCorrectionQuery(
+        account_id=query.account_id,
+        currency=query.currency,
+        corrected_opening_amount=preview.corrected_opening_amount,
+        reason=query.reason,
+        review_reference=query.review_reference,
+    )
+    opening_preview = preview_customer_subledger_opening_correction(db, opening_query)
+    return _stage_opening_correction(
+        db,
+        query=opening_query,
+        preview=opening_preview,
+        context=current_command_context(db),
+        authorized_system_user_id=authorized_system_user_id,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _correction_result(
+    db: Session,
+    correction: CustomerSubledgerOpeningCorrection,
+    *,
+    replayed: bool,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    group_id = db.scalar(
+        select(CustomerPostingGroup.id).where(
+            CustomerPostingGroup.producer_owner
+            == PostingProducer.customer_subledger_opening_positions.value,
+            CustomerPostingGroup.source_kind
+            == PostingSourceKind.customer_subledger_opening_correction.value,
+            CustomerPostingGroup.source_id == correction.id,
+        )
+    )
+    if group_id is None:
+        raise _error(
+            "correction_posting_missing",
+            "The opening correction has no matching customer posting.",
+            correction_id=str(correction.id),
+        )
+    return CustomerSubledgerOpeningCorrectionResult(
+        correction_id=correction.id,
+        posting_group_id=group_id,
+        previous_opening_amount=round_money(
+            Decimal(correction.previous_opening_amount)
+        ),
+        corrected_opening_amount=round_money(
+            Decimal(correction.corrected_opening_amount)
+        ),
+        delta=round_money(Decimal(correction.delta)),
+        replayed=replayed,
+    )
+
+
+def _correct_opening(
+    db: Session,
+    command: CorrectCustomerSubledgerOpeningCommand,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    if command.context.scope != CORRECTION_SCOPE or not command.permission_granted:
+        raise _error(
+            "permission_denied",
+            "Opening correction requires the dedicated staff permission.",
+        )
+    key = (command.context.idempotency_key or "").strip()
+    if not key or len(key) > 120:
+        raise _error(
+            "invalid_idempotency_key",
+            "Opening correction requires an idempotency key of at most 120 characters.",
+        )
+    existing = db.scalar(
+        select(CustomerSubledgerOpeningCorrection).where(
+            CustomerSubledgerOpeningCorrection.idempotency_key == key
+        )
+    )
+    if existing is not None:
+        if existing.preview_fingerprint != command.expected_preview_fingerprint:
+            raise _error(
+                "idempotency_conflict",
+                "This idempotency key was already used for a different correction.",
+            )
+        return _correction_result(db, existing, replayed=True)
+
+    if lock_for_update(db, Subscriber, command.query.account_id) is None:
+        raise _error(
+            "account_not_found",
+            "The customer account does not exist.",
+            account_id=str(command.query.account_id),
+        )
+    preview = preview_customer_subledger_opening_correction(db, command.query)
+    if preview.preview_fingerprint != command.expected_preview_fingerprint:
+        raise _error(
+            "stale_reviewed_preview",
+            "The opening position changed after review; preview it again.",
+        )
+    return _stage_opening_correction(
+        db,
+        query=command.query,
+        preview=preview,
+        context=command.context,
+        authorized_system_user_id=command.authorized_system_user_id,
+        idempotency_key=key,
+    )
+
+
+def _stage_opening_correction(
+    db: Session,
+    *,
+    query: PreviewCustomerSubledgerOpeningCorrectionQuery,
+    preview: CustomerSubledgerOpeningCorrectionPreview,
+    context: CommandContext,
+    authorized_system_user_id: UUID,
+    idempotency_key: str,
+) -> CustomerSubledgerOpeningCorrectionResult:
+    occurred_at = datetime.now(UTC)
+    correction = CustomerSubledgerOpeningCorrection(
+        opening_position_id=preview.opening_position_id,
+        account_id=preview.account_id,
+        currency=preview.currency,
+        previous_opening_amount=preview.previous_opening_amount,
+        corrected_opening_amount=preview.corrected_opening_amount,
+        delta=preview.delta,
+        reason=query.reason.strip(),
+        review_reference=query.review_reference.strip(),
+        preview_fingerprint=preview.preview_fingerprint,
+        idempotency_key=idempotency_key,
+        applied_by=context.actor,
+        authorized_system_user_id=authorized_system_user_id,
+        command_id=context.command_id,
+        correlation_id=context.correlation_id,
+        occurred_at=occurred_at,
+    )
+    db.add(correction)
+    db.flush()
+    effect = (
+        PositionEffectKind.customer_credit_created
+        if preview.delta > 0
+        else PositionEffectKind.customer_credit_consumed
+    )
+    stage_posting_group(
+        db,
+        StagePostingGroupCommand(
+            account_id=preview.account_id,
+            currency=preview.currency,
+            command_kind=PostingCommandKind.opening_position_correction,
+            producer_owner=PostingProducer.customer_subledger_opening_positions,
+            source_kind=PostingSourceKind.customer_subledger_opening_correction,
+            source_id=correction.id,
+            occurred_at=occurred_at,
+            effects=(EffectInput(effect=effect, amount=abs(preview.delta)),),
+            idempotency_key=f"posting:opening-correction:{correction.id}",
+        ),
+        context=context,
+    )
+    emit_event(
+        db,
+        EventType.customer_subledger_opening_position_corrected,
+        {
+            "correction_id": str(correction.id),
+            "opening_position_id": str(preview.opening_position_id),
+            "account_id": str(preview.account_id),
+            "currency": preview.currency,
+            "previous_opening_amount": str(preview.previous_opening_amount),
+            "corrected_opening_amount": str(preview.corrected_opening_amount),
+            "delta": str(preview.delta),
+            "review_reference": query.review_reference.strip(),
+            "authorized_system_user_id": str(authorized_system_user_id),
+        },
+        actor=context.actor,
+    )
+    return _correction_result(db, correction, replayed=False)
+
+
 def activate_customer_subledger_authority(
     db: Session,
     command: ActivateCustomerSubledgerAuthorityCommand,
@@ -634,9 +1757,24 @@ def _activate_authority(
 __all__ = [
     "ActivateCustomerSubledgerAuthorityCommand",
     "CaptureCustomerSubledgerOpeningsCommand",
+    "CorrectCustomerSubledgerOpeningCommand",
+    "CORRECTION_SCOPE",
     "CustomerSubledgerAuthorityResult",
     "CustomerSubledgerOpeningCaptureResult",
+    "CustomerSubledgerOpeningCorrectionPreview",
+    "CustomerSubledgerOpeningCorrectionResult",
     "CustomerSubledgerOpeningError",
+    "NATIVE_REPAIR_SCOPE",
+    "NativePrepaidOpeningApproval",
+    "NativePrepaidOpeningRepairPreview",
+    "NativePrepaidOpeningRepairResult",
+    "PreviewNativePrepaidOpeningRepairQuery",
+    "PreviewCustomerSubledgerOpeningCorrectionQuery",
+    "RepairNativePrepaidOpeningCommand",
     "activate_customer_subledger_authority",
     "capture_customer_subledger_opening_positions",
+    "correct_customer_subledger_opening_position",
+    "preview_customer_subledger_opening_correction",
+    "preview_native_prepaid_opening_repair",
+    "repair_native_prepaid_opening",
 ]

@@ -1,0 +1,41 @@
+{% extends "layouts/admin.html" %}
+{% from "components/ui/macros.html" import page_header %}
+{% block content %}
+<div class="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+    {% call page_header(
+        title="Automation run history",
+        subtitle="Review recent runs, affected records, action steps, and retry outcomes.",
+        color="indigo",
+        breadcrumbs=[
+            {"label": "Automation Center", "href": "/admin/automation"},
+            {"label": "Run history"}
+        ]
+    ) %}{% endcall %}
+
+    <form method="get" class="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <label for="run-status" class="text-sm font-medium text-slate-700 dark:text-slate-200">Status</label>
+        <select id="run-status" name="status" class="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+            <option value="" {% if not selected_status %}selected{% endif %}>All statuses</option>
+            {% for status in statuses %}<option value="{{ status.value }}" {% if selected_status == status.value %}selected{% endif %}>{{ status.value|capitalize }}</option>{% endfor %}
+        </select>
+        <label for="run-page-size" class="text-sm font-medium text-slate-700 dark:text-slate-200">Rows per page</label>
+        <select id="run-page-size" name="per_page" class="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+            {% for page_size in [25, 50, 100] %}<option value="{{ page_size }}" {% if selected_per_page == page_size %}selected{% endif %}>{{ page_size }}</option>{% endfor %}
+        </select>
+        <input type="hidden" name="sort" value="{{ list_query.sort_by }}"><input type="hidden" name="dir" value="{{ list_query.sort_dir }}">
+        <button type="submit" class="min-h-11 rounded-lg bg-indigo-700 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-indigo-500">Apply</button>
+    </form>
+
+    <section aria-labelledby="history-list-heading" class="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <h2 id="history-list-heading" class="sr-only">Automation runs</h2>
+        {% if runs %}<div class="overflow-x-auto"><table class="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800"><thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300"><tr><th scope="col" class="px-5 py-3 font-semibold">Event</th><th scope="col" class="px-5 py-3 font-semibold">Affected record</th><th scope="col" class="px-5 py-3 font-semibold">Started</th><th scope="col" class="px-5 py-3 font-semibold">Status</th><th scope="col" class="px-5 py-3 font-semibold">Details</th></tr></thead><tbody class="divide-y divide-slate-100 dark:divide-slate-800">{% for run in runs %}<tr><td class="px-5 py-4"><p class="font-medium text-slate-900 dark:text-white">{{ run.event_type }}</p><p class="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">Rule version {{ run.rule_version_id }}</p></td><td class="px-5 py-4"><p class="text-slate-800 dark:text-slate-200">{{ run.target_type }}</p><p class="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">{{ run.target_id }}</p></td><td class="px-5 py-4 whitespace-nowrap text-slate-700 dark:text-slate-300">{{ run.created_at }}</td><td class="px-5 py-4"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium capitalize text-slate-700 dark:bg-slate-800 dark:text-slate-300">{{ run.status.value }}</span></td><td class="px-5 py-4"><a class="font-semibold text-indigo-700 underline underline-offset-4 dark:text-indigo-300" href="/admin/automation/runs/{{ run.run_id }}">Open run</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="px-5 py-8 text-sm text-slate-600 dark:text-slate-400">No runs match this status.</p>{% endif %}
+    </section>
+    <nav aria-label="Run history pages" class="flex items-center justify-between gap-4">
+        <p class="text-xs text-slate-500 dark:text-slate-400">Showing {{ page_meta.start_item }}–{{ page_meta.end_item }} of {{ page_meta.total_items }} run{{ "s" if page_meta.total_items != 1 else "" }}</p>
+        <div class="flex gap-2">
+            {% if previous_url %}<a class="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200" href="{{ previous_url }}">Previous</a>{% endif %}
+            {% if next_url %}<a class="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200" href="{{ next_url }}">Next</a>{% endif %}
+        </div>
+    </nav>
+</div>
+{% endblock %}

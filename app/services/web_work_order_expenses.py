@@ -34,13 +34,21 @@ from app.services.field.expense_categories import (
 from app.services.field.expense_requests import (
     ExpenseCategoryRule,
     ExpenseReceiptUploadInput,
+    ExpenseRequestStatus,
     FieldExpenseRequestError,
     FieldExpenseVendorOption,
     GetFieldExpenseFormContext,
     ListFieldExpenseVendors,
+    ManagerExpenseReviewQuery,
     evaluate_expense_work_order_eligibility,
     get_field_expense_form_context,
     list_expense_vendors,
+    list_manager_expense_requests,
+)
+from app.services.integrations.diagnostics import (
+    DELIVERY_DIAGNOSTIC_KEY,
+    parse_diagnostic_evidence,
+    safe_diagnostic_summary,
 )
 from app.services.status_presentation import (
     StatusPresentation,
@@ -50,9 +58,11 @@ from app.services.ui_contracts import Action
 
 
 class ExpenseDeliveryState(StrEnum):
+    AWAITING_APPROVAL = "awaiting_approval"
     PENDING = "pending"
     ACCEPTED = "accepted"
     FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
     UNAVAILABLE = "unavailable"
 
 
@@ -137,9 +147,29 @@ class WorkOrderExpenseClaimView:
     status: StatusPresentation
     delivery_state: ExpenseDeliveryState
     delivery_label: str
+    delivery_detail: str | None
     erp_claim_number: str | None
     erp_claim_status: str | None
     rejection_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkOrderExpenseApprovalLineView:
+    id: UUID
+    description: str
+    category_name: str
+    requested_amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class WorkOrderExpenseApprovalView:
+    id: UUID
+    purpose: str
+    requested_by_name: str
+    currency: str
+    requested_total_amount: Decimal
+    revision: int
+    lines: tuple[WorkOrderExpenseApprovalLineView, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +177,7 @@ class WorkOrderExpensePanel:
     work_order_id: UUID
     work_order_public_id: str
     claims: tuple[WorkOrderExpenseClaimView, ...]
+    approvals: tuple[WorkOrderExpenseApprovalView, ...]
     categories: tuple[ExpenseCategoryRule, ...]
     vendors: tuple[FieldExpenseVendorOption, ...]
     approvers: tuple[ExpenseApproverView, ...]
@@ -205,6 +236,7 @@ def build_work_order_expense_panel(
     actor_system_user_id: UUID,
     form: WorkOrderExpenseFormInput | None = None,
     errors: tuple[ExpenseFieldError, ...] = (),
+    can_review_expenses: bool = False,
 ) -> WorkOrderExpensePanel:
     work_order = (
         db.query(WorkOrder)
@@ -269,6 +301,37 @@ def build_work_order_expense_panel(
         query=ListFieldExpenseVendors(limit=100),
     )
     claims = _claim_views(db, work_order=work_order, user=user)
+    approvals: tuple[WorkOrderExpenseApprovalView, ...] = ()
+    if can_review_expenses:
+        review_page = list_manager_expense_requests(
+            db,
+            ManagerExpenseReviewQuery(
+                approver_system_user_id=user.id,
+                status=ExpenseRequestStatus.SUBMITTED,
+                work_order_public_id=work_order.public_id,
+                limit=100,
+            ),
+        )
+        approvals = tuple(
+            WorkOrderExpenseApprovalView(
+                id=request.id,
+                purpose=request.purpose,
+                requested_by_name=request.requested_by_name or "Unavailable",
+                currency=request.currency,
+                requested_total_amount=request.requested_total_amount,
+                revision=request.revision,
+                lines=tuple(
+                    WorkOrderExpenseApprovalLineView(
+                        id=line.id,
+                        description=line.description,
+                        category_name=line.category_name or line.category_code,
+                        requested_amount=line.amount,
+                    )
+                    for line in request.items
+                ),
+            )
+            for request in review_page.items
+        )
     eligibility = evaluate_expense_work_order_eligibility(
         db,
         work_order=work_order,
@@ -285,6 +348,7 @@ def build_work_order_expense_panel(
         work_order_id=work_order.id,
         work_order_public_id=work_order.public_id,
         claims=claims,
+        approvals=approvals,
         categories=categories,
         vendors=vendors,
         approvers=approvers,
@@ -573,6 +637,7 @@ def _claim_views(
             status=field_expense_status_presentation(row.status),
             delivery_state=_delivery_state(row, event_by_request.get(row.id)),
             delivery_label=_delivery_label(row, event_by_request.get(row.id)),
+            delivery_detail=_delivery_detail(event_by_request.get(row.id)),
             erp_claim_number=row.expense_claim_number,
             erp_claim_status=row.expense_claim_status,
             rejection_reason=row.rejection_reason,
@@ -598,6 +663,10 @@ def _delivery_state(
         FieldErpSyncStatus.sent.value,
     }:
         return ExpenseDeliveryState.PENDING
+    if request.status in {"draft", "submitted"}:
+        return ExpenseDeliveryState.AWAITING_APPROVAL
+    if request.status in {"canceled", "rejected"}:
+        return ExpenseDeliveryState.NOT_APPLICABLE
     return ExpenseDeliveryState.UNAVAILABLE
 
 
@@ -608,11 +677,27 @@ def _delivery_label(
     if event and event.status == FieldErpSyncStatus.sent.value:
         return "Delivered; awaiting ERP acceptance"
     return {
+        ExpenseDeliveryState.AWAITING_APPROVAL: "Awaiting manager approval",
         ExpenseDeliveryState.ACCEPTED: "Accepted by ERP",
         ExpenseDeliveryState.FAILED: "ERP synchronization failed",
         ExpenseDeliveryState.PENDING: "Waiting for ERP delivery",
-        ExpenseDeliveryState.UNAVAILABLE: "ERP delivery is not available",
+        ExpenseDeliveryState.NOT_APPLICABLE: "Not sent to ERP",
+        ExpenseDeliveryState.UNAVAILABLE: "ERP delivery evidence is unavailable",
     }[state]
+
+
+def _delivery_detail(event: FieldErpSyncEvent | None) -> str | None:
+    if (
+        event is None
+        or event.status
+        not in {FieldErpSyncStatus.rejected.value, FieldErpSyncStatus.dead.value}
+        or not isinstance(event.erp_response, dict)
+    ):
+        return None
+    diagnostic = parse_diagnostic_evidence(
+        event.erp_response.get(DELIVERY_DIAGNOSTIC_KEY)
+    )
+    return safe_diagnostic_summary(diagnostic) if diagnostic is not None else None
 
 
 def _empty_line() -> ExpenseLineFormInput:

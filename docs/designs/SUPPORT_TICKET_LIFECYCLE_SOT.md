@@ -63,10 +63,10 @@ cancellation.
 `support.ticket_configuration` owns operator-managed status choices,
 priorities, types, routing inputs, service-team membership configuration, and
 priority/type SLA targets. It may only expose statuses from the ticket
-vocabulary owner. `support.ticket_region_projection` separately resolves the
-current region choices from configured values and canonical Ticket observations.
-This separation prevents lifecycle and configuration from depending on each
-other while preserving the provenance of both inputs.
+vocabulary owner. `support.ticket_region_projection` resolves the current
+selectable region choices from the configured region option values. Configured
+regions are the sole source of truth: Ticket rows are historical observations
+and must not expand the selectable vocabulary.
 
 The operator-selectable subset contains only canonical typed `TicketStatus`
 values. The configuration owner and admin adapters canonicalize legacy
@@ -163,7 +163,17 @@ The lifecycle owner persists Region and final team state and stages assignment
 notifications, audit evidence, and the `ticket.created` event in its root
 transaction. Audit and event evidence include the creation routing mode and
 final team identifier, including a null identifier for intentional
-unassignment.
+unassignment. Standard (non-silent) creation also stages the bounded
+`support.ticket.created` Automation Center event with the operator tenant,
+Ticket UUID, and normalized priority. It does not invoke Automation Center
+assignment inline.
+
+When the Automation Center capability is later enabled, its declared
+service-team action enters `support.ticket_lifecycle` through the typed
+`AssignTicketServiceTeamFromAutomationCommand`. The command locks and verifies
+the active Service Team, retains event/rule-version/step provenance in audit
+evidence, and uses the stable runtime command identity for replay. It does not
+give the Automation Center direct Ticket writes.
 
 The admin create form passes the typed
 `TicketCreationAcknowledgementMode.customer_email` intent to the lifecycle
@@ -248,6 +258,13 @@ compatibility projection. Historical CSAT reporting reads `support_csat_requests
 and its agent/team snapshots, not mutable current Ticket assignment.
 
 `support.ticket_sla_clock` remains the Ticket SLA clock and breach owner.
+When it records a breach it also stages the bounded
+`support.ticket.sla_breached` Automation Center event; an overdue UI projection
+alone never emits that event. `support.ticket_sla_service_consequence` owns the
+optional cross-domain consequence that suspends the only active Subscription
+linked through the Ticket's canonical customer-account identity. It fails
+closed when that identity or service selection is missing or ambiguous and
+delegates all lock and access-state writes to `access.subscription_lifecycle`.
 `support.ticket_work_order_handoff` remains the only issuance/provenance
 boundary into field work. Issuance requires ticket-update and dispatch-write
 permission evidence plus an idempotency key. A field result may add internal
@@ -270,6 +287,35 @@ system descriptions, comments, and their attachments are internal unless a
 staff command explicitly publishes them. Portal adapters consume these stored
 decisions; they never infer publication from subscriber linkage, CRM metadata,
 or the absence of an internal-note checkbox.
+
+Customer-facing comment projections carry the closed `TicketCommentAuthorType`
+vocabulary (`customer`, `staff`, `system`) alongside the stored publication
+decision. Web and mobile adapters may render that provenance as audience-safe
+labels such as **You** and **Support Team**, but never infer authorship from
+layout, identifiers, message text, or transport origin. Manual refresh and any
+future push/WebSocket signals are observation triggers only; clients reconcile
+from the authoritative Support comment query before changing the displayed
+timeline.
+
+The lifecycle owner also owns the customer-visible comment invalidation
+decision. A successfully committed public comment create, edit, or delete emits
+an identifier-only `support_ticket_comment_changed` hint through
+`runtime.realtime_projection`; a public-to-internal or internal-to-public
+transition emits the same class of invalidation. An internal comment that stays
+internal emits nothing. Bulk creation emits at most one hint. The payload is
+limited to Ticket UUID, typed change, and optional comment UUID; it excludes
+body, attachments, author identity, and subscriber identity. The subscriber is
+used only to select the server-assigned principal topic.
+
+The realtime transport is best-effort, at-most-once, and non-authoritative. It
+is registered with `run_after_commit`, so rollback publishes nothing and Redis
+failure cannot affect the Ticket command. Mobile clients never select the
+principal topic and never render the hint. They reconcile only the authoritative
+customer comment query for a matching Ticket. A connection acknowledgement,
+reconnect, or app resume is also a comments catch-up boundary. Manual refresh
+and completed reply/resolution actions continue to reconcile both the Ticket
+header and comments. No periodic Ticket-comment REST poll is part of this
+contract.
 
 CRM ticket import is retired as an authority. Any residual retry or historical
 observation is provenance-only and is forced internal; it cannot publish
@@ -304,6 +350,28 @@ declares page-only selection and action presentation. `support.ticket_bulk_comma
 resolves membership, normalizes the shared changes, previews eligibility, binds
 the preview to a deterministic scope token, and detects drift. Confirmed
 mutations delegate to `support.ticket_lifecycle`; there is no second bulk writer.
+
+## Resolution-SLA pause consequence
+
+The SLA clock owner stages `support.ticket.sla_breached` only after it records
+an actual breach for a still-applicable Ticket. A published Automation Center
+rule may select `support.ticket.pause_unique_active_service`; the timer-due
+event alone is never sufficient. The consequence coordinator locks and
+revalidates the event, SLA clock, breach row, Ticket status, canonical customer
+link, and unique active subscription before delegating the pause.
+
+If the Ticket has already reached `pending_confirmation`, `closed`, or
+`canceled`, the queued consequence is a fail-closed no-op. Zero or multiple
+active services are retained as explicit automation-step failures. The pause
+starts at the effective lifecycle commit time, not at Ticket creation or the
+start of the SLA window.
+
+The linked cause becomes administratively resume-eligible only while the
+Ticket is `pending_confirmation` or `closed`. Resume uses a fingerprinted
+preview and remains a subscription-lifecycle command; changing the Ticket,
+pause, billing anchor, or restriction evidence makes the preview stale. A
+reopened, disputed, or otherwise unresolved Ticket cannot be resumed through
+this path.
 
 ## Cutover and repair
 

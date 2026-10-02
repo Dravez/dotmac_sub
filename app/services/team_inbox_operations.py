@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, func, literal_column, or_, select
+from sqlalchemy import BigInteger, String, case, cast, func, literal_column, or_, select
 from sqlalchemy.orm import Query, Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -36,9 +36,11 @@ from app.services import (
     team_inbox_assignment,
     team_inbox_filters,
     team_inbox_outbound,
+    team_inbox_reply_window,
     team_inbox_status,
 )
 from app.services.common import coerce_uuid
+from app.services.domain_errors import DomainError
 
 _ALLOWED_LABEL_COLORS = {
     "slate",
@@ -498,12 +500,24 @@ def execute_macro_actions(
     conversation: InboxConversation,
     macro_id: str | UUID,
     actor_person_id: str | UUID | None = None,
+    override_grant_id: str | UUID | None = None,
+    resolution_reason: team_inbox_status.InboxResolutionReason | None = None,
 ) -> dict[str, object]:
+    """Run one macro's actions against one conversation.
+
+    ``override_grant_id`` is supplied by the operator invoking the macro for
+    THIS execution only. It is never read from the stored macro's ``actions``
+    ``params`` -- a stored macro carrying a grant id would make a single-use
+    override reusable and durable, which destroys the single-use guarantee.
+    See ``tests/architecture/test_inbox_completion_override_boundary.py``.
+    """
+
     macro = record_macro_use(db, macro_id)
     if macro is None:
         raise InboxOperationError("Macro not found.")
 
     actor_uuid = coerce_uuid(actor_person_id)
+    override_grant_uuid = coerce_uuid(override_grant_id)
     executed = 0
     failed = 0
     results: list[dict[str, object]] = []
@@ -528,6 +542,8 @@ def execute_macro_actions(
                     reason=team_inbox_status.InboxStatusReason.macro,
                     source_id=f"macro:{macro.id}:{conversation.id}:{uuid4()}",
                     macro_id=macro.id,
+                    resolution_reason=resolution_reason,
+                    completion_override_grant_id=override_grant_uuid,
                 )
             elif action_type == "add_tag":
                 label_name = str(params.get("tag") or params.get("label") or "").strip()
@@ -675,19 +691,50 @@ def get_template(db: Session, template_id: str | UUID) -> InboxMessageTemplate:
     return template
 
 
+_RESOLUTION_BLOCKED_CODE = (
+    "communications.team_inbox_customer_completion.resolution_blocked"
+)
+# The bulk skip is the one graceful-degradation mechanism for a blocked
+# resolution. A per-conversation override that turns out absent, already
+# consumed, mismatched, superseded, expired, or stale is the SAME kind of
+# "this one conversation could not resolve" outcome -- it reuses the exact
+# skip-and-report shape rather than a second mechanism.
+_OVERRIDE_SKIPPABLE_CODES = frozenset(
+    f"communications.team_inbox_completion_override.{suffix}"
+    for suffix in (
+        "override_absent",
+        "override_already_consumed",
+        "override_conversation_mismatch",
+        "override_superseded",
+        "override_expired",
+        "override_stale_evidence",
+        "override_not_required",
+        "override_requires_customer_identity",
+    )
+)
+
+
 def bulk_update_status(
     db: Session,
     *,
     conversation_ids: Sequence[str | UUID],
     status_value: str,
     actor_person_id: str | UUID | None = None,
+    override_grant_ids: Mapping[str | UUID, str | UUID] | None = None,
+    resolution_reason: team_inbox_status.InboxResolutionReason | None = None,
 ) -> dict[str, object]:
     clean_status = str(status_value or "").strip().lower()
     if clean_status not in {"open", "pending", "snoozed", "resolved"}:
         raise InboxOperationError("Unsupported conversation status.")
     actor_uuid = coerce_uuid(actor_person_id)
+    # One grant id per conversation -- never a batch-wide override flag.
+    grant_ids_by_conversation = {
+        coerce_uuid(key): coerce_uuid(value)
+        for key, value in (override_grant_ids or {}).items()
+    }
     updated: list[str] = []
     skipped: list[str] = []
+    blocked: list[dict[str, object]] = []
     for raw_id in conversation_ids:
         conversation = db.get(InboxConversation, coerce_uuid(raw_id))
         if conversation is None or not conversation.is_active:
@@ -696,21 +743,45 @@ def bulk_update_status(
         if conversation.status == clean_status:
             skipped.append(str(conversation.id))
             continue
-        team_inbox_status.apply_status_transition(
-            db,
-            conversation=conversation,
-            status=InboxConversationStatus(clean_status),
-            actor_person_id=actor_uuid,
-            reason=team_inbox_status.InboxStatusReason.bulk_change,
-            source_id=f"bulk-status:{conversation.id}:{uuid4()}",
-        )
+        try:
+            team_inbox_status.apply_status_transition(
+                db,
+                conversation=conversation,
+                status=InboxConversationStatus(clean_status),
+                actor_person_id=actor_uuid,
+                reason=team_inbox_status.InboxStatusReason.bulk_change,
+                source_id=f"bulk-status:{conversation.id}:{uuid4()}",
+                resolution_reason=resolution_reason,
+                completion_override_grant_id=grant_ids_by_conversation.get(
+                    conversation.id
+                ),
+            )
+        except DomainError as exc:
+            if exc.code != _RESOLUTION_BLOCKED_CODE and (
+                exc.code not in _OVERRIDE_SKIPPABLE_CODES
+            ):
+                raise
+            skipped.append(str(conversation.id))
+            blocked.append(
+                {
+                    "conversation_id": str(conversation.id),
+                    "message": exc.message,
+                    "details": dict(exc.details),
+                }
+            )
+            continue
         updated.append(str(conversation.id))
     db.flush()
     for conversation_id in updated:
         conversation = db.get(InboxConversation, coerce_uuid(conversation_id))
         if conversation is not None:
             inbox_sla.update_status(db, conversation, clean_status)
-    return {"updated": updated, "skipped": skipped, "status": clean_status}
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "blocked": blocked,
+        "status": clean_status,
+    }
 
 
 def bulk_update_priority(
@@ -1070,6 +1141,41 @@ def list_failed_outbound_messages(
     )
 
 
+def _list_retryable_outbound_messages(
+    db: Session, *, limit: int, max_retry_count: int
+) -> list[InboxMessage]:
+    """Apply the retry budget before limiting the automatic work cohort."""
+
+    retry_text = func.trim(
+        func.coalesce(
+            cast(InboxMessage.metadata_["retry_count"].as_string(), String), "0"
+        )
+    )
+    # Guard the cast itself: a malformed or oversized persisted counter must
+    # stay visible as failed work, not crash the sweep or reset its budget.
+    # Eighteen decimal digits fit safely in PostgreSQL's signed BIGINT.
+    retry_count = case(
+        (
+            retry_text.regexp_match(r"^[0-9]{1,18}$"),
+            cast(retry_text, BigInteger),
+        ),
+        else_=None,
+    )
+    query = _failed_outbound_query(db).filter(retry_count < max_retry_count)
+    if db.get_bind().dialect.name == "sqlite":
+        # SQLite JSON extraction represents booleans as 0/1; do not let that
+        # make malformed boolean counters eligible only in the fast unit lane.
+        json_kind = func.json_type(InboxMessage.metadata_, "$.retry_count")
+        query = query.filter(
+            or_(json_kind.is_(None), json_kind.in_(("null", "integer", "text")))
+        )
+    return list(
+        query.order_by(InboxMessage.created_at.desc(), InboxMessage.id.desc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+
+
 def retry_failed_outbound_batch(
     db: Session,
     *,
@@ -1078,7 +1184,9 @@ def retry_failed_outbound_batch(
 ) -> dict[str, object]:
     retried: list[str] = []
     skipped: list[dict[str, str]] = []
-    for message in list_failed_outbound_messages(db, limit=max(1, int(limit))):
+    for message in _list_retryable_outbound_messages(
+        db, limit=limit, max_retry_count=max_retry_count
+    ):
         metadata = dict(message.metadata_ or {})
         retry_count = int(metadata.get("retry_count") or 0)
         if retry_count >= max_retry_count:
@@ -1107,9 +1215,17 @@ def queue_metrics(db: Session) -> InboxQueueMetrics:
     """
     from app.services import team_inbox_read
 
-    assigned_conversation_ids = select(
-        InboxConversationAssignment.conversation_id
-    ).where(InboxConversationAssignment.is_active.is_(True))
+    assigned_conversation_ids = (
+        select(InboxConversationAssignment.conversation_id)
+        .join(
+            InboxConversation,
+            InboxConversation.id == InboxConversationAssignment.conversation_id,
+        )
+        .where(*team_inbox_assignment.countable_active_assignment_clauses())
+    )
+    expired_whatsapp_ids = (
+        team_inbox_reply_window.expired_whatsapp_conversation_ids_query()
+    )
     total_open, unassigned_open, muted_open, snoozed_open = (
         db.query(
             func.count(InboxConversation.id),
@@ -1126,6 +1242,7 @@ def queue_metrics(db: Session) -> InboxQueueMetrics:
         .filter(InboxConversation.is_active.is_(True))
         .filter(InboxConversation.status != "resolved")
         .filter(~ai_conversation_ownership.ai_owned_conversation_clause())
+        .filter(~InboxConversation.id.in_(expired_whatsapp_ids))
         .one()
     )
     return InboxQueueMetrics(
@@ -1203,6 +1320,16 @@ def auto_resolve_stale_conversations(
         .filter(InboxConversation.status.in_(["open", "pending", "snoozed"]))
         .filter(InboxConversation.last_message_at.isnot(None))
         .filter(InboxConversation.last_message_at <= cutoff)
+        # WhatsApp expiry releases work; it never implies resolution. Keep
+        # expired conversations unresolved until an authorized human resolves
+        # them with an explicit reason or a qualifying inbound reopens work.
+        .filter(
+            ~InboxConversation.id.in_(
+                team_inbox_reply_window.expired_whatsapp_conversation_ids_query(
+                    now=clock
+                )
+            )
+        )
         .order_by(InboxConversation.last_message_at.asc())
         .limit(max(1, int(limit)))
         .with_for_update(skip_locked=True)

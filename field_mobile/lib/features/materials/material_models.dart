@@ -124,6 +124,8 @@ class MaterialRequestItem {
     this.notes,
     this.approvedQuantity,
     this.issuedQuantity,
+    this.outstandingQuantity,
+    this.outOfStock = false,
     this.fulfilledQuantity,
   });
 
@@ -133,7 +135,9 @@ class MaterialRequestItem {
   final String? itemName;
   final String? notes;
   final int? approvedQuantity;
-  final int? issuedQuantity;
+  final double? issuedQuantity;
+  final double? outstandingQuantity;
+  final bool outOfStock;
   final int? fulfilledQuantity;
 
   factory MaterialRequestItem.fromJson(
@@ -144,10 +148,13 @@ class MaterialRequestItem {
     quantity: _int(json['quantity']) ?? 0,
     itemName:
         _string(json['item_name']) ??
+        _string(json['name']) ??
         (json['item'] is Map ? _string((json['item'] as Map)['name']) : null),
     notes: _string(json['notes']),
     approvedQuantity: _int(json['approved_quantity']),
-    issuedQuantity: _int(json['issued_quantity'] ?? json['quantity_issued']),
+    issuedQuantity: _double(json['issued_quantity'] ?? json['quantity_issued']),
+    outstandingQuantity: _double(json['outstanding_quantity']),
+    outOfStock: json['out_of_stock'] == true,
     fulfilledQuantity: _int(
       json['fulfilled_quantity'] ?? json['quantity_fulfilled'],
     ),
@@ -158,10 +165,12 @@ class MaterialRequest {
   const MaterialRequest({
     required this.id,
     required this.status,
+    this.canCancel = false,
     this.number,
     this.priority,
     this.notes,
     this.workOrderId,
+    this.contextLabel,
     this.projectId,
     this.ticketId,
     this.sourceLocationId,
@@ -180,15 +189,18 @@ class MaterialRequest {
     this.supportSystem,
     this.supportReference,
     this.supportStatus,
+    this.fulfillmentStatus,
     this.items = const [],
   });
 
   final String id;
   final String status;
+  final bool canCancel;
   final String? number;
   final String? priority;
   final String? notes;
   final String? workOrderId;
+  final String? contextLabel;
   final String? projectId;
   final String? ticketId;
   final String? sourceLocationId;
@@ -207,6 +219,7 @@ class MaterialRequest {
   final String? supportSystem;
   final String? supportReference;
   final String? supportStatus;
+  final String? fulfillmentStatus;
   final List<MaterialRequestItem> items;
 
   factory MaterialRequest.fromJson(
@@ -214,10 +227,12 @@ class MaterialRequest {
   ) => MaterialRequest(
     id: json['id'].toString(),
     status: json['status'] as String? ?? 'draft',
+    canCancel: json['can_cancel'] == true,
     number: _string(json['number']),
     priority: _string(json['priority']),
     notes: _string(json['notes']),
     workOrderId: json['work_order_id']?.toString(),
+    contextLabel: _string(json['context_label']),
     projectId: json['project_id']?.toString(),
     ticketId: json['ticket_id']?.toString(),
     sourceLocationId: _locationId(json, 'source'),
@@ -240,15 +255,26 @@ class MaterialRequest {
     supportSystem: _string(json['support_system']),
     supportReference: _string(json['support_reference']),
     supportStatus: _string(json['support_status']),
+    fulfillmentStatus: _string(json['fulfillment_status']),
     items: _mapList(json['items']).map(MaterialRequestItem.fromJson).toList(),
   );
 
-  String get displayNumber => number ?? id;
+  String get displayNumber =>
+      number ??
+      contextLabel ??
+      (workOrderId == null ? 'Material request' : 'Work order $workOrderId');
 
   String? get sourceLocationLabel => sourceLocationName ?? sourceLocationId;
 
   String? get destinationLocationLabel =>
       destinationLocationName ?? destinationLocationId;
+}
+
+class MaterialRequestHistory {
+  const MaterialRequestHistory({required this.items, required this.totalCount});
+
+  final List<MaterialRequest> items;
+  final int totalCount;
 }
 
 int? _int(Object? value) => switch (value) {

@@ -403,6 +403,11 @@ class FieldMaterialRequestSubmit(FieldMaterialRequestCreate):
     client_ref: UUID
 
 
+class FieldMaterialRequestCancel(BaseModel):
+    client_ref: UUID
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class FieldMaterialRequestItemRead(BaseModel):
     id: UUID
     item_id: UUID
@@ -413,26 +418,51 @@ class FieldMaterialRequestItemRead(BaseModel):
     notes: str | None = None
     serial_numbers: list[str] = Field(default_factory=list)
 
+    issued_quantity: Decimal | None = Field(default=None, ge=0)
+    outstanding_quantity: Decimal | None = Field(default=None, ge=0)
+    out_of_stock: bool = False
+
 
 class FieldMaterialRequestRead(BaseModel):
     id: UUID
     # Material needs can originate from a ticket, project, project task, or
     # work order. Only the last of those has a work-order public identifier.
     work_order_id: str | None = None
+    project_id: UUID | None = None
+    project_task_id: UUID | None = None
+    ticket_id: UUID | None = None
+    context_label: str
     crm_material_request_id: str | None = None
     requested_by_person_id: UUID
     requested_by_system_user_id: UUID | None = None
-    status: str
+    status: Literal[
+        "draft",
+        "submitted",
+        "approved",
+        "rejected",
+        "issued",
+        "fulfilled",
+        "canceled",
+        "accepted_by_erp",
+        "pending_stock",
+        "cancellation_pending",
+        "sync_failed",
+    ]
+    fulfillment_status: str | None = None
     priority: str
     notes: str | None = None
     source_warehouse_code: str | None = None
+    fulfillment_channel: Literal["manual", "erp"]
     support_system: str | None = None
     support_reference: str | None = None
     support_status: str | None = None
+    can_cancel: bool = False
     submitted_at: datetime | None = None
     approved_at: datetime | None = None
     rejected_at: datetime | None = None
+    issued_at: datetime | None = None
     fulfilled_at: datetime | None = None
+    rejection_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     items: list[FieldMaterialRequestItemRead] = Field(default_factory=list)
@@ -552,6 +582,7 @@ class FieldExpenseRequestItemRead(BaseModel):
     category_name: str | None = None
     description: str
     amount: Decimal
+    approved_amount: Decimal | None = None
     expense_date: date | None = None
     vendor_name: str | None = None
     receipt_url: str | None = None
@@ -565,6 +596,7 @@ class FieldExpenseRequestRead(BaseModel):
     crm_expense_request_id: str | None = None
     requested_by_person_id: UUID
     requested_by_system_user_id: UUID | None = None
+    requested_by_name: str | None = None
     selected_approver_erp_id: UUID | None = None
     selected_approver_name: str | None = None
     selected_approver_email: str | None = None
@@ -589,6 +621,12 @@ class FieldExpenseRequestRead(BaseModel):
     payment_error: str | None = None
     client_ref: UUID | None = None
     total_amount: Decimal
+    requested_total_amount: Decimal
+    approved_total_amount: Decimal | None = None
+    amounts_adjusted: bool = False
+    approval_adjustment_reason: str | None = None
+    approved_by_system_user_id: UUID | None = None
+    revision: int = 1
     submitted_at: datetime | None = None
     approved_at: datetime | None = None
     rejected_at: datetime | None = None
@@ -598,6 +636,13 @@ class FieldExpenseRequestRead(BaseModel):
     items: list[FieldExpenseRequestItemRead] = Field(default_factory=list)
 
 
+class FieldExpenseSubmissionRetryRead(BaseModel):
+    id: UUID
+    erp_sync_status: Literal["pending"]
+    erp_sync_event_id: UUID
+    replayed: bool
+
+
 class FieldExpenseApprovalRead(BaseModel):
     id: UUID
     status: Literal["approved"]
@@ -605,6 +650,11 @@ class FieldExpenseApprovalRead(BaseModel):
     erp_sync_status: str
     erp_sync_event_id: UUID | None = None
     erp_sync_error: str | None = None
+    requested_total_amount: Decimal
+    approved_total_amount: Decimal
+    amounts_adjusted: bool
+    adjustment_reason: str | None = None
+    revision: int
 
 
 class FieldExpenseRejectionRead(BaseModel):
@@ -631,6 +681,24 @@ class FieldExpenseRecoveryRead(BaseModel):
     original_event_id: UUID
     replacement_event_id: UUID
     replacement_idempotency_key: str
+    replayed: bool
+
+
+class FieldExpensePaymentRecoveryPreviewRead(BaseModel):
+    dead_event_id: UUID
+    expense_request_id: UUID
+    idempotency_key: str
+    fingerprint: str
+    erp_claim_status: Literal["approved"]
+
+
+class FieldExpensePaymentRecoveryRequest(BaseModel):
+    preview_fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class FieldExpensePaymentRecoveryRead(BaseModel):
+    event_id: UUID
+    idempotency_key: str
     replayed: bool
 
 
@@ -1430,3 +1498,18 @@ class FieldManagerJobUnassignRequest(BaseModel):
 
 class FieldManagerExpenseRejectRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=500)
+
+
+class FieldManagerExpenseApprovalLine(BaseModel):
+    expense_item_id: UUID
+    approved_amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+
+
+class FieldManagerExpenseApproveRequest(BaseModel):
+    """Empty lines approve as submitted; supplied lines adjust and approve."""
+
+    lines: list[FieldManagerExpenseApprovalLine] = Field(
+        default_factory=list, max_length=50
+    )
+    adjustment_reason: str | None = Field(default=None, max_length=500)
+    expected_revision: int | None = Field(default=None, ge=1)

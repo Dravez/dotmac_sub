@@ -40,6 +40,7 @@ from app.services import chat_session as chat_session_service
 from app.services import (
     crm_portal,
     customer_portal,
+    location_capture,
     payment_intent_management,
     portal_ticket_deflection,
     support_ticket_settings,
@@ -52,6 +53,7 @@ from app.services import customer_portal_flow_payment_methods as customer_cards
 from app.services import customer_portal_notifications as customer_notifications_service
 from app.services import payment_proofs as payment_proofs_service
 from app.services import service_address as service_address_service
+from app.services import web_customer_actions as customer_profile_service
 from app.services import web_customer_auth as web_customer_auth_service
 from app.services import web_network_speedtests as web_network_speedtests_service
 from app.services.application_exception_observability import (
@@ -279,14 +281,15 @@ def _profile_audit_snapshot(subscriber: Subscriber) -> dict[str, object]:
 
 
 def _profile_completion(subscriber) -> dict[str, object]:
-    gender_value = _profile_value(getattr(subscriber, "gender", None))
-    if not isinstance(gender_value, str):
-        gender_value = ""
-    required = {
-        "date_of_birth": bool(getattr(subscriber, "date_of_birth", None)),
-        "gender": gender_value not in {"", "unknown"},
-        "nin": bool(getattr(subscriber, "nin", None)),
-    }
+    completion = customer_profile_service.evaluate_individual_biodata(subscriber)
+    if completion.applicable:
+        required = {
+            "date_of_birth": "date_of_birth" not in completion.missing,
+            "gender": "gender" not in completion.missing,
+            "nin": "nin" not in completion.missing,
+        }
+    else:
+        required = {"date_of_birth": True, "gender": True, "nin": True}
     missing = [key for key, complete in required.items() if not complete]
     return {
         "required": required,
@@ -525,6 +528,7 @@ def customer_support_create(
 def customer_support_detail(
     request: Request,
     ticket_id: str,
+    return_to: str | None = Query(None),
     db: Session = Depends(get_db),
 ) -> Response:
     customer = get_current_customer_from_request(request, db)
@@ -537,6 +541,9 @@ def customer_support_detail(
     subscriber_ids = resolve_allowed_subscriber_ids(customer, db)
     context = crm_portal.ticket_detail_context(
         request, db, customer, subscriber_ids, ticket_id
+    )
+    context["support_return_path"] = (
+        _safe_portal_return_path(return_to) if return_to else "/portal/support"
     )
     return templates.TemplateResponse("customer/support/detail.html", context)
 
@@ -615,6 +622,7 @@ def customer_support_add_comment(
         )
         context["crm_error"] = True
         context["crm_error_message"] = result.get("error") or "Unable to add comment."
+        context["comment_form_values"] = {"body": body}
         return templates.TemplateResponse(
             "customer/support/detail.html",
             context,
@@ -1626,6 +1634,7 @@ def _profile_context(
     verify_sent: str | None = None,
     sessions: str | None = None,
     error: str | None = None,
+    biodata_required: str | None = None,
 ) -> dict[str, object]:
     from app.models.subscriber import Subscriber as _Subscriber
 
@@ -1656,6 +1665,7 @@ def _profile_context(
     return {
         "request": request,
         "customer": customer,
+        "biodata_required": biodata_required == "1",
         "subscriber": subscriber,
         "mfa_methods": mfa_methods,
         "mfa_enabled": any(
@@ -1679,6 +1689,7 @@ def customer_profile(
     saved: str | None = None,
     verify_sent: str | None = None,
     sessions: str | None = None,
+    biodata_required: str | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
     """Customer profile settings."""
@@ -1696,6 +1707,7 @@ def customer_profile(
             saved=saved,
             verify_sent=verify_sent,
             sessions=sessions,
+            biodata_required=biodata_required,
         ),
     )
 
@@ -1803,6 +1815,9 @@ def customer_update_profile(
                 usage_notifications=usage_notifications,
                 general_notifications=general_notifications,
                 locale=locale,
+                enforce_biodata=location_capture.service_location_requirement_enabled(
+                    db
+                ),
             )
         except (ValueError, IntegrityError) as exc:
             db.rollback()

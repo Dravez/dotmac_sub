@@ -1,4 +1,5 @@
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -436,6 +437,118 @@ def _queue_saved_service_apply_after_stale_inform(
     return dispatch.queued
 
 
+def _trigger_acs_cr_failure_readback_after_inform(
+    db: Session,
+    *,
+    ont_id: uuid.UUID | None,
+    inform_at: datetime,
+) -> bool:
+    """Automatically dispatch the existing readback-only verification command
+    once a fresh ACS Inform is observed after a queued-but-CR-failed delivery
+    terminally failed the ONT's current configuration revision.
+
+    ``VerifyOntServiceConfigurationReadbackCommand`` /
+    ``verify_ont_service_configuration_readback`` (PR #3067) was built for
+    exactly this recovery and, until now, could only be run manually (as it
+    was for Jabi, account 100000630: ~21 hours passed between the failed
+    delivery and the device's actual next Inform -- long past the short
+    internal retry loop in ``_execution_locked``, which backs off for at most
+    ~90 seconds across 3 attempts before terminally failing with
+    ``failure_code="acs_cr_failed"``). This closes that gap by watching the
+    one signal that actually proves the device is reachable again: a fresh
+    Inform newer than the failed attempt.
+
+    Section-agnostic by construction (queries on ``failure_code`` only, not
+    on ``OntServiceConfigurationRevision.section``) -- LAN, WiFi, WAN, and
+    management all reach the identical terminal ``acs_cr_failed`` state via
+    the same generalized absorption path.
+
+    Fires at most once per qualifying Inform: a head that has already moved
+    off ``phase=failed`` (to ``verified``, ``delivered_unverified``, or a
+    fresh ``failed`` from a genuine subsequent retry) is not matched by the
+    query below, so a later Inform for an already-converged head is a cheap
+    read-only no-op.
+    """
+    if ont_id is None:
+        return False
+
+    from app.models.network_operation import NetworkOperation, NetworkOperationStatus
+    from app.models.ont_service_configuration import (
+        OntServiceConfigurationHead,
+        OntServiceConfigurationPhase,
+    )
+    from app.services.db_session_adapter import db_session_adapter
+    from app.services.network.ont_service_configuration import (
+        OntServiceConfigurationError,
+        VerifyOntServiceConfigurationReadbackCommand,
+        verify_ont_service_configuration_readback,
+    )
+    from app.services.owner_commands import CommandContext
+
+    head = db.scalar(
+        select(OntServiceConfigurationHead).where(
+            OntServiceConfigurationHead.ont_unit_id == ont_id,
+            OntServiceConfigurationHead.phase == OntServiceConfigurationPhase.failed,
+            OntServiceConfigurationHead.failure_code == "acs_cr_failed",
+        )
+    )
+    if head is None or head.latest_operation_id is None:
+        db_session_adapter.release_read_transaction(db)
+        return False
+
+    failed_operation = db.get(NetworkOperation, head.latest_operation_id)
+    completed_at = (
+        _normalize_utc_timestamp(failed_operation.completed_at)
+        if failed_operation is not None
+        else None
+    )
+    normalized_inform_at = _normalize_utc_timestamp(inform_at)
+    eligible = (
+        failed_operation is not None
+        and failed_operation.status is NetworkOperationStatus.failed
+        and completed_at is not None
+        and normalized_inform_at is not None
+        and completed_at < normalized_inform_at
+    )
+    head_id = head.id
+    expected_revision = head.current_revision
+    failed_operation_id = failed_operation.id if failed_operation is not None else None
+    db_session_adapter.release_read_transaction(db)
+    if not eligible or failed_operation_id is None:
+        return False
+
+    command_id = uuid.uuid4()
+    try:
+        verify_ont_service_configuration_readback(
+            db,
+            VerifyOntServiceConfigurationReadbackCommand(
+                context=CommandContext.system(
+                    actor="system:tr069_inform_handler",
+                    scope="network:ont:write",
+                    reason=(
+                        "Automatic readback verification after a fresh ACS "
+                        "Inform following a queued-but-CR-failed delivery"
+                    ),
+                    command_id=command_id,
+                    idempotency_key=(
+                        f"ont-service-config-verify-after-inform:{head_id}:"
+                        f"{failed_operation_id}"
+                    ),
+                ),
+                ont_unit_id=ont_id,
+                expected_head_id=head_id,
+                expected_revision=expected_revision,
+                failed_operation_id=failed_operation_id,
+            ),
+        )
+    except OntServiceConfigurationError:
+        # Preconditions no longer hold (stale/superseded configuration, or
+        # the short retry loop / an operator already moved this lifecycle on
+        # between the read above and this call) -- nothing to do.
+        return False
+    return True
+
+
 def _resolve_default_acs_server(db: Session) -> Tr069AcsServer | None:
     from app.models.domain_settings import SettingDomain
     from app.services import settings_spec
@@ -717,9 +830,9 @@ def _refresh_synced_ont_acs_observations(
 def link_tr069_device_to_ont(
     db: Session,
     device: Tr069CpeDevice,
-    ont,
+    ont: OntUnit,
     *,
-    acs_server_id=None,
+    acs_server_id: uuid.UUID | None = None,
 ) -> None:
     """Enforce a single active TR-069 link per ONT.
 
@@ -737,15 +850,25 @@ def link_tr069_device_to_ont(
         .filter(Tr069CpeDevice.is_active.is_(True))
         .all()
     )
+    transferred_cpe_device_id: uuid.UUID | None = None
     for other in other_links:
         other.ont_unit_id = None
         if device.genieacs_device_id and not other.genieacs_device_id:
-            if device.cpe_device_id is None and other.cpe_device_id is not None:
-                device.cpe_device_id = other.cpe_device_id
+            if (
+                transferred_cpe_device_id is None
+                and device.cpe_device_id is None
+                and other.cpe_device_id is not None
+            ):
+                transferred_cpe_device_id = other.cpe_device_id
             other.is_active = False
     if other_links:
-        db.flush()
+        # Release the partial-unique active CPE identity before assigning it to
+        # the replacement row. A single flush containing both UPDATEs can order
+        # the replacement first and trip uq_tr069_cpe_devices_active_cpe_device_id.
+        db.flush(other_links)
 
+    if transferred_cpe_device_id is not None:
+        device.cpe_device_id = transferred_cpe_device_id
     device.ont_unit_id = ont.id
     target_acs_server_id = acs_server_id or device.acs_server_id
     if target_acs_server_id and device.acs_server_id != target_acs_server_id:
@@ -1376,9 +1499,10 @@ class CpeDevices(ListResponseMixin):
             # so the task aborts cleanly rather than reusing a poisoned session.
             _safe_rollback(db)
             raise
-        except Exception as e:
-            logger.warning("Auto-link ONTs after sync failed: %s", e)
+        except Exception:
+            logger.exception("Auto-link ONTs after sync failed")
             db.rollback()
+            raise
 
         logger.info(
             "GenieACS sync: created=%d, updated=%d, auto_linked=%d",
@@ -1724,6 +1848,23 @@ def receive_inform(
             exc_info=True,
         )
 
+    cr_failure_readback_triggered = False
+    try:
+        cr_failure_readback_triggered = _trigger_acs_cr_failure_readback_after_inform(
+            db,
+            ont_id=ont_id_for_service_apply,
+            inform_at=now,
+        )
+    except Exception:
+        if db.in_transaction():
+            db.rollback()
+        logger.warning(
+            "Failed to trigger acs_cr_failed readback verification after "
+            "inform for ONT %s",
+            ont_id_for_service_apply,
+            exc_info=True,
+        )
+
     logger.info(
         "Inform received: serial=%s event=%s device_id=%s",
         serial,
@@ -1737,6 +1878,7 @@ def receive_inform(
         "parameters": parameter_count,
         "session_id": str(session.id),
         "service_apply_queued": service_apply_queued,
+        "cr_failure_readback_triggered": cr_failure_readback_triggered,
     }
 
 

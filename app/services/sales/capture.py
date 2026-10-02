@@ -23,6 +23,7 @@ from app.services.customer_identity_normalization import (
 )
 from app.services.events import EventType, emit_event
 from app.services.integrations import inbox as integration_inbox
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import owner_command_active
 from app.services.sales import lifecycle
 
@@ -178,6 +179,27 @@ def capture_lead(
         origin = payload.origin.model_dump()
         origin["source_interaction_id"] = source_interaction_id
         origin["capture_fingerprint"] = fingerprint
+        metadata: dict[str, object] = {"capture_contract_version": 1}
+        if (
+            payload.requested_plan_name is not None
+            or payload.map_latitude is not None
+            or payload.subscriber_id is not None
+        ):
+            metadata = {
+                "capture_contract_version": 2,
+                "fiber_request": {
+                    "requested_plan_name": payload.requested_plan_name,
+                    "map_pin": (
+                        {
+                            "latitude": str(payload.map_latitude),
+                            "longitude": str(payload.map_longitude),
+                        }
+                        if payload.map_latitude is not None
+                        and payload.map_longitude is not None
+                        else None
+                    ),
+                },
+            }
         lead = lifecycle.create_party_lead(
             db,
             party_id=party_id,
@@ -189,8 +211,16 @@ def capture_lead(
             region=payload.region,
             address=payload.address,
             notes=payload.notes,
-            metadata={"capture_contract_version": 1},
+            metadata=metadata,
         )
+        if payload.subscriber_id is not None:
+            lifecycle.attach_lead_subscriber(
+                db,
+                lead_id=lead.id,
+                subscriber_id=payload.subscriber_id,
+                source="sales.lead_capture",
+                reason="Exact subscriber identity matched the signed fiber inquiry",
+            )
         # ``capture_lead_origin`` writes through the child FK, so the already
         # loaded parent relationship is not guaranteed to refresh in-place.
         capture = db.scalars(
@@ -200,6 +230,7 @@ def capture_lead(
             db,
             EventType.lead_created,
             {
+                "tenant_id": str(OPERATOR_TENANT_ID),
                 "lead_id": str(lead.id),
                 "party_id": str(party_id),
                 "origin_capture_id": str(capture.id),

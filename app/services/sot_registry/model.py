@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.services.automation_contracts import AutomationDomainCapabilities
+from app.services.custom_field_contracts import CustomFieldDomainCapabilities
 from app.services.sot_manifest import SOTService
 
 
@@ -26,3 +28,11 @@ class DomainSOT:
     #: open, owner-declared vocabulary (ADR-0008), not a host enum. Exactly one
     #: SOT domain may declare a code; the registry rejects duplicates.
     authentication_mechanisms: tuple[str, ...] = ()
+    #: Closed capabilities exposed by this domain to the Automation Center.
+    #: Every SOT domain appears in the module catalogue, but it cannot be used
+    #: by a rule until this declaration is present and structurally valid.
+    automation: AutomationDomainCapabilities | None = None
+    #: Entity types explicitly exposed to the Custom Fields Center. The
+    #: declaration is code-owned so administrators cannot target arbitrary
+    #: tables, columns, or identities.
+    custom_fields: CustomFieldDomainCapabilities | None = None

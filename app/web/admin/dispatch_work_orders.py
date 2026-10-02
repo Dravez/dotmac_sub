@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 from uuid import UUID, uuid4, uuid5
 
@@ -18,17 +19,21 @@ from starlette.datastructures import FormData, UploadFile
 from app.csrf import CSRF_COOKIE_NAME, CSRFValidationError
 from app.db import get_db
 from app.models.stored_file import StoredFile
+from app.services import web_custom_fields as web_custom_fields_service
 from app.services import web_dispatch_work_orders as work_orders_service
 from app.services import web_work_order_expenses as expense_web
 from app.services.auth_dependencies import (
     can,
     grant_scopes_for_permission,
+    load_permission_keys,
     require_permission,
     require_scoped_permission,
 )
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.field.expense_requests import (
+    ApproveFieldExpenseRequest,
+    ExpenseApprovalLineInput,
     ExpenseReceiptUploadInput,
     ExpenseRequestAccessMode,
     ExpenseRequestLineInput,
@@ -38,6 +43,7 @@ from app.services.field.expense_requests import (
     StaffWorkOrderAccess,
     SubmitFieldExpenseRequest,
     VerifyFieldExpenseDestination,
+    approve_field_expense_request_command,
     submit_field_expense_request_command,
     verify_field_expense_destination,
 )
@@ -228,10 +234,21 @@ def _expense_detail_response(
         actor_system_user_id=actor_id,
         form=expense_form,
         errors=expense_errors,
+        can_review_expenses=can(request, "operations:expense_request:write"),
     )
     context = _ctx(request, db)
     context.update(state)
     context.update({"notice": notice, "error": error})
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="work_order",
+            target_id=state["work_order"].id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
+    )
     return templates.TemplateResponse(
         "admin/dispatch/work_order_detail.html", context, status_code=status_code
     )
@@ -266,6 +283,14 @@ def dispatch_work_orders(
     )
     context = _ctx(request, db)
     context.update(state)
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="work_order",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     context.update({"notice": notice, "error": error})
     return templates.TemplateResponse("admin/dispatch/work_orders.html", context)
 
@@ -455,6 +480,77 @@ def create_work_order_expense(
 
 
 @router.post(
+    "/work-orders/{work_order_id}/expenses/{expense_request_id}/approve",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(_require_expense_csrf),
+        Depends(require_permission("operations:expense_request:write")),
+    ],
+)
+def approve_work_order_expense(
+    request: Request,
+    work_order_id: str,
+    expense_request_id: UUID,
+    db: Session = Depends(get_db),
+    auth: dict = Depends(_require_work_order_read_access),
+):
+    actor_id = _actor_id(auth)
+    raw_form = parse_form_data_sync(request)
+    lines: list[ExpenseApprovalLineInput] = []
+    try:
+        for key, raw_value in raw_form.multi_items():
+            if not isinstance(key, str) or not key.startswith("approved_amount_"):
+                continue
+            item_id = UUID(key.removeprefix("approved_amount_"))
+            lines.append(
+                ExpenseApprovalLineInput(
+                    expense_item_id=item_id,
+                    approved_amount=Decimal(str(raw_value)),
+                )
+            )
+        expected_revision_raw = _form_text(raw_form, "expected_revision").strip()
+        expected_revision = (
+            int(expected_revision_raw) if expected_revision_raw else None
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return _detail_redirect(
+            work_order_id,
+            error="Enter a valid approved amount for every expense item.",
+        )
+
+    command_id = uuid4()
+    db_session_adapter.release_read_transaction(db)
+    try:
+        outcome = approve_field_expense_request_command(
+            db,
+            command=ApproveFieldExpenseRequest(
+                context=CommandContext(
+                    command_id=command_id,
+                    correlation_id=command_id,
+                    actor=f"user:{actor_id}",
+                    scope="operations:expense_request:write",
+                    reason=f"approve_expense_request:{expense_request_id}",
+                    idempotency_key=str(command_id),
+                ),
+                expense_request_id=expense_request_id,
+                reviewer_system_user_id=actor_id,
+                lines=tuple(lines),
+                adjustment_reason=_form_text(raw_form, "adjustment_reason"),
+                expected_revision=expected_revision,
+                expected_work_order_public_id=work_order_id,
+            ),
+        )
+    except DomainError as exc:
+        db_session_adapter.discard_failed_transaction(db)
+        return _detail_redirect(work_order_id, error=exc.message)
+    label = "adjusted and approved" if outcome.amounts_adjusted else "approved"
+    return _detail_redirect(
+        work_order_id,
+        notice=f"Expense {expense_request_id} {label}",
+    )
+
+
+@router.post(
     "/work-orders",
     response_class=HTMLResponse,
     dependencies=[Depends(require_permission("operations:dispatch:write"))],
@@ -471,7 +567,16 @@ def create_dispatch_work_order(
             auth=getattr(request.state, "auth", None),
             request_id=request.headers.get("X-Request-ID"),
         )
-    except (HTTPException, ValidationError, ValueError) as exc:
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="work_order",
+            target_id=row.id,
+            form=form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=(auth.get("actor_id") if isinstance(auth, dict) else None),
+        )
+    except (HTTPException, ValidationError, ValueError, DomainError) as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         return _redirect(error=detail)
     return _detail_redirect(row.public_id, notice=f"Work order {row.public_id} created")

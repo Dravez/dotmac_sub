@@ -13,6 +13,7 @@ from starlette.datastructures import FormData
 
 from app.db import get_db
 from app.services import (
+    credential_recovery,
     offer_reseller_availability,
     reseller_onboarding,
     subscriber_assignments,
@@ -548,5 +549,147 @@ def reseller_user_create(
         )
     return RedirectResponse(
         url=f"/admin/resellers/{reseller_id}?page={page}&per_page={per_page}",
+        status_code=303,
+    )
+
+
+def _portal_access_error_response(
+    request: Request,
+    db: Session,
+    *,
+    reseller_id: str,
+    page: int,
+    per_page: int,
+    error: str,
+):
+    detail = reseller_svc.get_reseller_detail_context(
+        db,
+        reseller_id,
+        page=page,
+        per_page=per_page,
+    )
+    if detail is None:
+        return RedirectResponse(
+            url="/admin/resellers?notice=" + quote_plus("Reseller not found."),
+            status_code=303,
+        )
+    context = _base_context(request, db, active_page="resellers")
+    context.update(detail)
+    context["error"] = error
+    return templates.TemplateResponse(
+        "admin/resellers/detail.html",
+        context,
+        status_code=400,
+    )
+
+
+@router.post(
+    "/{reseller_id}/users/{principal_type}/{principal_id}/reset-password",
+    response_class=HTMLResponse,
+)
+def reseller_user_reset_password(
+    reseller_id: str,
+    principal_type: str,
+    principal_id: str,
+    request: Request,
+    form: FormData = Depends(parse_form_data),
+    auth: dict = Depends(require_permission("reseller:write")),
+    db: Session = Depends(get_db),
+):
+    page = _form_int(form, "page", 1)
+    per_page = _form_int(form, "per_page", 25)
+    try:
+        outcome = credential_recovery.request_exact_password_recovery(
+            db,
+            credential_recovery.RequestExactPasswordRecoveryCommand(
+                context=_command_context(
+                    auth,
+                    scope=credential_recovery.CREDENTIAL_RECOVERY_SCOPE,
+                    reason="Administrator requested reseller password recovery",
+                    idempotency_key=(
+                        f"reseller-password-recovery:{reseller_id}:{principal_type}:"
+                        f"{principal_id}"
+                    ),
+                ),
+                principal_type=principal_type,
+                principal_id=UUID(principal_id),
+                expected_reseller_id=UUID(reseller_id),
+                next_login_path="/reseller/auth/login?next=/reseller/dashboard",
+            ),
+        )
+    except Exception as exc:
+        return _portal_access_error_response(
+            request,
+            db,
+            reseller_id=reseller_id,
+            page=page,
+            per_page=per_page,
+            error=_error_message(exc, "Unable to queue password reset link."),
+        )
+    notice = (
+        "Password reset link queued successfully."
+        if outcome.delivery_requested
+        else "Password reset link could not be queued."
+    )
+    return RedirectResponse(
+        url=(
+            f"/admin/resellers/{reseller_id}?page={page}&per_page={per_page}"
+            f"&notice={quote_plus(notice)}#portal-access"
+        ),
+        status_code=303,
+    )
+
+
+@router.post(
+    "/{reseller_id}/users/{principal_type}/{principal_id}/remove",
+    response_class=HTMLResponse,
+)
+def reseller_user_remove(
+    reseller_id: str,
+    principal_type: str,
+    principal_id: str,
+    request: Request,
+    form: FormData = Depends(parse_form_data),
+    auth: dict = Depends(require_permission("reseller:write")),
+    db: Session = Depends(get_db),
+):
+    page = _form_int(form, "page", 1)
+    per_page = _form_int(form, "per_page", 25)
+    try:
+        outcome = reseller_onboarding.revoke_reseller_portal_access(
+            db,
+            reseller_onboarding.RevokeResellerPortalAccessCommand(
+                context=_onboarding_context(
+                    auth,
+                    reason="Remove reseller portal access",
+                    idempotency_key=(
+                        f"reseller-access-removal:{reseller_id}:{principal_type}:"
+                        f"{principal_id}"
+                    ),
+                ),
+                reseller_id=UUID(reseller_id),
+                principal_type=principal_type,
+                principal_id=UUID(principal_id),
+            ),
+        )
+    except Exception as exc:
+        return _portal_access_error_response(
+            request,
+            db,
+            reseller_id=reseller_id,
+            page=page,
+            per_page=per_page,
+            error=_error_message(exc, "Unable to remove reseller portal access."),
+        )
+    notice = (
+        "Portal access removed and active sessions revoked."
+        if outcome.changed
+        else "Portal access was already removed."
+    )
+    return RedirectResponse(
+        url=(
+            f"/admin/resellers/{reseller_id}?page={page}&per_page={per_page}"
+            f"&notice={quote_plus(notice)}#portal-access"
+        ),
         status_code=303,
     )

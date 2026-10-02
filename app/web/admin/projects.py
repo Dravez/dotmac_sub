@@ -31,9 +31,11 @@ from app.schemas.infrastructure import (
     InfrastructureType,
 )
 from app.services import infrastructure_catalogue
+from app.services import web_custom_fields as web_custom_fields_service
 from app.services import web_projects as projects_web_service
 from app.services.auth_dependencies import (
     can,
+    load_permission_keys,
     require_any_permission,
     require_permission,
 )
@@ -236,6 +238,14 @@ def project_customer_search(
 def project_new(request: Request, db: Session = Depends(get_db)):
     context = _ctx(request, db)
     context.update(projects_web_service.build_project_form_context(db))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="project",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     context.update({"page_title": "New Project", "form_mode": "create"})
     return templates.TemplateResponse("admin/projects/project_form.html", context)
 
@@ -246,10 +256,21 @@ def project_new(request: Request, db: Session = Depends(get_db)):
     dependencies=[Depends(require_permission("project:create"))],
 )
 async def project_create(request: Request, db: Session = Depends(get_db)):
-    form = dict(await request.form())
+    raw_form = await request.form()
+    form = dict(raw_form)
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    permission_keys = load_permission_keys(auth, db) if auth else frozenset()
     try:
         project = projects_web_service.create_project_from_form(
             db, request=request, actor_id=_actor_id(request), **form
+        )
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="project",
+            target_id=project.id,
+            form=raw_form,
+            permission_keys=permission_keys,
+            actor=_actor_id(request),
         )
     except (HTTPException, DomainError, ValidationError, ValueError) as exc:
         db.rollback()
@@ -257,6 +278,14 @@ async def project_create(request: Request, db: Session = Depends(get_db)):
         context.update(
             projects_web_service.build_project_form_context(
                 db, form=form, error=_form_error(exc)
+            )
+        )
+        context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="project",
+                permission_keys=permission_keys,
+                form=raw_form,
             )
         )
         context.update({"page_title": "New Project", "form_mode": "create"})
@@ -680,12 +709,15 @@ async def project_template_tasks_editor_update(
     form = await request.form()
     tasks_json = form.get("tasks_json")
     try:
+        expected_revision = int(str(form.get("expected_revision") or ""))
         projects_web_service.save_template_tasks_from_editor(
             db,
             template_id=template_id,
+            expected_revision=expected_revision,
             tasks_json=tasks_json if isinstance(tasks_json, str) else "",
+            actor_id=_actor_id(request),
         )
-    except (ValidationError, ValueError) as exc:
+    except (DomainError, ValidationError, ValueError) as exc:
         db.rollback()
         template = projects_service.project_templates.get(db, template_id)
         context = _ctx(request, db, active_page="project-templates")
@@ -807,7 +839,7 @@ async def project_template_task_update(
         projects_web_service.update_template_task_from_form(
             db, template_id=template_id, task_id=task_id, **form
         )
-    except (ValidationError, ValueError) as exc:
+    except (DomainError, ValidationError, ValueError) as exc:
         db.rollback()
         template = projects_service.project_templates.get(db, template_id)
         task = projects_web_service.get_template_task_checked(
@@ -875,6 +907,16 @@ def project_detail(request: Request, project_ref: str, db: Session = Depends(get
             can_read_vendor_financials=can(request, "finance:ap:read"),
         )
     )
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="project",
+            target_id=project.id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
+    )
     return templates.TemplateResponse("admin/projects/project_detail.html", context)
 
 
@@ -893,6 +935,14 @@ def project_edit(request: Request, project_ref: str, db: Session = Depends(get_d
         )
     context = _ctx(request, db)
     context.update(projects_web_service.build_project_form_context(db, project=project))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="project",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     context.update({"page_title": "Edit Project", "form_mode": "edit"})
     return templates.TemplateResponse("admin/projects/project_form.html", context)
 
@@ -906,7 +956,10 @@ async def project_update(
     request: Request, project_ref: str, db: Session = Depends(get_db)
 ):
     project, _ = projects_web_service.resolve_project_reference(db, project_ref)
-    form = dict(await request.form())
+    raw_form = await request.form()
+    form = dict(raw_form)
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    permission_keys = load_permission_keys(auth, db) if auth else frozenset()
     try:
         project = projects_web_service.update_project_from_form(
             db,
@@ -921,6 +974,14 @@ async def project_update(
         context.update(
             projects_web_service.build_project_form_context(
                 db, project=project, form=form, error=_form_error(exc)
+            )
+        )
+        context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="project",
+                permission_keys=permission_keys,
+                form=raw_form,
             )
         )
         context.update({"page_title": "Edit Project", "form_mode": "edit"})

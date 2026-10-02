@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     SOTService,
 )
@@ -42,4 +47,22 @@ DOMAIN = DomainSOT(
     "resolve through these owners. API, web, and task callers request a "
     "geocode or a sync outcome; they do not embed their own geocode "
     "lookups or spatial write logic.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="reports.gis_synchronization",
+                label="GIS synchronization",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="GIS synchronization remains with the geospatial owner and has no Automation Center trigger or action.",
+            ),
+            AutomationCatalogItem(
+                key="reports.batch_geocoding",
+                label="Batch geocoding",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="Batch geocoding is an authorized user-started job; Center rules cannot start it yet.",
+            ),
+        ),
+    ),
 )

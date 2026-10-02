@@ -16,6 +16,9 @@ from app.schemas.field import (
     FieldEquipmentReturnRequest,
     FieldExpenseApprovalRead,
     FieldExpensePaymentRead,
+    FieldExpensePaymentRecoveryPreviewRead,
+    FieldExpensePaymentRecoveryRead,
+    FieldExpensePaymentRecoveryRequest,
     FieldExpenseRecoveryPreviewRead,
     FieldExpenseRecoveryRead,
     FieldExpenseRecoveryRequest,
@@ -25,6 +28,7 @@ from app.schemas.field import (
     FieldLiveMapFeedQuery,
     FieldLiveMapTechnicianDetail,
     FieldLiveMapTechnicianDetailQuery,
+    FieldManagerExpenseApproveRequest,
     FieldManagerExpenseRejectRequest,
     FieldManagerJob,
     FieldManagerJobAssignRequest,
@@ -51,18 +55,25 @@ from app.services.field.equipment_custody import field_equipment_custody
 from app.services.field.expense_recovery import (
     ExpenseDeliveryRecoveryError,
     PreviewExpenseDeliveryRecovery,
+    PreviewExpensePaymentDeliveryRecovery,
     preview_expense_delivery_recovery,
+    preview_expense_payment_delivery_recovery,
 )
 from app.services.field.expense_requests import (
     ApproveFieldExpenseRequest,
+    ExpenseApprovalLineInput,
+    ExpenseRequestStatus,
     FieldExpenseRequestError,
     InitiateFieldExpensePayment,
+    ManagerExpenseReviewQuery,
     RecoverExpenseDelivery,
+    RecoverExpensePaymentDelivery,
     RejectFieldExpenseRequest,
     approve_field_expense_request_command,
-    field_expense_requests,
     initiate_field_expense_payment_command,
+    list_manager_expense_requests,
     recover_expense_delivery,
+    recover_expense_payment_delivery,
     reject_field_expense_request_command,
 )
 from app.services.field.manager import field_manager
@@ -353,6 +364,57 @@ def field_manager_recover_expense_delivery(
         raise _expense_approval_error(exc) from exc
 
 
+@router.get(
+    "/expenses/payment-deliveries/{event_id}/recovery-preview",
+    response_model=FieldExpensePaymentRecoveryPreviewRead,
+)
+def field_manager_preview_expense_payment_recovery(
+    event_id: UUID,
+    auth: dict = Depends(_expense_pay),
+    db: Session = Depends(get_db),
+):
+    del auth
+    try:
+        return preview_expense_payment_delivery_recovery(
+            db,
+            PreviewExpensePaymentDeliveryRecovery(dead_event_id=event_id),
+        )
+    except ExpenseDeliveryRecoveryError as exc:
+        raise _expense_approval_error(exc) from exc
+
+
+@router.post(
+    "/expenses/payment-deliveries/{event_id}/recover",
+    response_model=FieldExpensePaymentRecoveryRead,
+)
+def field_manager_recover_expense_payment_delivery(
+    event_id: UUID,
+    payload: FieldExpensePaymentRecoveryRequest,
+    auth: dict = Depends(_expense_pay),
+    request_id: UUID | None = Header(default=None, alias="X-Request-ID"),
+    db: Session = Depends(get_db),
+):
+    command_id = request_id or uuid4()
+    db_session_adapter.release_read_transaction(db)
+    try:
+        return recover_expense_payment_delivery(
+            db,
+            command=RecoverExpensePaymentDelivery(
+                context=_expense_action_context(
+                    auth,
+                    expense_request_id=event_id,
+                    request_id=command_id,
+                    action="recover_payment_delivery",
+                    scope="operations:expense_request:pay",
+                ),
+                dead_event_id=event_id,
+                preview_fingerprint=payload.preview_fingerprint,
+            ),
+        )
+    except ExpenseDeliveryRecoveryError as exc:
+        raise _expense_approval_error(exc) from exc
+
+
 @router.post("/jobs/{crm_work_order_id}/assign", response_model=FieldManagerJob)
 def field_manager_assign_job(
     crm_work_order_id: str,
@@ -398,20 +460,29 @@ def field_manager_unassign_job(
 
 @router.get("/expenses", response_model=ListResponse[FieldExpenseRequestRead])
 def field_manager_expenses(
-    status_filter: str | None = Query(default=None, alias="status"),
+    status_filter: ExpenseRequestStatus | None = Query(default=None, alias="status"),
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     auth: dict = Depends(_expense_read),
     db: Session = Depends(get_db),
 ):
-    items = field_expense_requests.list_all(
+    page = list_manager_expense_requests(
         db,
-        status=status_filter,
-        approver_system_user_id=UUID(str(auth["principal_id"])),
-        limit=limit,
-        offset=offset,
+        ManagerExpenseReviewQuery(
+            status=status_filter,
+            approver_system_user_id=UUID(str(auth["principal_id"])),
+            limit=limit,
+            offset=offset,
+        ),
     )
-    return {"items": items, "count": len(items), "limit": limit, "offset": offset}
+    return ListResponse[FieldExpenseRequestRead](
+        items=[
+            FieldExpenseRequestRead.model_validate(asdict(item)) for item in page.items
+        ],
+        count=page.total,
+        limit=page.limit,
+        offset=page.offset,
+    )
 
 
 @router.post(
@@ -420,6 +491,7 @@ def field_manager_expenses(
 )
 def field_manager_approve_expense(
     expense_request_id: UUID,
+    payload: FieldManagerExpenseApproveRequest | None = None,
     auth: dict = Depends(_expense_write),
     request_id: UUID | None = Header(default=None, alias="X-Request-ID"),
     db: Session = Depends(get_db),
@@ -437,6 +509,19 @@ def field_manager_approve_expense(
                 ),
                 expense_request_id=expense_request_id,
                 reviewer_system_user_id=UUID(str(auth["principal_id"])),
+                lines=tuple(
+                    ExpenseApprovalLineInput(
+                        expense_item_id=line.expense_item_id,
+                        approved_amount=line.approved_amount,
+                    )
+                    for line in (payload.lines if payload is not None else ())
+                ),
+                adjustment_reason=(
+                    payload.adjustment_reason if payload is not None else None
+                ),
+                expected_revision=(
+                    payload.expected_revision if payload is not None else None
+                ),
             ),
         )
     except FieldExpenseRequestError as exc:

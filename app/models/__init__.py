@@ -37,6 +37,26 @@ from app.models.auth import (  # noqa: F401
     Session,
     UserCredential,
 )
+from app.models.automation import (  # noqa: F401
+    AutomationRule,
+    AutomationRuleStatus,
+    AutomationRuleVersion,
+    AutomationRun,
+    AutomationRunRetry,
+    AutomationRunRetryStatus,
+    AutomationRunStatus,
+    AutomationStepRun,
+    AutomationStepStatus,
+)
+from app.models.automation_scripts import (  # noqa: F401
+    AutomationScript,
+    AutomationScriptKind,
+    AutomationScriptLanguage,
+    AutomationScriptRun,
+    AutomationScriptRunStatus,
+    AutomationScriptStatus,
+    AutomationScriptVersion,
+)
 from app.models.bandwidth import BandwidthSample, QueueMapping  # noqa: F401
 from app.models.billing import (  # noqa: F401
     AccountAdjustment,
@@ -77,6 +97,7 @@ from app.models.billing import (  # noqa: F401
     LedgerEntryType,
     LedgerSource,
     Payment,
+    PaymentAllocation,
     PaymentAllocationReconciliationException,
     PaymentMethod,
     PaymentMethodType,
@@ -245,6 +266,12 @@ from app.models.csat import (  # noqa: F401
     CsatSourceType,
     SupportCsatRequest,
 )
+from app.models.custom_fields import (  # noqa: F401
+    CustomFieldDefinition,
+    CustomFieldDefinitionStatus,
+    CustomFieldType,
+    CustomFieldValue,
+)
 from app.models.customer_experience import (  # noqa: F401
     CustomerExperienceHandoff,
     CustomerExperienceHandoffEvent,
@@ -255,7 +282,9 @@ from app.models.customer_subledger import (  # noqa: F401
     CustomerPositionEffect,
     CustomerPostingGroup,
     CustomerSubledgerAuthorityCutover,
+    CustomerSubledgerOpeningCorrection,
     CustomerSubledgerOpeningPosition,
+    NativePrepaidOpeningRepair,
     PositionEffectKind,
     PostingCommandKind,
 )
@@ -283,6 +312,13 @@ from app.models.domain_settings import (  # noqa: F401
 from app.models.durable_timer import (  # noqa: F401
     DurableTimer,
     TimerStatus,
+)
+from app.models.enforcement_application import (  # noqa: F401
+    EnforcementApplication,
+    EnforcementEffect,
+    EnforcementFailureClass,
+    EnforcementOutcomeValue,
+    EnforcementPath,
 )
 from app.models.enforcement_lock import (  # noqa: F401
     AccessRestrictionMode,
@@ -601,6 +637,7 @@ from app.models.network_monitoring import (  # noqa: F401
     NetworkDeviceSnmpOid,
     NetworkTopologyLink,
     NetworkWeathermapView,
+    OutageIncidentWorkOrderLink,
     PopSite,
     PopSiteContact,
     SpeedTestResult,
@@ -986,6 +1023,16 @@ from app.models.subscription_engine import (  # noqa: F401
 from app.models.subscription_lifecycle_schedule import (  # noqa: F401
     SubscriptionLifecycleSchedule,
     SubscriptionLifecycleScheduleStatus,
+)
+from app.models.subscription_pause import (  # noqa: F401
+    SubscriptionPauseBillingPolicy,
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+    SubscriptionPauseReason,
+    SubscriptionPauseResumePolicy,
+    SubscriptionPauseSource,
 )
 from app.models.support import (  # noqa: F401
     Ticket,

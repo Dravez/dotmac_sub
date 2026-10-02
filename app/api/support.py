@@ -37,6 +37,7 @@ from app.schemas.team_inbox import (
 from app.services import (
     ai_conversation_ownership,
     team_inbox_assignment,
+    team_inbox_commands,
     team_inbox_contact_links,
     team_inbox_filters,
     team_inbox_outbound,
@@ -111,6 +112,7 @@ def list_tickets(
     ticket_type: str | None = Query(default=None),
     priority: str | None = Query(default=None),
     channel: str | None = Query(default=None),
+    service_team_id: str | None = Query(default=None),
     assigned_to_person_id: str | None = Query(default=None),
     created_by_person_id: str | None = Query(default=None),
     project_manager_person_id: str | None = Query(default=None),
@@ -138,6 +140,7 @@ def list_tickets(
         ticket_type=ticket_type,
         priority=priority,
         channel=channel,
+        service_team_id=(service_team_id if isinstance(service_team_id, str) else None),
         assigned_to_person_id=assigned_to_person_id,
         created_by_person_id=created_by_person_id,
         project_manager_person_id=project_manager_person_id,
@@ -578,27 +581,71 @@ def link_inbox_conversation_contact(
 ):
     finish_read_transaction(db)
     try:
-        result = team_inbox_contact_links.link_conversation_contact_by_id_committed(
-            db,
-            conversation_id=conversation_id,
-            subscriber_id=payload.subscriber_id,
-            reseller_id=payload.reseller_id,
-            linked_by_person_id=_actor_id(auth),
-            note=payload.note,
+        if bool(payload.subscriber_id) == bool(payload.reseller_id):
+            raise team_inbox_contact_links.ContactLinkError(
+                "Provide exactly one Customer or reseller."
+            )
+        target_id = payload.subscriber_id or payload.reseller_id
+        assert target_id is not None
+        target = team_inbox_contact_links.ContactLinkTarget(
+            target_type=(
+                team_inbox_contact_links.ContactLinkTargetType.subscriber
+                if payload.subscriber_id is not None
+                else team_inbox_contact_links.ContactLinkTargetType.reseller
+            ),
+            target_id=target_id,
         )
-    except team_inbox_contact_links.ConversationContactLinkError as exc:
+        actor_person_id = coerce_uuid(_actor_id(auth))
+        context = CommandContext.system(
+            actor=(
+                f"person:{actor_person_id}"
+                if actor_person_id is not None
+                else "system:support-api"
+            ),
+            scope="team-inbox:contact-link",
+            reason="apply reviewed Team Inbox contact association",
+        )
+        result = team_inbox_commands.link_contact(
+            db,
+            team_inbox_commands.LinkContactCommand(
+                context=context,
+                conversation_id=conversation_id,
+                target=target,
+                actor_person_id=actor_person_id,
+                note=payload.note,
+            ),
+        )
+    except (
+        team_inbox_contact_links.ConversationContactLinkError,
+        team_inbox_commands.ConversationNotFoundError,
+    ) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except team_inbox_contact_links.ContactLinkError as exc:
+    except (
+        team_inbox_contact_links.ContactLinkError,
+        team_inbox_commands.InboxCommandError,
+    ) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return InboxConversationContactLinkRead(
         conversation_id=conversation_id,
         contact_link_id=result.contact_link_id,
         channel_type=result.channel_type,
         normalized_contact=result.normalized_contact,
-        subscriber_id=result.subscriber_id,
-        reseller_id=result.reseller_id,
-        previous_link_ids_deactivated=result.previous_link_ids_deactivated,
+        subscriber_id=(
+            result.target.target_id
+            if result.target.target_type
+            is team_inbox_contact_links.ContactLinkTargetType.subscriber
+            else None
+        ),
+        reseller_id=(
+            result.target.target_id
+            if result.target.target_type
+            is team_inbox_contact_links.ContactLinkTargetType.reseller
+            else None
+        ),
+        previous_link_ids_deactivated=list(result.previous_link_ids_deactivated),
         repaired_conversation_ids=result.repaired_conversation_ids,
+        disposition=result.disposition.value,
+        replayed=result.replayed,
     )
 
 

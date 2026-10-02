@@ -7,13 +7,17 @@
     const attendanceUrl = "/admin/dashboard/attendance";
     const dashboardUrl = "/admin/dashboard";
     const reminderSelector = "[data-attendance-reminder-panel]";
-    const storagePrefix = "dotmac_attendance_reminder:";
+    const script = document.currentScript;
+    const attendanceSubject = script?.dataset.attendanceSubject || "anonymous";
+    const storagePrefix = `dotmac_attendance_reminder:${attendanceSubject}:`;
     const cacheKey = `${storagePrefix}cache`;
     const snoozeKey = `${storagePrefix}snoozeUntil`;
     const dismissedDateKey = `${storagePrefix}dismissedDate`;
     const checkIntervalMs = 10 * 60 * 1000;
     const unavailableRetryMs = 5 * 60 * 1000;
+    const eligibilityRetryMs = 12 * 60 * 60 * 1000;
     const snoozeMs = 10 * 60 * 1000;
+    const confirmedCheckInEvent = "dotmac:attendance-confirmed-check-in";
 
     function now() {
         return Date.now();
@@ -34,6 +38,12 @@
     function storageSet(key, value) {
         try {
             window.localStorage.setItem(key, value);
+        } catch (_error) {}
+    }
+
+    function storageRemove(key) {
+        try {
+            window.localStorage.removeItem(key);
         } catch (_error) {}
     }
 
@@ -73,6 +83,11 @@
 
     function removeReminder() {
         document.querySelector(reminderSelector)?.remove();
+    }
+
+    function clearReminderAfterConfirmedCheckIn() {
+        storageRemove(cacheKey);
+        removeReminder();
     }
 
     function showReminder(attendanceDate) {
@@ -130,6 +145,8 @@
             attendanceDate,
             needsReminder,
             state: widget.dataset.attendanceState || "",
+            errorCode: widget.dataset.attendanceErrorCode || "",
+            retryable: widget.dataset.attendanceRetryable !== "false",
         };
     }
 
@@ -160,7 +177,12 @@
                 removeReminder();
                 return;
             }
-            writeCache(attendance, checkIntervalMs);
+            const ttlMs = attendance.state
+                ? checkIntervalMs
+                : attendance.retryable
+                  ? unavailableRetryMs
+                  : eligibilityRetryMs;
+            writeCache(attendance, ttlMs);
             if (attendance.needsReminder) {
                 showReminder(attendance.attendanceDate);
             } else {
@@ -181,6 +203,11 @@
             }
         });
     }
+
+    document.addEventListener(
+        confirmedCheckInEvent,
+        clearReminderAfterConfirmedCheckIn
+    );
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", start);

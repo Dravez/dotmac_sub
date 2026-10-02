@@ -48,6 +48,8 @@ from app.schemas.billing import (
     LedgerEntryCreate,
     LedgerEntryUpdate,
     PaymentAllocationApply,
+    PaymentAllocationReversalConfirm,
+    PaymentAllocationReversalPreviewRequest,
     PaymentChannelCreate,
     PaymentChannelUpdate,
     PaymentCreate,
@@ -78,15 +80,29 @@ from app.services.settings_spec import get_spec
 
 
 def _deliver_prepaid_renewal(db_session: Session, payment: Payment) -> None:
-    """Deliver the deferred payment consequence inside the nested test session."""
-    PrepaidRenewalHandler().handle(
-        db_session,
-        Event(
-            event_type=EventType.payment_received,
-            payload={"payment_id": str(payment.id)},
-            account_id=payment.account_id,
-        ),
+    """Deliver the deferred payment consequence inside the nested test session.
+
+    Calls the handler directly rather than through the real dispatcher (to
+    stay inside this test's own already-open transaction/session), but
+    still persists a real `EventStore` row for the event first -- exactly
+    what the real dispatcher does before invoking any handler. Required
+    since 2026-09 round 8's fail-closed guard
+    (`financial.prepaid_service_renewals.evaluate_prepaid_service_after_
+    settlement`): an `event_id` with no matching `EventStore` row is now a
+    hard failure, not a warn-and-continue, and this helper's `Event()`
+    previously carried an in-memory-only, auto-generated `event_id`
+    (`field(default_factory=uuid4)`) that was never durably recorded.
+    """
+    from app.services import event_store as event_store_service
+
+    event = Event(
+        event_type=EventType.payment_received,
+        payload={"payment_id": str(payment.id)},
+        account_id=payment.account_id,
     )
+    event_store_service.create_event_record(db_session, event)
+    db_session.flush()
+    PrepaidRenewalHandler().handle(db_session, event)
 
 
 def _make_subscriber(db_session: object) -> Subscriber:
@@ -1698,6 +1714,116 @@ class TestPaymentCRUD:
 
 
 class TestPaymentWithAllocations:
+    def test_reviewed_reversal_releases_only_allocation(self, db_session, subscriber):
+        invoice = _make_invoice(
+            db_session,
+            subscriber.id,
+            currency="NGN",
+            subtotal=Decimal("15.00"),
+            total=Decimal("15.00"),
+            balance_due=Decimal("15.00"),
+            status=InvoiceStatus.issued,
+        )
+        payment = billing_service.payments.create(
+            db_session,
+            PaymentCreate(
+                account_id=subscriber.id,
+                amount=Decimal("15.00"),
+                currency="NGN",
+                status=PaymentStatus.succeeded,
+                allocations=[
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
+                ],
+            ),
+        )
+        invoice.status = InvoiceStatus.void
+        db_session.flush()
+        allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
+        preview = billing_service.payment_allocations.preview_reviewed_reversal(
+            db_session,
+            PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id),
+        )
+        result = billing_service.payment_allocations.confirm_reviewed_reversal(
+            db_session,
+            PaymentAllocationReversalConfirm(
+                allocation_id=allocation.id,
+                preview_fingerprint=preview.fingerprint,
+                idempotency_key="reviewed-allocation-reversal-1",
+                reason="Finance-approved correction",
+            ),
+        )
+        db_session.flush()
+        assert result.amount == Decimal("15.00")
+        assert allocation.is_active is False
+        assert allocation.reversal_ledger_entry_id is not None
+        assert allocation.reversal_consumption_ledger_entry_id is not None
+        assert payment.status is PaymentStatus.succeeded
+
+    def test_reviewed_reversal_rejects_non_void_invoice(self, db_session, subscriber):
+        invoice = _make_invoice(
+            db_session,
+            subscriber.id,
+            currency="NGN",
+            subtotal=Decimal("15.00"),
+            total=Decimal("15.00"),
+            balance_due=Decimal("15.00"),
+            status=InvoiceStatus.issued,
+        )
+        payment = billing_service.payments.create(
+            db_session,
+            PaymentCreate(
+                account_id=subscriber.id,
+                amount=Decimal("15.00"),
+                currency="NGN",
+                status=PaymentStatus.succeeded,
+                allocations=[
+                    PaymentAllocationApply(
+                        invoice_id=invoice.id, amount=Decimal("15.00")
+                    )
+                ],
+            ),
+        )
+        allocation = payment.allocations[0]
+        consumption_entry = LedgerEntry(
+            account_id=subscriber.id,
+            invoice_id=None,
+            payment_id=payment.id,
+            entry_type=LedgerEntryType.debit,
+            source=LedgerSource.other,
+            amount=Decimal("15.00"),
+            currency="NGN",
+            memo=f"Payment allocation account-credit consumption: {invoice.id}",
+            affects_customer_position=False,
+            effective_date=payment.paid_at,
+        )
+        db_session.add(consumption_entry)
+        db_session.flush()
+        allocation.consumption_ledger_entry_id = consumption_entry.id
+        db_session.flush()
+        with pytest.raises(HTTPException, match="void invoices"):
+            billing_service.payment_allocations.preview_reviewed_reversal(
+                db_session,
+                PaymentAllocationReversalPreviewRequest(allocation_id=allocation.id),
+            )
+
     def test_explicit_allocation_to_invoice(self, db_session, subscriber):
         """Create a payment with explicit allocation to an invoice."""
         invoice = _make_invoice(

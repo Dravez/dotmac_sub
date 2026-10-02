@@ -1,0 +1,700 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import select
+
+from app.models.audit import AuditEvent
+from app.models.billing import (
+    Invoice,
+    InvoiceClosure,
+    InvoiceClosureOrigin,
+    InvoiceClosureType,
+    InvoiceLine,
+    InvoiceStatus,
+    LedgerEntry,
+    LedgerEntryType,
+    LedgerSource,
+    Payment,
+    PaymentAllocation,
+    PaymentSettlement,
+    PaymentStatus,
+    TaxApplication,
+    TaxRate,
+)
+from app.models.billing_shadow_verification import BillingCutoverVerificationRun
+from app.models.customer_subledger import (
+    CustomerSubledgerAuthorityCutover,
+    CustomerSubledgerOpeningCorrection,
+    CustomerSubledgerOpeningPosition,
+)
+from app.models.event_store import EventStore
+from app.models.prepaid_funding import PrepaidFundingBaseline
+from app.models.system_user import SystemUser
+from app.schemas.billing import PaymentCreate
+from app.services import billing as billing_service
+from app.services.billing._common import get_spendable_account_credit_balance
+from app.services.billing.account_credit import AccountCreditApplications
+from app.services.billing.invoices import Invoices
+from app.services.billing.payments import PaymentAllocations
+from app.services.events.types import EventType
+from app.services.historical_invoice_tax_corrections import (
+    CORRECTION_SCOPE,
+    CorrectExistingReplacementTaxInvoiceCommand,
+    CorrectHistoricalInvoiceTaxCommand,
+    ExistingReplacementTaxCorrectionQuery,
+    HistoricalInvoiceTaxCorrectionDisposition,
+    HistoricalInvoiceTaxCorrectionError,
+    HistoricalInvoiceTaxCorrectionQuery,
+    correct_historical_invoice_tax,
+    correct_historical_invoice_tax_using_existing_replacement,
+    preview_existing_replacement_tax_correction,
+    preview_historical_invoice_tax_correction,
+)
+from app.services.owner_commands import CommandContext
+from tests.prepaid_funding_helpers import materialize_test_prepaid_opening_balance
+
+
+@dataclass(frozen=True, slots=True)
+class _Scenario:
+    account_id: UUID
+    source_invoice_id: UUID
+    source_line_id: UUID
+    void_evidence_invoice_id: UUID
+    subscription_invoice_id: UUID
+    payment_id: UUID
+    tax_rate_id: UUID
+    query: HistoricalInvoiceTaxCorrectionQuery
+
+
+def _scenario(db_session, subscriber) -> _Scenario:
+    issued_at = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
+    tax_rate = TaxRate(
+        name=f"VAT-{uuid4().hex[:8]}",
+        code="VAT",
+        rate=Decimal("7.5000"),
+        is_active=True,
+    )
+    source = Invoice(
+        account_id=subscriber.id,
+        invoice_number=f"INV-SOURCE-{uuid4().hex[:8]}",
+        status=InvoiceStatus.issued,
+        currency="NGN",
+        subtotal=Decimal("200000.00"),
+        tax_total=Decimal("0.00"),
+        total=Decimal("200000.00"),
+        balance_due=Decimal("200000.00"),
+        issued_at=issued_at,
+    )
+    void_evidence = Invoice(
+        account_id=subscriber.id,
+        invoice_number=f"INV-EVIDENCE-{uuid4().hex[:8]}",
+        status=InvoiceStatus.void,
+        currency="NGN",
+        subtotal=Decimal("200000.00"),
+        tax_total=Decimal("15000.00"),
+        total=Decimal("215000.00"),
+        balance_due=Decimal("0.00"),
+        issued_at=issued_at,
+    )
+    subscription = Invoice(
+        account_id=subscriber.id,
+        invoice_number=f"INV-SUBSCRIPTION-{uuid4().hex[:8]}",
+        status=InvoiceStatus.draft,
+        currency="NGN",
+        subtotal=Decimal("17500.00"),
+        tax_total=Decimal("1312.50"),
+        total=Decimal("18812.50"),
+        balance_due=Decimal("18812.50"),
+    )
+    db_session.add_all([tax_rate, source, void_evidence, subscription])
+    db_session.flush()
+
+    source_line = InvoiceLine(
+        invoice_id=source.id,
+        description="Air Fiber Installation",
+        quantity=Decimal("1.000"),
+        unit_price=Decimal("200000.00"),
+        amount=Decimal("200000.00"),
+        tax_application=TaxApplication.exclusive,
+        is_active=True,
+    )
+    evidence_line = InvoiceLine(
+        invoice_id=void_evidence.id,
+        description="Air Fiber Installation",
+        quantity=Decimal("1.000"),
+        unit_price=Decimal("200000.00"),
+        amount=Decimal("200000.00"),
+        tax_rate_id=tax_rate.id,
+        tax_rate_snapshot_version=1,
+        tax_rate_code_snapshot="VAT",
+        tax_rate_percent_snapshot=Decimal("7.5000"),
+        tax_rate_is_active_snapshot=True,
+        tax_application=TaxApplication.exclusive,
+        is_active=True,
+    )
+    subscription_line = InvoiceLine(
+        invoice_id=subscription.id,
+        description="Unlimited Basic",
+        quantity=Decimal("1.000"),
+        unit_price=Decimal("17500.00"),
+        amount=Decimal("17500.00"),
+        tax_rate_id=tax_rate.id,
+        tax_rate_snapshot_version=1,
+        tax_rate_code_snapshot="VAT",
+        tax_rate_percent_snapshot=Decimal("7.5000"),
+        tax_rate_is_active_snapshot=True,
+        tax_application=TaxApplication.exclusive,
+        is_active=True,
+    )
+    db_session.add_all([source_line, evidence_line, subscription_line])
+    db_session.add(
+        InvoiceClosure(
+            invoice_id=void_evidence.id,
+            closure_type=InvoiceClosureType.void,
+            origin=InvoiceClosureOrigin.manual,
+            amount=Decimal("0.00"),
+            receivable_before=Decimal("0.00"),
+            receivable_after=Decimal("0.00"),
+            payments_applied=Decimal("0.00"),
+            credits_applied=Decimal("0.00"),
+            currency="NGN",
+            reason="Reviewed Finance draft was voided",
+        )
+    )
+    db_session.commit()
+
+    payment = billing_service.payments.create(
+        db_session,
+        PaymentCreate(
+            account_id=subscriber.id,
+            amount=Decimal("233812.50"),
+            currency="NGN",
+            status=PaymentStatus.succeeded,
+            external_id=f"test-historical-tax-{uuid4()}",
+        ),
+        auto_allocate=False,
+    )
+    funding_preview = AccountCreditApplications.preview_invoice_funding(
+        db_session, source
+    )
+    AccountCreditApplications.apply_invoice_fully(
+        db_session,
+        source,
+        preview_fingerprint=funding_preview.fingerprint,
+    )
+    db_session.commit()
+    db_session.refresh(source)
+    db_session.refresh(source_line)
+    assert source.status is InvoiceStatus.paid
+
+    query = HistoricalInvoiceTaxCorrectionQuery(
+        account_id=subscriber.id,
+        source_invoice_id=source.id,
+        source_invoice_line_id=source_line.id,
+        void_evidence_invoice_id=void_evidence.id,
+        subscription_invoice_id=subscription.id,
+        payment_id=payment.id,
+        tax_rate_id=tax_rate.id,
+        issued_at=issued_at,
+        due_at=issued_at + timedelta(days=30),
+    )
+    return _Scenario(
+        account_id=subscriber.id,
+        source_invoice_id=source.id,
+        source_line_id=source_line.id,
+        void_evidence_invoice_id=void_evidence.id,
+        subscription_invoice_id=subscription.id,
+        payment_id=payment.id,
+        tax_rate_id=tax_rate.id,
+        query=query,
+    )
+
+
+def _context(*, key: str = "historical-tax-correction-test-key") -> CommandContext:
+    return CommandContext.system(
+        actor="test-finance-operator",
+        scope=CORRECTION_SCOPE,
+        reason="Correct omitted VAT using the exact reviewed payment evidence",
+        idempotency_key=key,
+    )
+
+
+def _activate_reviewed_opening(
+    db_session, *, account_id: UUID, amount: Decimal, occurred_at: datetime
+) -> CustomerSubledgerOpeningPosition:
+    materialize_test_prepaid_opening_balance(
+        db_session, account_id, amount, position_at=occurred_at
+    )
+    baseline = db_session.scalar(
+        select(PrepaidFundingBaseline).where(
+            PrepaidFundingBaseline.account_id == account_id
+        )
+    )
+    assert baseline is not None
+    command_id = uuid4()
+    run = BillingCutoverVerificationRun(
+        phase="customer_subledger_phase3",
+        cohort_name="pytest-historical-tax-correction",
+        evidence_schema_version=1,
+        policy_version="pytest",
+        cutoff_at=occurred_at,
+        observation_started_at=occurred_at - timedelta(days=1),
+        observation_ended_at=occurred_at,
+        cohort_count=1,
+        covered_count=1,
+        unresolved_count=0,
+        ambiguous_count=0,
+        unexpected_unlinked_count=0,
+        duplicate_count=0,
+        shadow_variance_count=0,
+        expected_difference_count=0,
+        gap_count=0,
+        overlap_count=0,
+        source_fingerprint="a" * 64,
+        result_fingerprint="b" * 64,
+        currency_totals={},
+        cohort_classification={},
+        event_outcomes={},
+        code_version="pytest",
+        database_schema_version="523",
+        idempotency_key=f"pytest-historical-tax-opening:{command_id}",
+        command_id=command_id,
+        correlation_id=command_id,
+        actor="pytest:operator",
+        reason="Reviewed historical-tax opening",
+        operator_approved_by="pytest:operator",
+        operator_approved_at=occurred_at,
+        finance_approved_by="pytest:finance",
+        finance_approved_at=occurred_at,
+        created_at=occurred_at,
+    )
+    db_session.add(run)
+    db_session.flush()
+    opening = CustomerSubledgerOpeningPosition(
+        verification_run_id=run.id,
+        baseline_id=baseline.id,
+        account_id=account_id,
+        currency="NGN",
+        legacy_position=amount,
+        shadow_position_before=Decimal("0.00"),
+        opening_delta=amount,
+        evidence_fingerprint="c" * 64,
+        review_reference="pytest:approved-opening",
+        captured_by="pytest:finance",
+        command_id=command_id,
+        correlation_id=command_id,
+        occurred_at=occurred_at,
+        created_at=occurred_at,
+    )
+    db_session.add(opening)
+    db_session.flush()
+    db_session.add(
+        CustomerSubledgerAuthorityCutover(
+            verification_run_id=run.id,
+            result_fingerprint="d" * 64,
+            review_reference="pytest:approved-cutover",
+            activated_by="pytest:operator",
+            command_id=command_id,
+            correlation_id=command_id,
+            cutover_at=occurred_at + timedelta(minutes=1),
+        )
+    )
+    db_session.commit()
+    return opening
+
+
+def _command(
+    scenario: _Scenario,
+    fingerprint: str,
+    *,
+    permission_granted: bool = True,
+) -> CorrectHistoricalInvoiceTaxCommand:
+    return CorrectHistoricalInvoiceTaxCommand(
+        query=scenario.query,
+        expected_preview_fingerprint=fingerprint,
+        permission_granted=permission_granted,
+        authorized_system_user_id=uuid4(),
+    )
+
+
+def test_exact_payment_correction_is_atomic_and_idempotent(db_session, subscriber):
+    scenario = _scenario(db_session, subscriber)
+
+    preview = preview_historical_invoice_tax_correction(db_session, scenario.query)
+
+    assert preview.disposition is HistoricalInvoiceTaxCorrectionDisposition.eligible
+    assert preview.source_subtotal == Decimal("200000.00")
+    assert preview.subscription_total == Decimal("18812.50")
+    assert preview.tax_amount == Decimal("15000.00")
+    assert preview.replacement_total == Decimal("215000.00")
+    assert preview.payment_available_before == Decimal("33812.50")
+    assert preview.payment_available_after_void == Decimal("233812.50")
+    assert preview.source_payment_allocation_id is not None
+    assert preview.projected_final_payment_available == Decimal("0.00")
+    assert preview.projected_final_account_credit == Decimal("0.00")
+
+    db_session.rollback()
+    context = _context()
+    command = _command(scenario, preview.fingerprint)
+    result = correct_historical_invoice_tax(db_session, command, context=context)
+
+    source = db_session.get(Invoice, scenario.source_invoice_id)
+    subscription = db_session.get(Invoice, scenario.subscription_invoice_id)
+    replacement = db_session.get(Invoice, result.replacement_invoice_id)
+    payment = db_session.get(Payment, scenario.payment_id)
+    assert source is not None and source.status is InvoiceStatus.void
+    assert subscription is not None and subscription.status is InvoiceStatus.paid
+    assert subscription.balance_due == Decimal("0.00")
+    assert replacement is not None and replacement.status is InvoiceStatus.paid
+    assert replacement.subtotal == Decimal("200000.00")
+    assert replacement.tax_total == Decimal("15000.00")
+    assert replacement.total == Decimal("215000.00")
+    assert replacement.balance_due == Decimal("0.00")
+    assert payment is not None
+    assert PaymentAllocations.available_amount(db_session, str(payment.id)) == Decimal(
+        "0.00"
+    )
+    assert get_spendable_account_credit_balance(
+        db_session,
+        str(scenario.account_id),
+        currency="NGN",
+    ) == Decimal("0.00")
+
+    evidence = Invoices.historical_tax_correction_evidence(replacement)
+    assert evidence is not None
+    assert evidence.source_invoice_id == source.id
+    assert evidence.source_payment_allocation_id == result.source_payment_allocation_id
+    assert evidence.payment_id == payment.id
+    assert evidence.subscription_total == Decimal("18812.50")
+    assert evidence.tax_amount == Decimal("15000.00")
+    allocations = tuple(
+        db_session.scalars(
+            select(PaymentAllocation)
+            .where(
+                PaymentAllocation.payment_id == payment.id,
+                PaymentAllocation.is_active.is_(True),
+            )
+            .order_by(PaymentAllocation.amount)
+        ).all()
+    )
+    assert tuple(allocation.amount for allocation in allocations) == (
+        Decimal("18812.50"),
+        Decimal("215000.00"),
+    )
+    assert (
+        db_session.query(AuditEvent)
+        .filter(AuditEvent.action == "correct_historical_invoice_tax")
+        .filter(AuditEvent.entity_id == str(source.id))
+        .count()
+        == 1
+    )
+    assert (
+        db_session.query(EventStore)
+        .filter(
+            EventStore.event_type == EventType.invoice_tax_correction_completed.value
+        )
+        .count()
+        == 1
+    )
+
+    db_session.rollback()
+    replay = correct_historical_invoice_tax(db_session, command, context=context)
+    assert replay.replayed is True
+    assert replay.replacement_invoice_id == result.replacement_invoice_id
+
+
+def test_existing_replacement_preserves_credit_and_records_finance_approval(
+    db_session, subscriber
+):
+    scenario = _scenario(db_session, subscriber)
+    source = db_session.get(Invoice, scenario.source_invoice_id)
+    source_line = db_session.get(InvoiceLine, scenario.source_line_id)
+    payment = db_session.get(Payment, scenario.payment_id)
+    allocation = db_session.scalar(
+        select(PaymentAllocation).where(
+            PaymentAllocation.payment_id == scenario.payment_id,
+            PaymentAllocation.invoice_id == scenario.source_invoice_id,
+            PaymentAllocation.is_active.is_(True),
+        )
+    )
+    settlement = db_session.scalar(
+        select(PaymentSettlement).where(
+            PaymentSettlement.payment_id == scenario.payment_id
+        )
+    )
+    assert source is not None and source_line is not None and payment is not None
+    assert allocation is not None
+    unallocated = db_session.scalar(
+        select(LedgerEntry).where(
+            LedgerEntry.account_id == scenario.account_id,
+            LedgerEntry.payment_id == scenario.payment_id,
+            LedgerEntry.invoice_id.is_(None),
+            LedgerEntry.entry_type == LedgerEntryType.credit,
+            LedgerEntry.source == LedgerSource.payment,
+            LedgerEntry.currency == "NGN",
+            LedgerEntry.is_active.is_(True),
+        )
+    )
+    consumption = db_session.get(LedgerEntry, allocation.consumption_ledger_entry_id)
+    assert unallocated is not None and consumption is not None
+    assert settlement is not None
+    assert settlement.unallocated_ledger_entry_id == unallocated.id
+    unallocated.amount = Decimal("17625.00")
+    db_session.delete(consumption)
+    db_session.delete(settlement)
+    allocation.ledger_entry_id = None
+    allocation.consumption_ledger_entry_id = None
+    payment.amount = Decimal("217625.00")
+    tax_rate = db_session.get(TaxRate, scenario.tax_rate_id)
+    assert tax_rate is not None
+    replacement = Invoice(
+        account_id=scenario.account_id,
+        invoice_number=f"INV-REUSE-{uuid4().hex[:8]}",
+        status=InvoiceStatus.draft,
+        currency="NGN",
+        subtotal=Decimal("200000.00"),
+        tax_total=Decimal("15000.00"),
+        total=Decimal("215000.00"),
+        balance_due=Decimal("215000.00"),
+        issued_at=scenario.query.issued_at,
+        due_at=scenario.query.due_at,
+    )
+    db_session.add(replacement)
+    db_session.flush()
+    replacement_line = InvoiceLine(
+        invoice_id=replacement.id,
+        description="Installation cost",
+        quantity=Decimal("1.000"),
+        unit_price=Decimal("200000.00"),
+        amount=Decimal("200000.00"),
+        tax_rate_id=tax_rate.id,
+        tax_application=TaxApplication.exclusive,
+        tax_rate_snapshot_version=1,
+        tax_rate_code_snapshot=tax_rate.code,
+        tax_rate_percent_snapshot=tax_rate.rate,
+        tax_rate_is_active_snapshot=True,
+        is_active=True,
+    )
+    db_session.add(replacement_line)
+    query = ExistingReplacementTaxCorrectionQuery(
+        account_id=scenario.account_id,
+        source_invoice_id=scenario.source_invoice_id,
+        source_invoice_line_id=scenario.source_line_id,
+        replacement_invoice_id=replacement.id,
+        payment_id=scenario.payment_id,
+        tax_rate_id=scenario.tax_rate_id,
+        ticket_reference="28519",
+        approver_name="Israel Aimola",
+        currency="NGN",
+    )
+    preopening_at = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    opening_at = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+    source.created_at = preopening_at
+    payment.created_at = preopening_at
+    payment.paid_at = preopening_at
+    allocation.created_at = preopening_at
+    for entry in db_session.scalars(
+        select(LedgerEntry).where(LedgerEntry.payment_id == payment.id)
+    ).all():
+        entry.created_at = preopening_at
+        entry.effective_date = preopening_at
+    db_session.commit()
+    opening = _activate_reviewed_opening(
+        db_session,
+        account_id=scenario.account_id,
+        amount=Decimal("17625.00"),
+        occurred_at=opening_at,
+    )
+    authorized_user = SystemUser(
+        first_name="Test",
+        last_name="Finance Operator",
+        display_name="Test Finance Operator",
+        email=f"historical-tax-{uuid4()}@example.com",
+        is_active=True,
+    )
+    db_session.add(authorized_user)
+    db_session.flush()
+    authorized_user_id = authorized_user.id
+    db_session.commit()
+
+    preview = preview_existing_replacement_tax_correction(db_session, query)
+    assert preview.actionable, preview.reason
+    assert preview.source_invoice_id == source.id
+    assert preview.replacement_invoice_id == replacement.id
+    assert preview.replacement_total == Decimal("215000.00")
+    assert preview.current_account_credit == Decimal("17625.00")
+    assert preview.projected_remaining_credit == Decimal("2625.00")
+    assert preview.reconstruct_consumption_evidence is True
+    assert preview.opening_position_id == opening.id
+    assert preview.opening_amount_before == Decimal("17625.00")
+    assert preview.opening_amount_after == Decimal("217625.00")
+    assert preview.preopening_release_fingerprint is not None
+
+    db_session.rollback()
+    command = CorrectExistingReplacementTaxInvoiceCommand(
+        query=query,
+        expected_preview_fingerprint=preview.fingerprint,
+        permission_granted=True,
+        authorized_system_user_id=authorized_user_id,
+    )
+    result = correct_historical_invoice_tax_using_existing_replacement(
+        db_session,
+        command,
+        context=CommandContext.system(
+            actor="test-finance-operator",
+            scope=CORRECTION_SCOPE,
+            reason="Use the reviewed replacement and retain remaining account credit",
+            idempotency_key="existing-replacement-tax-test-key",
+        ),
+    )
+    db_session.commit()
+
+    db_session.refresh(source)
+    db_session.refresh(replacement)
+    db_session.refresh(payment)
+    assert source.status is InvoiceStatus.void
+    assert replacement.status is InvoiceStatus.paid
+    assert replacement.total == Decimal("215000.00")
+    assert payment.amount == Decimal("217625.00")
+    assert result.remaining_credit == Decimal("2625.00")
+    assert PaymentAllocations.available_amount(db_session, str(payment.id)) == Decimal(
+        "2625.00"
+    )
+    settlement = db_session.scalar(
+        select(PaymentSettlement).where(PaymentSettlement.payment_id == payment.id)
+    )
+    assert settlement is not None
+    assert settlement.unallocated_amount == payment.amount
+    assert settlement.unallocated_ledger_entry_id is not None
+    normalized_envelope = db_session.get(
+        LedgerEntry, settlement.unallocated_ledger_entry_id
+    )
+    assert normalized_envelope is not None
+    assert normalized_envelope.amount == payment.amount
+    assert normalized_envelope.affects_customer_position is False
+    assert get_spendable_account_credit_balance(
+        db_session, str(scenario.account_id), currency="NGN"
+    ) == Decimal("2625.00")
+    correction = db_session.scalar(
+        select(CustomerSubledgerOpeningCorrection).where(
+            CustomerSubledgerOpeningCorrection.opening_position_id == opening.id
+        )
+    )
+    assert correction is not None
+    assert correction.previous_opening_amount == Decimal("17625.00")
+    assert correction.corrected_opening_amount == Decimal("217625.00")
+    assert correction.delta == Decimal("200000.00")
+    assert db_session.query(Invoice).filter(Invoice.id == replacement.id).count() == 1
+    evidence = Invoices.existing_tax_replacement_evidence(replacement)
+    assert evidence is not None
+    assert evidence.ticket_reference == "28519"
+    assert evidence.approver_name == "Israel Aimola"
+    assert evidence.remaining_credit == Decimal("2625.00")
+    assert evidence.recorded_at.tzinfo is not None
+    assert evidence.opening_position_id == opening.id
+    assert evidence.opening_correction_id == correction.id
+    assert evidence.opening_correction_posting_group_id is not None
+    audit = db_session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action
+            == "correct_historical_invoice_tax_using_existing_replacement",
+            AuditEvent.entity_id == str(source.id),
+        )
+    )
+    assert audit is not None
+    assert audit.metadata_["opening_position_id"] == str(opening.id)
+    assert audit.metadata_["opening_correction_id"] == str(correction.id)
+    assert audit.metadata_["preopening_release_fingerprint"] == (
+        preview.preopening_release_fingerprint
+    )
+
+    db_session.rollback()
+    replay = correct_historical_invoice_tax_using_existing_replacement(
+        db_session,
+        command,
+        context=CommandContext.system(
+            actor="test-finance-operator",
+            scope=CORRECTION_SCOPE,
+            reason="Replay reviewed VAT correction",
+            idempotency_key="existing-replacement-tax-test-key",
+        ),
+    )
+    assert replay.replayed is True
+    assert replay.replacement_invoice_id == replacement.id
+    assert (
+        db_session.query(CustomerSubledgerOpeningCorrection)
+        .filter(CustomerSubledgerOpeningCorrection.opening_position_id == opening.id)
+        .count()
+        == 1
+    )
+
+
+def test_permission_denial_preserves_all_reviewed_documents(db_session, subscriber):
+    scenario = _scenario(db_session, subscriber)
+    preview = preview_historical_invoice_tax_correction(db_session, scenario.query)
+    db_session.rollback()
+
+    with pytest.raises(HistoricalInvoiceTaxCorrectionError) as exc:
+        correct_historical_invoice_tax(
+            db_session,
+            _command(scenario, preview.fingerprint, permission_granted=False),
+            context=_context(key="historical-tax-permission-denied"),
+        )
+
+    assert exc.value.code.endswith("permission_denied")
+    source = db_session.get(Invoice, scenario.source_invoice_id)
+    subscription = db_session.get(Invoice, scenario.subscription_invoice_id)
+    assert source is not None and source.status is InvoiceStatus.paid
+    assert subscription is not None and subscription.status is InvoiceStatus.draft
+    assert (
+        db_session.query(Invoice)
+        .filter(Invoice.account_id == scenario.account_id)
+        .count()
+        == 3
+    )
+
+
+def test_event_staging_failure_rolls_back_the_complete_correction(
+    db_session, subscriber, monkeypatch
+):
+    scenario = _scenario(db_session, subscriber)
+    preview = preview_historical_invoice_tax_correction(db_session, scenario.query)
+    db_session.rollback()
+
+    def _fail_event(*_args, **_kwargs):
+        raise RuntimeError("outbox unavailable")
+
+    monkeypatch.setattr(
+        "app.services.historical_invoice_tax_corrections.emit_event",
+        _fail_event,
+    )
+    with pytest.raises(RuntimeError, match="outbox unavailable"):
+        correct_historical_invoice_tax(
+            db_session,
+            _command(scenario, preview.fingerprint),
+            context=_context(key="historical-tax-event-rollback"),
+        )
+
+    source = db_session.get(Invoice, scenario.source_invoice_id)
+    subscription = db_session.get(Invoice, scenario.subscription_invoice_id)
+    assert source is not None and source.status is InvoiceStatus.paid
+    assert subscription is not None and subscription.status is InvoiceStatus.draft
+    assert (
+        db_session.query(Invoice)
+        .filter(Invoice.account_id == scenario.account_id)
+        .count()
+        == 3
+    )
+    active_allocation = db_session.scalar(
+        select(PaymentAllocation).where(
+            PaymentAllocation.payment_id == scenario.payment_id,
+            PaymentAllocation.invoice_id == scenario.source_invoice_id,
+            PaymentAllocation.is_active.is_(True),
+        )
+    )
+    assert active_allocation is not None

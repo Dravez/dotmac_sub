@@ -254,6 +254,150 @@ SERVICES: tuple[SOTService, ...] = (
         ),
     ),
     SOTService(
+        name="sales.marketing_conversion_projection",
+        module="app.services.marketing_conversion_projection",
+        owns=("PII-free immutable Fiber conversion milestone projection",),
+        depends_on=(
+            "sales.capture",
+            "sales.lead_lifecycle",
+            "events.dispatcher",
+        ),
+        notes=(
+            "This derived projection never owns Lead, Party, payment, appointment, "
+            "or subscription lifecycle state. It consumes committed events and "
+            "retains one immutable delivery milestone per captured origin and stage."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="PII-free immutable Fiber conversion milestone projection",
+                    role=OwnerRole.PROJECTION_WRITER,
+                    input_names=(
+                        "immutable captured origin evidence",
+                        "committed customer lifecycle event",
+                    ),
+                    canonical_writer="sales.marketing_conversion_projection",
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="immutable captured origin evidence",
+                    owner="sales.capture",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "Party-bound LeadOriginCapture with journey, attribution, "
+                        "landing, submission, and delivery provenance"
+                    ),
+                ),
+                AuthorityInput(
+                    name="committed customer lifecycle event",
+                    owner="events.dispatcher",
+                    kind=AuthorityKind.OBSERVATION,
+                    source=(
+                        "durable lead, coverage, payment, appointment, and "
+                        "subscription lifecycle event"
+                    ),
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.OWNER_MANAGED,
+                boundary=(
+                    "The durable event handler supplies a fresh transaction-free "
+                    "session; one owner command stages milestone and outbound event "
+                    "atomically and commits once."
+                ),
+                locking=(
+                    "The unique origin-stage constraint arbitrates concurrent "
+                    "projection attempts without locking lifecycle owners."
+                ),
+                idempotency=(
+                    "One origin-stage row and deterministic external event UUID make "
+                    "event replay and repeated lifecycle transitions no-ops."
+                ),
+                retries=(
+                    "The durable dispatcher retries the same event; uniqueness and "
+                    "the stable UUID recover the canonical milestone."
+                ),
+            ),
+            errors=ErrorContract(
+                domain_codes=owner_command_boundary_error_codes(
+                    "sales.marketing_conversion_projection"
+                ),
+                mapping_owner="events.webhook_handler",
+                fail_closed_on=(
+                    "missing conversion signing key",
+                    "attributed Lead without a canonical Party",
+                ),
+            ),
+            projections=(
+                ProjectionContract(
+                    name="PII-free immutable Fiber conversion milestone projection",
+                    input_names=(
+                        "immutable captured origin evidence",
+                        "committed customer lifecycle event",
+                    ),
+                    writer="sales.marketing_conversion_projection",
+                    freshness=(
+                        "Projected after the authoritative lifecycle transaction "
+                        "commits and retried from the durable event store."
+                    ),
+                    stale_behavior=(
+                        "Missing delivery remains retryable and never changes the "
+                        "customer lifecycle transaction."
+                    ),
+                    drift_signal=(
+                        "An attributed lifecycle event lacks its unique origin-stage "
+                        "milestone or outbound event."
+                    ),
+                    rebuild_operation=(
+                        "Replay the exact durable lifecycle event; unique origin-stage "
+                        "identity makes the rebuild idempotent."
+                    ),
+                    repair_owner="sales.marketing_conversion_projection",
+                ),
+            ),
+            events=EventContract(
+                event_types=("marketing.conversion_ready",),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility=(
+                    "Version 1 is the exact PII-free marketing conversion payload."
+                ),
+                replay=(
+                    "The immutable origin and committed source event reproduce the "
+                    "same external event UUID and payload."
+                ),
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.COMPLETE,
+                old_owner="aspirational direct marketing callback",
+                new_owner="sales.marketing_conversion_projection",
+                verification=(
+                    "Lifecycle mapping, PII exclusion, deterministic UUID, and "
+                    "idempotent replay tests."
+                ),
+                cutover_gate=(
+                    "Only committed durable lifecycle events invoke this owner; "
+                    "delivery uses an enabled events.deliver.v1 binding."
+                ),
+                fallback_retirement=(
+                    "No lifecycle transaction makes a direct marketing HTTP call."
+                ),
+            ),
+            steward="sales operations",
+            design_refs=(
+                "docs/SOT_RELATIONSHIP_MAP.md",
+                "docs/PARTY_CUSTOMER_LIFECYCLE.md",
+                "docs/designs/MARKETING_SALES_SOT.md",
+            ),
+            test_refs=(
+                "tests/test_marketing_conversion_projection.py",
+                "tests/test_fiber_inquiry_webhook.py",
+                "tests/architecture/test_sot_registry_liveness.py",
+            ),
+        ),
+    ),
+    SOTService(
         name="sales.meta_lead_customer_match",
         module="app.services.sales.meta_lead_ads",
         owns=("Meta Lead customer-match projection",),
@@ -348,8 +492,8 @@ SERVICES: tuple[SOTService, ...] = (
         module="app.services.sales.lead_intake",
         owns=(
             "versioned lead-intake template lifecycle",
-            "sales lead eligibility and invitation lifecycle",
-            "atomic Inbox form to Party and Lead conversion",
+            "classified Inbox sales candidate materialization and invitation lifecycle",
+            "optional Inbox form enrichment and legacy form conversion",
         ),
         depends_on=(
             "ai.intake",
@@ -371,7 +515,9 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "The general ai.intake owner classifies and routes every eligible "
             "customer message. Only its final high-confidence sales result is "
-            "handed to this owner for a single form invitation and Party-first Lead."
+            "handed to this owner through a durable event. This owner atomically "
+            "creates and links the provisional Party-first Lead whether or not a "
+            "form is configured or delivered. A form is optional profile enrichment."
         ),
         contract=ServiceContract(
             concerns=(
@@ -384,7 +530,10 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 ConcernContract(
-                    name="sales lead eligibility and invitation lifecycle",
+                    name=(
+                        "classified Inbox sales candidate materialization and "
+                        "invitation lifecycle"
+                    ),
                     role=OwnerRole.APPLICATION_COORDINATOR,
                     input_names=(
                         "canonical unknown Inbox conversation state",
@@ -394,7 +543,7 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 ConcernContract(
-                    name="atomic Inbox form to Party and Lead conversion",
+                    name="optional Inbox form enrichment and legacy form conversion",
                     role=OwnerRole.APPLICATION_COORDINATOR,
                     input_names=(
                         "validated public Lead intake submission",
@@ -429,7 +578,12 @@ SERVICES: tuple[SOTService, ...] = (
                     name="shared customer intake sales handoff",
                     owner="ai.intake",
                     kind=AuthorityKind.DERIVED_PROJECTION,
-                    source="classified new-connection or coverage intent, customer type and message identity",
+                    source=(
+                        "durable ai.intake_lead_candidate_classified event carrying "
+                        "a final new-connection or coverage classification, customer "
+                        "type, operator tenant identity, message identity, and "
+                        "allowlisted Meta attribution"
+                    ),
                 ),
                 AuthorityInput(
                     name="explicit Lead intake rollout configuration",
@@ -471,14 +625,21 @@ SERVICES: tuple[SOTService, ...] = (
                     name="canonical Lead lifecycle state",
                     owner="sales.lead_lifecycle",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                    source="Party-first Lead and immutable Inbox-form origin",
+                    source=(
+                        "Party-first Lead and immutable Inbox-classification or "
+                        "legacy Inbox-form origin"
+                    ),
                 ),
             ),
             transaction=TransactionContract(
                 mode=TransactionMode.COORDINATOR_MANAGED,
                 boundary="Each mutation enters execute_owner_command once and commits or rolls back atomically.",
                 locking="Templates, conversation, message, invitation, participant and actor are locked before mutation.",
-                idempotency="One assessment per message, one automatic invite per conversation and one completion per token.",
+                idempotency=(
+                    "One deterministic classified Lead per conversation, one "
+                    "assessment per message, one automatic invite per conversation "
+                    "and one completion per token."
+                ),
                 retries="Adapters retry only the complete owner command after rollback.",
             ),
             errors=ErrorContract(
@@ -498,28 +659,42 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.lead_intake.address_outside_nigeria",
                     "sales.lead_intake.state_unresolved",
                     "sales.lead_intake.privacy_acknowledgement_required",
+                    "sales.lead_intake.lead_endpoint_binding_missing",
+                    "sales.lead_intake.provisional_lead_incomplete",
+                    "sales.lead_intake.provisional_representative_missing",
+                    "sales.lead_intake.provisional_contact_missing",
+                    "sales.lead_intake.provisional_contact_mismatch",
                 ),
                 mapping_owner="Inbox, Sales admin and public Lead intake adapters",
                 fail_closed_on=(
                     "known or ambiguous customer identity",
                     "unsupported channel or missing account scope",
-                    "disabled rollout, missing templates or low confidence",
+                    "low-confidence or ambiguous classification",
                     "invalid token or service address",
                 ),
             ),
             events=EventContract(
-                event_types=("lead.created",),
+                event_types=("lead.created", "lead.updated"),
                 schema_version=1,
                 delivery_owner="events.dispatcher",
                 compatibility="No form values, endpoints or tokens are emitted.",
-                replay="Invitation completion and immutable origin reproduce the outcome.",
+                replay=(
+                    "The deterministic conversation Lead id, active link, assessment, "
+                    "invitation completion, and immutable origin reproduce the outcome."
+                ),
             ),
             migration=MigrationContract(
                 state=AuthorityMigrationState.COMPLETE,
                 old_owner="none; additive Inbox-to-Lead capability",
                 new_owner="sales.lead_intake",
-                verification="Focused template, invite, form, handoff and boundary tests.",
-                cutover_gate="Both templates are published and automatic sends are explicitly enabled.",
+                verification=(
+                    "Focused event handoff, classified Lead, optional form "
+                    "enrichment, resolution-gate, and boundary tests."
+                ),
+                cutover_gate=(
+                    "The classified-candidate event consumer and Lead-origin "
+                    "constraint are deployed before the producer is enabled."
+                ),
                 fallback_retirement="No adapter directly creates Lead, Party, invitation or routing state.",
             ),
             steward="sales operations",
@@ -700,6 +875,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.service.lead_won_transition_forbidden",
                     "sales.service.lead_origin_immutable",
                     "sales.service.converted_lead_reseller_immutable",
+                    "sales.lead_authoring.metadata_invalid",
                 ),
                 mapping_owner="admin sales Lead web adapter",
                 fail_closed_on=(
@@ -925,6 +1101,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.quote_authoring.quote_not_found",
                     "sales.quote_authoring.submission_conflict",
                     "sales.quote_authoring.tax_rate_not_active",
+                    "sales.quote_authoring.accepted_status_controlled",
+                    "sales.quote_authoring.lines_required",
                 ),
                 mapping_owner="admin sales Quote form adapter",
                 fail_closed_on=(
@@ -1337,6 +1515,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.quote_payment_review.customer_required",
                     "sales.quote_payment_review.quote_not_found",
                     "sales.quote_payment_review.quote_status_invalid",
+                    "sales.quote_payment_review.price_required",
                     "sales.quote_payment_review.reason_invalid",
                     "sales.quote_payment_review.reason_required",
                     "sales.quote_payment_review.review_not_pending",
@@ -1395,10 +1574,13 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "This read owner resolves authorized Subscriber ownership, active "
             "Draft/Sent state, current staff approval of the exact commercial "
-            "snapshot, expiry, paid-deposit evidence, the authoritative "
-            "deposit amount, and Paystack availability. Quote email delivery "
-            "consumes the same typed query before presenting the immutable PDF "
-            "payment route; GET rendering creates no invoice or payment intent."
+            "snapshot, expiry, paid-deposit evidence from scoped structural "
+            "Invoice links, the authoritative deposit amount, and Paystack "
+            "availability. Customer quote-list reads use the typed settlement "
+            "query so payment state cannot drift from the billing ledger. Quote "
+            "email delivery consumes the same eligibility query before presenting "
+            "the immutable PDF payment route; GET rendering creates no invoice "
+            "or payment intent."
         ),
         contract=ServiceContract(
             concerns=(
@@ -1462,7 +1644,9 @@ SERVICES: tuple[SOTService, ...] = (
                 mode=TransactionMode.READ_ONLY,
                 boundary=(
                     "quote_payment_page resolves authorization, state, amount, "
-                    "settlement, and provider eligibility without writing state"
+                    "settlement, and provider eligibility; the typed settlement "
+                    "query projects paid Invoice evidence for customer Quote lists "
+                    "without writing state"
                 ),
                 locking=(
                     "The query takes no lock; the protected POST command locks and "
@@ -2065,6 +2249,7 @@ SERVICES: tuple[SOTService, ...] = (
             "order waiver decision evidence",
         ),
         depends_on=(
+            "financial.billing_tax_resolution",
             "sales.service",
             "sales.lead_lifecycle",
             "sales.fulfillment",
@@ -2076,6 +2261,11 @@ SERVICES: tuple[SOTService, ...] = (
             "(sales_orders.FUNDING_CONTROLLED_FIELDS); only a caller holding "
             "a sales_orders.FundingAuthority can cross the funding edge that "
             "stages sales_order.funding_satisfied. "
+            "Installation invoices ask financial.billing_tax_resolution for the "
+            "single active TaxRate identity that reproduces the order's recorded "
+            "effective tax percentage; the invoice owner snapshots that rate on "
+            "the installation line and derives the gross receivable. Missing or "
+            "ambiguous rate identity blocks issuance rather than understating tax. "
             "An order waiver is a separate decision and NOT a payment: "
             "SalesOrderWaivers in this same module grants and revokes it, "
             "records "
@@ -2092,7 +2282,10 @@ SERVICES: tuple[SOTService, ...] = (
                 ConcernContract(
                     name="sales order lifecycle",
                     role=OwnerRole.AUTHORITATIVE_RECORD,
-                    input_names=("canonical sales order state",),
+                    input_names=(
+                        "canonical sales order state",
+                        "matched active installation tax rate",
+                    ),
                     canonical_writer="sales.orders",
                 ),
                 ConcernContract(
@@ -2113,6 +2306,15 @@ SERVICES: tuple[SOTService, ...] = (
                     source=(
                         "locked SalesOrder identity, lifecycle, currency, and "
                         "commercial terms"
+                    ),
+                ),
+                AuthorityInput(
+                    name="matched active installation tax rate",
+                    owner="financial.billing_tax_resolution",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "an unambiguous active TaxRate identity matching the "
+                        "SalesOrder's recorded effective tax percentage"
                     ),
                 ),
                 AuthorityInput(
@@ -2156,6 +2358,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.order_waiver.sales_order_not_found",
                     "sales.order_waiver.unregistered_reason_code",
                     "sales.order_waiver.waiver_already_active",
+                    "sales.orders.not_found",
+                    "sales.orders.evidence_controlled_status",
                 ),
                 mapping_owner="sales order adapters",
                 fail_closed_on=(
@@ -2237,7 +2441,10 @@ SERVICES: tuple[SOTService, ...] = (
             "owner commands so each effect commits atomically with its "
             "unique (consumer, event_id) receipt. Funding completion "
             "also stages the structural Phase 1 shadow-contract input; "
-            "it does not write billing records itself."
+            "it does not write billing records itself. Funding records "
+            "payment and installation settlement only: Subscription, "
+            "recurring-invoice, credential, ServiceOrder, add-on and IP "
+            "creation remain explicit staff-owned service setup actions."
         ),
         contract=ServiceContract(
             concerns=(

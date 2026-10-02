@@ -67,7 +67,7 @@ def workqueue_ticket(e2e_db, settings):
     return {
         "ticket_id": ticket.id,
         "title": ticket.title,
-        "system_user_id": system_user.id,
+        "claim_actor_system_user_id": system_user.id,
     }
 
 
@@ -90,6 +90,9 @@ class TestNativeAgentWorkqueue:
         expect(admin_page.get_by_text("Generated", exact=False).first).to_be_visible()
         _assert_rendered_post_forms_have_csrf(admin_page)
 
+        tickets_tab = admin_page.get_by_role("tab", name="Tickets")
+        tickets_tab.click()
+        expect(tickets_tab).to_have_attribute("aria-selected", "true")
         section = admin_page.locator("#workqueue-section-ticket")
         row = section.locator("article").filter(has_text=workqueue_ticket["title"])
         expect(row).to_have_count(1)
@@ -98,12 +101,17 @@ class TestNativeAgentWorkqueue:
         row.locator("summary").click()
         row.get_by_role("button", name="Claim for me").click()
 
+        # The non-HTMX form redirects to the workqueue's default Right now tab.
+        tickets_tab = admin_page.get_by_role("tab", name="Tickets")
+        tickets_tab.click()
+        expect(tickets_tab).to_have_attribute("aria-selected", "true")
         row = section.locator("article").filter(has_text=workqueue_ticket["title"])
         expect(row).to_have_count(1)
         row.locator("summary").click()
         expect(row.get_by_role("button", name="Claim for me")).to_have_count(0)
         row.locator('input[name="confirmed"]').check()
         row.get_by_role("button", name="Complete through owner").click()
+        admin_page.get_by_role("tab", name="Tickets").click()
         expect(
             section.locator("article").filter(has_text=workqueue_ticket["title"])
         ).to_have_count(0)
@@ -111,7 +119,10 @@ class TestNativeAgentWorkqueue:
         e2e_db.expire_all()
         ticket = e2e_db.get(Ticket, workqueue_ticket["ticket_id"])
         assert ticket is not None
-        assert ticket.assigned_to_person_id == workqueue_ticket["system_user_id"]
+        assert (
+            ticket.assigned_to_person_id
+            == workqueue_ticket["claim_actor_system_user_id"]
+        )
         assert ticket.status == TicketStatus.closed.value
 
     def test_narrow_view_keeps_filters_and_primary_action_usable(

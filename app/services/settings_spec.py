@@ -108,6 +108,7 @@ SCHEDULER_BOOLEAN_SETTING_KEYS = frozenset(
         (SettingDomain.network_monitoring, "infra_availability_snapshot_enabled"),
         (SettingDomain.notification, "ncc_report_email_enabled"),
         (SettingDomain.notification, "operational_escalation_delivery_enabled"),
+        (SettingDomain.notification, "zeptomail_delivery_tracking_enabled"),
         (SettingDomain.radius, "connectivity_shadow_audit_enabled"),
         (SettingDomain.radius, "ip_consistency_audit_enabled"),
         (SettingDomain.radius, "radius_sync_enabled"),
@@ -182,7 +183,6 @@ SCHEDULER_ENV_BOOTSTRAP_SETTING_KEYS = frozenset(
         (SettingDomain.scheduler, "acs_task_time_limit_seconds"),
         (SettingDomain.scheduler, "beat_max_loop_interval"),
         (SettingDomain.scheduler, "beat_refresh_seconds"),
-        (SettingDomain.scheduler, "crm_ticket_pull_interval_minutes"),
         (SettingDomain.scheduler, "long_task_soft_time_limit_seconds"),
         (SettingDomain.scheduler, "long_task_time_limit_seconds"),
         (SettingDomain.scheduler, "result_expires_seconds"),
@@ -982,6 +982,67 @@ SETTINGS_SPECS: list[SettingSpec] = [
     ),
     SettingSpec(
         domain=SettingDomain.notification,
+        key="zeptomail_delivery_tracking_enabled",
+        env_var="ZEPTOMAIL_DELIVERY_TRACKING_ENABLED",
+        value_type=SettingValueType.boolean,
+        default=False,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_delivery_tracking_interval_seconds",
+        env_var="ZEPTOMAIL_DELIVERY_TRACKING_INTERVAL_SECONDS",
+        value_type=SettingValueType.integer,
+        default=30,
+        min_value=30,
+        max_value=3600,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_api_base_url",
+        env_var="ZEPTOMAIL_API_BASE_URL",
+        value_type=SettingValueType.string,
+        default="https://api.zeptomail.com/v1.1",
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_accounts_base_url",
+        env_var="ZEPTOMAIL_ACCOUNTS_BASE_URL",
+        value_type=SettingValueType.string,
+        default="https://accounts.zoho.com",
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_oauth_client_id",
+        env_var="ZEPTOMAIL_OAUTH_CLIENT_ID",
+        value_type=SettingValueType.string,
+        default=None,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_oauth_client_secret",
+        env_var="ZEPTOMAIL_OAUTH_CLIENT_SECRET",
+        value_type=SettingValueType.string,
+        default=None,
+        is_secret=True,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_oauth_refresh_token",
+        env_var="ZEPTOMAIL_OAUTH_REFRESH_TOKEN",
+        value_type=SettingValueType.string,
+        default=None,
+        is_secret=True,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
+        key="zeptomail_webhook_authentication_key",
+        env_var="ZEPTOMAIL_WEBHOOK_AUTHENTICATION_KEY",
+        value_type=SettingValueType.string,
+        default=None,
+        is_secret=True,
+    ),
+    SettingSpec(
+        domain=SettingDomain.notification,
         key="notification_quiet_hours_start",
         env_var="NOTIFICATION_QUIET_HOURS_START",
         value_type=SettingValueType.string,
@@ -1587,23 +1648,6 @@ SETTINGS_SPECS: list[SettingSpec] = [
         min_value=1,
         max_value=1000,
         label="Durable event outbox dispatch batch size",
-    ),
-    SettingSpec(
-        domain=SettingDomain.scheduler,
-        key="crm_ticket_pull_enabled",
-        env_var="CRM_TICKET_PULL_ENABLED",
-        value_type=SettingValueType.boolean,
-        default=False,
-        label="CRM Ticket Pull Enabled",
-    ),
-    SettingSpec(
-        domain=SettingDomain.scheduler,
-        key="crm_ticket_pull_interval_minutes",
-        env_var="CRM_TICKET_PULL_INTERVAL_MINUTES",
-        value_type=SettingValueType.integer,
-        default=5,
-        min_value=1,
-        label="CRM Ticket Pull Interval (minutes)",
     ),
     SettingSpec(
         domain=SettingDomain.scheduler,
@@ -4194,6 +4238,16 @@ SETTINGS_SPECS: list[SettingSpec] = [
         max_value=3600,
         label="Team Inbox queue-notification due-work scan interval",
     ),
+    SettingSpec(
+        domain=SettingDomain.comms,
+        key="inbox_completion_override_grant_window_hours",
+        env_var="INBOX_COMPLETION_OVERRIDE_GRANT_WINDOW_HOURS",
+        value_type=SettingValueType.integer,
+        default=24,
+        min_value=1,
+        max_value=168,
+        label="Team Inbox legacy completion-override grant validity window",
+    ),
     # ============== Notification Domain: Email Settings ==============
     SettingSpec(
         domain=SettingDomain.notification,
@@ -5682,7 +5736,6 @@ _RETIRED_FEATURE_ALIAS_SPECS = frozenset(
         (SettingDomain.usage, "radius_session_reap_enabled"),
         (SettingDomain.usage, "usage_warning_enabled"),
         (SettingDomain.usage, "fup_submonthly_rules_enabled"),
-        (SettingDomain.scheduler, "crm_ticket_pull_enabled"),
         (SettingDomain.radius, "coa_enabled"),
         (SettingDomain.network, "mikrotik_session_kill_enabled"),
         (SettingDomain.network, "mikrotik_api_session_kick_enabled"),
@@ -6009,8 +6062,9 @@ def normalize_for_db(
     if spec.value_type == SettingValueType.integer:
         parsed = _coerce_int_value(value)
         if parsed is None:
-            # Should be prevented by validation in callers, but avoid crashing on bad inputs.
-            return None, value
+            # Integer settings are stored in the non-JSON column. Preserve
+            # that shape even for unexpected internal values.
+            return str(value), None
         return str(parsed), None
     if spec.value_type == SettingValueType.string:
         return str(value), None

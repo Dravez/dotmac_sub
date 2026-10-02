@@ -54,6 +54,7 @@ class PostingCommandKind(enum.Enum):
     refund = "refund"
     adjustment = "adjustment"
     opening_position = "opening_position"
+    opening_position_correction = "opening_position_correction"
     reversal = "reversal"
 
 
@@ -91,6 +92,7 @@ class PostingSourceKind(enum.Enum):
     prepaid_opening_funding_consumption = "prepaid_opening_funding_consumption"
     prepaid_funding_baseline = "prepaid_funding_baseline"
     customer_subledger_opening_position = "customer_subledger_opening_position"
+    customer_subledger_opening_correction = "customer_subledger_opening_correction"
 
 
 class PositionEffectKind(enum.Enum):
@@ -145,6 +147,11 @@ class CustomerSubledgerOpeningPosition(Base):
             "opening_delta = legacy_position - shadow_position_before",
             name="ck_customer_subledger_opening_exact_delta",
         ),
+        CheckConstraint(
+            "(verification_run_id IS NOT NULL AND native_repair_id IS NULL) OR "
+            "(verification_run_id IS NULL AND native_repair_id IS NOT NULL)",
+            name="ck_customer_subledger_opening_one_provenance",
+        ),
         Index(
             "ix_customer_subledger_opening_verification_run",
             "verification_run_id",
@@ -154,10 +161,14 @@ class CustomerSubledgerOpeningPosition(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    verification_run_id: Mapped[uuid.UUID] = mapped_column(
+    verification_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("billing_cutover_verification_runs.id", ondelete="RESTRICT"),
-        nullable=False,
+    )
+    native_repair_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("native_prepaid_opening_repairs.id", ondelete="RESTRICT"),
+        unique=True,
     )
     baseline_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -177,6 +188,176 @@ class CustomerSubledgerOpeningPosition(Base):
     evidence_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     review_reference: Mapped[str] = mapped_column(Text, nullable=False)
     captured_by: Mapped[str] = mapped_column(String(160), nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class NativePrepaidOpeningRepair(Base):
+    """Append-only evidence for one omitted Sub-native funding opening."""
+
+    __tablename__ = "native_prepaid_opening_repairs"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "currency", name="uq_native_prepaid_opening_account_currency"
+        ),
+        UniqueConstraint(
+            "idempotency_key", name="uq_native_prepaid_opening_idempotency"
+        ),
+        CheckConstraint(
+            "length(currency) = 3 AND currency = upper(currency)",
+            name="ck_native_prepaid_opening_currency",
+        ),
+        CheckConstraint(
+            "source_classification = 'native_after_handoff'",
+            name="ck_native_prepaid_opening_source_classification",
+        ),
+        CheckConstraint(
+            "splynx_transaction_count = 0",
+            name="ck_native_prepaid_opening_no_splynx_transactions",
+        ),
+        CheckConstraint(
+            "length(cutover_evidence_fingerprint) = 64 AND "
+            "length(source_identity_fingerprint) = 64 AND "
+            "length(native_evidence_fingerprint) = 64 AND "
+            "length(shadow_evidence_fingerprint) = 64 AND "
+            "length(preview_fingerprint) = 64 AND "
+            "length(evidence_sha256) = 64 AND evidence_sha256 = lower(evidence_sha256)",
+            name="ck_native_prepaid_opening_hashes",
+        ),
+        Index(
+            "ix_native_prepaid_opening_cutover_batch",
+            "original_cutover_batch_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("subscribers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    original_cutover_batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("prepaid_funding_reconstruction_batches.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_classification: Mapped[str] = mapped_column(String(40), nullable=False)
+    account_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    legacy_handoff_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    original_cutover_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    calculated_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    splynx_transaction_count: Mapped[int] = mapped_column(nullable=False)
+    native_event_count: Mapped[int] = mapped_column(nullable=False)
+    cutover_evidence_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    source_identity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    native_evidence_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    shadow_evidence_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    preview_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    finance_approver_system_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("system_users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    finance_approver_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    ticket_reference: Mapped[str] = mapped_column(String(120), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator_system_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("system_users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    applied_by: Mapped[str] = mapped_column(String(160), nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class CustomerSubledgerOpeningCorrection(Base):
+    """Append-only, reviewed correction to an immutable opening position."""
+
+    __tablename__ = "customer_subledger_opening_corrections"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_subledger_opening_correction_key"),
+        CheckConstraint(
+            "length(currency) = 3 AND currency = upper(currency)",
+            name="ck_subledger_opening_correction_currency",
+        ),
+        CheckConstraint("delta <> 0", name="ck_subledger_opening_correction_nonzero"),
+        CheckConstraint(
+            "corrected_opening_amount = previous_opening_amount + delta",
+            name="ck_subledger_opening_correction_exact_delta",
+        ),
+        CheckConstraint(
+            "length(preview_fingerprint) = 64",
+            name="ck_subledger_opening_correction_hash",
+        ),
+        Index("ix_subledger_opening_correction_opening", "opening_position_id"),
+        Index("ix_subledger_opening_correction_account", "account_id", "currency"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    opening_position_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("customer_subledger_opening_positions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("subscribers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    previous_opening_amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False
+    )
+    corrected_opening_amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False
+    )
+    delta: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    review_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    preview_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    applied_by: Mapped[str] = mapped_column(String(160), nullable=False)
+    authorized_system_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("system_users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     correlation_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False

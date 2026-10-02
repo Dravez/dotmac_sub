@@ -8,11 +8,13 @@ silent repoints or attribution replacement.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.comms_campaign import Campaign, CampaignChannel, CampaignRecipient
@@ -54,6 +56,7 @@ _METHOD_PLATFORM = {
     LeadCaptureMethod.referral.value: LeadSourcePlatform.referral.value,
     LeadCaptureMethod.reviewed_import.value: LeadSourcePlatform.legacy_import.value,
     LeadCaptureMethod.inbox_form.value: LeadSourcePlatform.team_inbox.value,
+    LeadCaptureMethod.inbox_classification.value: LeadSourcePlatform.team_inbox.value,
 }
 _PLATFORM_LEAD_SOURCES = {
     LeadSourcePlatform.meta.value: {"Facebook Ads", "Instagram Ads"},
@@ -75,6 +78,8 @@ _CAPTURE_FIELDS = (
     "lead_source",
     "integration_inbox_id",
     "source_interaction_id",
+    "journey_id",
+    "customer_reference",
     "capture_fingerprint",
     "campaign_id",
     "campaign_recipient_id",
@@ -89,6 +94,7 @@ _CAPTURE_FIELDS = (
     "utm_content",
     "utm_term",
     "landing_path",
+    "submitted_at",
     "capture_source",
     "capture_reason",
 )
@@ -239,6 +245,52 @@ def create_party_lead(
         lead_source=lead_source,
         capture=origin_capture,
     )
+    return lead
+
+
+@dataclass(frozen=True, slots=True)
+class LeadIntakeProfileEnrichment:
+    lead_id: UUID
+    party_id: UUID
+    invitation_id: UUID
+    title: str
+    region: str
+    address: str
+    latitude: float
+    longitude: float
+    privacy_acknowledged_at: datetime
+    representative_party_id: UUID | None
+
+
+def enrich_lead_intake_profile(
+    db: Session, command: LeadIntakeProfileEnrichment
+) -> Lead:
+    """Apply optional form details to an existing Party-first Inbox Lead."""
+
+    lead = db.scalar(select(Lead).where(Lead.id == command.lead_id).with_for_update())
+    if lead is None or lead.party_id != command.party_id:
+        raise LeadLifecycleError("The provisional Lead and Party no longer align")
+    lead.title = _required(command.title, "title")
+    lead.region = _required(command.region, "region")
+    lead.address = _required(command.address, "address")
+    metadata = dict(lead.metadata_ or {})
+    metadata.update(
+        {
+            "profile_completeness": "form_enriched",
+            "lead_intake_invitation_id": str(command.invitation_id),
+            "latitude": command.latitude,
+            "longitude": command.longitude,
+            "privacy_acknowledged_at": command.privacy_acknowledged_at.isoformat(),
+            "marketing_consent_inferred": False,
+            "representative_party_id": (
+                str(command.representative_party_id)
+                if command.representative_party_id
+                else None
+            ),
+        }
+    )
+    lead.metadata_ = metadata
+    db.flush()
     return lead
 
 
@@ -405,6 +457,8 @@ def _capture_values(payload: dict[str, Any], *, lead_source: str) -> dict[str, A
         "lead_source": lead_source,
         "integration_inbox_id": payload.get("integration_inbox_id"),
         "source_interaction_id": _optional(payload.get("source_interaction_id")),
+        "journey_id": payload.get("journey_id"),
+        "customer_reference": _optional(payload.get("customer_reference")),
         "capture_fingerprint": _optional(payload.get("capture_fingerprint")),
         "campaign_id": payload.get("campaign_id"),
         "campaign_recipient_id": payload.get("campaign_recipient_id"),
@@ -419,6 +473,7 @@ def _capture_values(payload: dict[str, Any], *, lead_source: str) -> dict[str, A
         "utm_content": _optional(payload.get("utm_content")),
         "utm_term": _optional(payload.get("utm_term")),
         "landing_path": landing_path,
+        "submitted_at": payload.get("submitted_at"),
         "capture_source": _required(payload.get("capture_source"), "capture_source"),
         "capture_reason": _required(payload.get("capture_reason"), "capture_reason"),
     }

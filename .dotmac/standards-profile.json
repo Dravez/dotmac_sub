@@ -30,6 +30,8 @@
       "adapter_paths": [],
       "drift_test_paths": [
         "tests/architecture/test_sot_manifest_contracts.py",
+        "tests/architecture/test_sot_manifest_out_of_band_evidence.py",
+        "tests/architecture/test_out_of_band_evidence_ratchet.py",
         "tests/architecture/test_sot_registry_integrity.py"
       ]
     }
@@ -75,11 +77,11 @@
   },
   "external_connector_surface": {
     "baselines": {
-      "outbound_transport": 43,
+      "outbound_transport": 44,
       "webhook_surface": 4,
       "provider_credential": 3,
-      "connector_task": 18,
-      "sync_checkpoint": 11,
+      "connector_task": 17,
+      "sync_checkpoint": 10,
       "delivery_retry": 7
     },
     "conserved_exclusions": [
@@ -105,25 +107,19 @@
         "path": "tests/test_crm_client_resilience.py",
         "symbol": "<module>",
         "category": "outbound_transport",
-        "fingerprint": "58bc472074bb7bec95639e2575065066c05d8043983fa49bb10f3858d29320b0"
-      },
-      {
-        "path": "tests/test_crm_ticket_pull.py",
-        "symbol": "test_latest_crm_updated_at_watermark",
-        "category": "sync_checkpoint",
-        "fingerprint": "03c45fad7c1a26e5c6ade4222d19ad0190ce37795403d89308d1c3fd23143aeb"
+        "fingerprint": "974bab075ee7f50f5ca145ea60ed80a48b5ae9effd3ac222a0650b5b8db0af57"
       },
       {
         "path": "tests/test_email_services.py",
         "symbol": "test_send_email_auth_failure_logs",
         "category": "outbound_transport",
-        "fingerprint": "e21f75d7c74d8996bad3d29f4876bcce708c336102a88f3bd2474350f929b10e"
+        "fingerprint": "d683e108d08534885850232a8391432cb4ac57e01aa93845a184b09f2c238c2a"
       },
       {
         "path": "tests/test_email_services.py",
         "symbol": "test_smtp_connection_auth_failure_logs",
         "category": "outbound_transport",
-        "fingerprint": "e21f75d7c74d8996bad3d29f4876bcce708c336102a88f3bd2474350f929b10e"
+        "fingerprint": "d683e108d08534885850232a8391432cb4ac57e01aa93845a184b09f2c238c2a"
       },
       {
         "path": "tests/test_genieacs_services.py",
@@ -138,6 +134,12 @@
         "fingerprint": "358e9784cd774b9cdd9e693c57365fc3842862f6cf7d8653bf3c4fcf53a13959"
       },
       {
+        "path": "tests/test_meta_capi_fiber_leads.py",
+        "symbol": "<module>",
+        "category": "outbound_transport",
+        "fingerprint": "8128bc3956ebaff578adbfe2de1fec12f415e084450036187409e8c86beaf8ed"
+      },
+      {
         "path": "tests/test_meta_oauth.py",
         "symbol": "test_provider_rejection_records_only_sanitized_evidence",
         "category": "outbound_transport",
@@ -147,7 +149,7 @@
         "path": "tests/test_nextcloud_talk_staff_notifications.py",
         "symbol": "<module>",
         "category": "delivery_retry",
-        "fingerprint": "2ad03d19e91abbbd467037d4672ba61b4433b2533ead11b04955f1873b6017af"
+        "fingerprint": "e6a540dee1e6ddfb5448aef0a667aef1f3b7bf54e955fbcd9bd7ae86e2dbd315"
       },
       {
         "path": "tests/test_router_management_connection.py",
@@ -159,13 +161,13 @@
         "path": "tests/test_team_inbox_meta_social_webhook.py",
         "symbol": "<module>",
         "category": "provider_credential",
-        "fingerprint": "2cfb33c493921333d14bb1a84b0426ad12e15e535a8f752d0add3ff9e9d33002"
+        "fingerprint": "24ef8ff0b3d4670d3cc08efed8d4b43a85d4824b88e5f78d30bc08436e58cde0"
       },
       {
         "path": "tests/test_team_inbox_smtp_runtime.py",
         "symbol": "test_readiness_uses_smtp_noop",
         "category": "outbound_transport",
-        "fingerprint": "2df88d6ae0dba969bd2097a5459861379cf68d42b8542974efb0382c0a92e7f7"
+        "fingerprint": "93abe275aa5f06c2edbe1286e2e1918d61e9cc2a4888101c70134c7cc8bc08b9"
       },
       {
         "path": "tests/test_team_inbox_whatsapp_webhook.py",

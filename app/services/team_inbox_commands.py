@@ -60,9 +60,11 @@ from app.schemas.sales import (
 )
 from app.services import (
     ai_conversation_ownership,
+    conversation_lead_relationships,
     inbox_sla,
     team_inbox_assignment,
     team_inbox_contact_links,
+    team_inbox_customer_completion_policy,
     team_inbox_field_job,
     team_inbox_filters,
     team_inbox_media,
@@ -86,6 +88,7 @@ from app.services.domain_errors import DomainError
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
+    current_command_context,
     execute_owner_command,
     execute_owner_savepoint,
     owner_command_active,
@@ -93,6 +96,8 @@ from app.services.owner_commands import (
 from app.services.sales import account_conversion
 from app.services.sales import capture as sales_capture
 from app.services.validation_api import validate_email_format
+from app.services.workqueue.permissions import WorkqueuePrincipal
+from app.services.workqueue.scope import WorkqueuePermissionError, get_workqueue_scope
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -159,6 +164,50 @@ class ConversationAssignedToAnotherAgentError(InboxCommandError):
 class MessageNotFoundError(InboxCommandError):
     def __init__(self, message: str = "Message not found.") -> None:
         super().__init__(message, suffix="message_not_found")
+
+
+def _coerce_resolution_reason(
+    value: str | None,
+) -> team_inbox_status.InboxResolutionReason | None:
+    clean = str(value or "").strip().lower()
+    if not clean:
+        return None
+    try:
+        return team_inbox_status.InboxResolutionReason(clean)
+    except ValueError as exc:
+        raise InboxCommandError("Unsupported resolution reason.") from exc
+
+
+def _require_conversation_team_scope(
+    db: Session,
+    *,
+    conversation: InboxConversation,
+    principal: WorkqueuePrincipal,
+) -> None:
+    """Enforce the existing operational team scope for Inbox mutations."""
+
+    if principal.is_admin:
+        return
+    try:
+        scope = get_workqueue_scope(db, principal)
+    except WorkqueuePermissionError as exc:
+        raise InboxCommandError(
+            "This conversation is outside your permitted Team Inbox scope.",
+            suffix="conversation_out_of_scope",
+        ) from exc
+    team_ids = {
+        link.service_team_id
+        for link in conversation.team_links
+        if link.is_active and link.service_team_id is not None
+    }
+    if conversation.primary_service_team_id is not None:
+        team_ids.add(conversation.primary_service_team_id)
+    if not team_ids or not any(scope.allows_team(team_id) for team_id in team_ids):
+        raise InboxCommandError(
+            "This conversation is outside your permitted Team Inbox scope.",
+            suffix="conversation_out_of_scope",
+            details={"conversation_id": str(conversation.id)},
+        )
 
 
 class InboxCommandRejected(InboxCommandError):
@@ -266,11 +315,64 @@ class CreateInternalNoteOutcome:
     mentioned_user_ids: tuple[UUID, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class LinkContactCommand:
+    context: CommandContext
+    conversation_id: UUID
+    target: team_inbox_contact_links.ContactLinkTarget
+    actor_person_id: UUID | None
+    note: str | None = None
+    expected_active_link_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ContactLinkOutcome:
-    conversation_id: str
+    conversation_id: UUID
     channel_type: str
-    target: str
+    normalized_contact: str
+    target: team_inbox_contact_links.ContactLinkTarget
+    contact_link_id: UUID
+    previous_link_ids_deactivated: tuple[UUID, ...]
+    repaired_conversation_ids: tuple[UUID, ...]
+    disposition: team_inbox_contact_links.ContactLinkDisposition
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRepresentedCustomerCommand:
+    context: CommandContext
+    conversation_id: UUID
+    participant_id: UUID
+    subscriber_id: UUID
+    actor_person_id: UUID | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRepresentedCustomerOutcome:
+    conversation_id: UUID
+    participant_id: UUID
+    subscriber_id: UUID
+    already_linked: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRepresentedLeadCommand:
+    context: CommandContext
+    conversation_id: UUID
+    participant_id: UUID
+    lead_id: UUID
+    actor_person_id: UUID | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRepresentedLeadOutcome:
+    conversation_id: UUID
+    participant_id: UUID
+    lead_id: UUID
+    party_id: UUID
+    already_linked: bool
 
 
 @dataclass(frozen=True)
@@ -1392,6 +1494,7 @@ def refresh_agent_presence(
 def bulk_action(
     db: Session,
     *,
+    principal: WorkqueuePrincipal,
     conversation_ids: Sequence[str | UUID],
     action: str,
     status_value: str | None = None,
@@ -1401,14 +1504,19 @@ def bulk_action(
     assigned_person_id: str | UUID | None = None,
     auto_assign: bool = True,
     actor_person_id: str | UUID | None = None,
+    resolution_reason: str | None = None,
 ) -> BulkActionOutcome:
     if not conversation_ids:
         raise InboxCommandError("Select at least one conversation.")
+    typed_resolution_reason = _coerce_resolution_reason(resolution_reason)
 
     def execute() -> BulkActionOutcome:
         for raw_conversation_id in conversation_ids:
             conversation = _active_conversation(
                 db, raw_conversation_id, for_update=True
+            )
+            _require_conversation_team_scope(
+                db, conversation=conversation, principal=principal
             )
             _require_human_control(
                 db,
@@ -1421,6 +1529,7 @@ def bulk_action(
                 conversation_ids=conversation_ids,
                 status_value=status_value or "",
                 actor_person_id=actor_person_id,
+                resolution_reason=typed_resolution_reason,
             )
             verb = "Updated"
             noun = "conversation statuses"
@@ -1458,7 +1567,31 @@ def bulk_action(
             raise InboxCommandError("Unsupported bulk action.")
         updated = result.get("updated")
         count = len(updated) if isinstance(updated, list) else 0
-        return BulkActionOutcome(message=f"{verb} {count} {noun}.")
+        message = f"{verb} {count} {noun}."
+        blocked = result.get("blocked")
+        if isinstance(blocked, list) and blocked:
+            summaries: list[str] = []
+            for item in blocked:
+                if not isinstance(item, dict):
+                    continue
+                details = item.get("details")
+                missing = (
+                    details.get("missing_fields") if isinstance(details, dict) else None
+                )
+                labels = (
+                    ", ".join(str(field).replace("_", " ").title() for field in missing)
+                    if isinstance(missing, list)
+                    else "identity requirements"
+                )
+                summaries.append(
+                    f"{item.get('conversation_id', 'conversation')} ({labels})"
+                )
+            message += (
+                f" Skipped {len(blocked)} blocked conversation(s): "
+                + "; ".join(summaries)
+                + "."
+            )
+        return BulkActionOutcome(message=message)
 
     return _commit(db, execute)
 
@@ -1899,52 +2032,246 @@ def take_over_conversation(
     return _commit(db, execute, context=command.context)
 
 
-def link_contact(
-    db: Session,
-    *,
-    conversation_id: str | UUID,
-    target_type: str,
-    subscriber_id: str | UUID | None = None,
-    reseller_id: str | UUID | None = None,
-    subscriber_id_manual: str | UUID | None = None,
-    reseller_id_manual: str | UUID | None = None,
-    actor_person_id: str | UUID | None = None,
-    note: str | None = None,
-) -> ContactLinkOutcome:
+def link_contact(db: Session, command: LinkContactCommand) -> ContactLinkOutcome:
     def action() -> ContactLinkOutcome:
-        conversation = _active_conversation(db, conversation_id)
+        conversation, _normalized_contact = (
+            team_inbox_contact_links.lock_conversation_contact_route(
+                db, conversation_id=command.conversation_id
+            )
+        )
         _require_human_control(
             db,
             conversation,
             mutation=ai_conversation_ownership.HumanConversationMutation.contact,
+            for_update=False,
         )
-        selected_subscriber = (
-            str(subscriber_id_manual or subscriber_id or "").strip() or None
-        )
-        selected_reseller = str(reseller_id_manual or reseller_id or "").strip() or None
-        if target_type == "subscriber":
-            selected_reseller = None
-        elif target_type == "reseller":
-            selected_subscriber = None
-        else:
-            raise InboxCommandError(
-                "Choose whether this contact belongs to a subscriber or reseller."
-            )
         result = team_inbox_contact_links.link_conversation_contact(
             db,
-            conversation=conversation,
-            subscriber_id=selected_subscriber,
-            reseller_id=selected_reseller,
-            linked_by_person_id=actor_person_id,
-            note=note,
+            team_inbox_contact_links.LinkConversationContactCommand(
+                context=command.context,
+                conversation_id=conversation.id,
+                target=command.target,
+                actor_person_id=command.actor_person_id,
+                source=(
+                    team_inbox_contact_links.ContactLinkSource.manual_inbox_conversation
+                ),
+                note=command.note,
+                expected_active_link_id=command.expected_active_link_id,
+            ),
+        )
+        actor_uuid = command.actor_person_id
+        selected_customer = (
+            db.get(Subscriber, result.subscriber_id) if result.subscriber_id else None
+        )
+        stage_audit_event(
+            db,
+            action="inbox_contact_identity_selected",
+            entity_type="inbox_conversation",
+            entity_id=str(conversation.id),
+            actor=AuditActor(
+                actor_type=(
+                    AuditActorType.user if actor_uuid else AuditActorType.service
+                ),
+                actor_id=(str(actor_uuid) if actor_uuid else OWNER),
+            ),
+            metadata={
+                "decision_source": "reviewed_inbox_selection",
+                "selected_customer_id": (
+                    str(result.subscriber_id) if result.subscriber_id else None
+                ),
+                "selected_reseller_id": (
+                    str(result.reseller_id) if result.reseller_id else None
+                ),
+                "selected_party_id": (
+                    str(selected_customer.party_id)
+                    if selected_customer is not None
+                    and selected_customer.party_id is not None
+                    else None
+                ),
+                "contact_link_id": str(result.contact_link_id),
+                "disposition": result.disposition.value,
+                "replayed": result.replayed,
+            },
         )
         return ContactLinkOutcome(
-            conversation_id=str(conversation.id),
+            conversation_id=conversation.id,
             channel_type=conversation.channel_type,
-            target="subscriber" if result.subscriber_id else "reseller",
+            normalized_contact=result.normalized_contact,
+            target=command.target,
+            contact_link_id=result.contact_link_id,
+            previous_link_ids_deactivated=result.previous_link_ids_deactivated,
+            repaired_conversation_ids=result.repaired_conversation_ids,
+            disposition=result.disposition,
+            replayed=result.replayed,
         )
 
-    return _commit(db, action)
+    return _commit(db, action, context=command.context)
+
+
+def link_represented_customer(
+    db: Session,
+    command: LinkRepresentedCustomerCommand,
+) -> LinkRepresentedCustomerOutcome:
+    """Record that a participant speaks for this conversation's Customer."""
+
+    def action() -> LinkRepresentedCustomerOutcome:
+        conversation = _active_conversation(
+            db,
+            command.conversation_id,
+            for_update=True,
+        )
+        _require_human_control(
+            db,
+            conversation,
+            mutation=ai_conversation_ownership.HumanConversationMutation.contact,
+            for_update=False,
+        )
+        try:
+            result = team_inbox_contact_links.associate_represented_customer(
+                db,
+                team_inbox_contact_links.AssociateRepresentedCustomerCommand(
+                    conversation_id=conversation.id,
+                    participant_id=command.participant_id,
+                    subscriber_id=command.subscriber_id,
+                    actor_person_id=command.actor_person_id,
+                    reason=command.reason,
+                ),
+            )
+        except ValueError as exc:
+            raise InboxCommandRejected(
+                str(exc), conversation_id=conversation.id
+            ) from exc
+        actor_uuid = command.actor_person_id
+        if not result.already_linked:
+            stage_audit_event(
+                db,
+                action="inbox_represented_customer_selected",
+                entity_type="inbox_conversation",
+                entity_id=str(conversation.id),
+                actor=AuditActor(
+                    actor_type=(
+                        AuditActorType.user if actor_uuid else AuditActorType.service
+                    ),
+                    actor_id=str(actor_uuid) if actor_uuid else OWNER,
+                ),
+                metadata={
+                    "decision_source": "reviewed_conversation_representation",
+                    "representative_participant_id": str(result.participant_id),
+                    "represented_customer_id": str(result.subscriber_id),
+                    "reason": command.reason.strip(),
+                    "created_global_contact_route": False,
+                },
+            )
+        return LinkRepresentedCustomerOutcome(
+            conversation_id=result.conversation_id,
+            participant_id=result.participant_id,
+            subscriber_id=result.subscriber_id,
+            already_linked=result.already_linked,
+        )
+
+    return _commit(db, action, context=command.context)
+
+
+def link_represented_lead(
+    db: Session,
+    command: LinkRepresentedLeadCommand,
+) -> LinkRepresentedLeadOutcome:
+    """Record that a participant speaks for this conversation's Lead."""
+
+    def action() -> LinkRepresentedLeadOutcome:
+        conversation = _active_conversation(
+            db,
+            command.conversation_id,
+            for_update=True,
+        )
+        _require_human_control(
+            db,
+            conversation,
+            mutation=ai_conversation_ownership.HumanConversationMutation.contact,
+            for_update=False,
+        )
+        if conversation.subscriber_id is not None:
+            raise InboxCommandRejected(
+                "This conversation is already linked to a Customer.",
+                conversation_id=conversation.id,
+            )
+        lead = db.get(Lead, command.lead_id)
+        if (
+            lead is None
+            or not lead.is_active
+            or lead.party_id is None
+            or lead.status in (LeadStatus.won.value, LeadStatus.lost.value)
+        ):
+            raise InboxCommandRejected(
+                "Choose an active Party-backed Lead.",
+                conversation_id=conversation.id,
+            )
+        try:
+            participant = team_inbox_participants.mark_representative(
+                db,
+                team_inbox_participants.MarkRepresentativeCommand(
+                    conversation_id=conversation.id,
+                    participant_id=command.participant_id,
+                    actor_person_id=command.actor_person_id,
+                    source=OWNER,
+                    reason=command.reason,
+                ),
+            )
+            link = conversation_lead_relationships.link_conversation_lead_participant(
+                db,
+                conversation_lead_relationships.ConversationLeadLinkCommand(
+                    context=command.context,
+                    conversation_id=conversation.id,
+                    lead_id=lead.id,
+                    party_id=lead.party_id,
+                    actor_person_id=command.actor_person_id,
+                    source=(
+                        conversation_lead_relationships.ConversationLeadLinkSource.reviewed_selection
+                    ),
+                    reason="Representative identified the selected existing Lead",
+                ),
+            )
+        except (ValueError, DomainError) as exc:
+            raise InboxCommandRejected(
+                str(exc), conversation_id=conversation.id
+            ) from exc
+        already_linked = participant.already_classified and link.replayed
+        if not already_linked:
+            stage_audit_event(
+                db,
+                action="inbox_represented_lead_selected",
+                entity_type="inbox_conversation",
+                entity_id=str(conversation.id),
+                actor=AuditActor(
+                    actor_type=(
+                        AuditActorType.user
+                        if command.actor_person_id
+                        else AuditActorType.service
+                    ),
+                    actor_id=(
+                        str(command.actor_person_id)
+                        if command.actor_person_id
+                        else OWNER
+                    ),
+                ),
+                metadata={
+                    "decision_source": "reviewed_conversation_representation",
+                    "representative_participant_id": str(participant.participant_id),
+                    "represented_lead_id": str(link.lead_id),
+                    "represented_party_id": str(link.party_id),
+                    "reason": command.reason.strip(),
+                    "created_global_contact_route": False,
+                },
+            )
+        return LinkRepresentedLeadOutcome(
+            conversation_id=conversation.id,
+            participant_id=participant.participant_id,
+            lead_id=link.lead_id,
+            party_id=link.party_id,
+            already_linked=already_linked,
+        )
+
+    return _commit(db, action, context=command.context)
 
 
 def _lead_source_for_channel(channel_type: str) -> str:
@@ -2432,10 +2759,17 @@ def _merge_conversation_lead_uncommitted(
         )
         team_inbox_contact_links.link_conversation_contact(
             db,
-            conversation=conversation,
-            subscriber_id=subscriber.id,
-            linked_by_person_id=actor_person_id,
-            note="Lead merged to customer from Inbox",
+            team_inbox_contact_links.LinkConversationContactCommand(
+                context=current_command_context(db),
+                conversation_id=conversation.id,
+                target=team_inbox_contact_links.ContactLinkTarget(
+                    team_inbox_contact_links.ContactLinkTargetType.subscriber,
+                    subscriber.id,
+                ),
+                actor_person_id=coerce_uuid(actor_person_id),
+                source=team_inbox_contact_links.ContactLinkSource.lead_conversion,
+                note="Lead merged to customer from Inbox",
+            ),
         )
         _record_lead_merge(
             conversation,
@@ -2467,10 +2801,17 @@ def _merge_conversation_lead_uncommitted(
         )
         team_inbox_contact_links.link_conversation_contact(
             db,
-            conversation=conversation,
-            reseller_id=reseller.id,
-            linked_by_person_id=actor_person_id,
-            note="Lead merged to reseller from Inbox",
+            team_inbox_contact_links.LinkConversationContactCommand(
+                context=current_command_context(db),
+                conversation_id=conversation.id,
+                target=team_inbox_contact_links.ContactLinkTarget(
+                    team_inbox_contact_links.ContactLinkTargetType.reseller,
+                    reseller.id,
+                ),
+                actor_person_id=coerce_uuid(actor_person_id),
+                source=team_inbox_contact_links.ContactLinkSource.lead_conversion,
+                note="Lead merged to reseller from Inbox",
+            ),
         )
         _record_lead_merge(
             conversation,
@@ -2531,6 +2872,13 @@ def merge_conversation_lead(
     actor_person_id: str | UUID | None = None,
 ) -> LeadMergeOutcome:
     def action() -> LeadMergeOutcome:
+        if target_type in {"subscriber", "reseller"}:
+            conversation_uuid = coerce_uuid(conversation_id)
+            if conversation_uuid is None:
+                raise ConversationNotFoundError()
+            team_inbox_contact_links.lock_conversation_contact_route(
+                db, conversation_id=conversation_uuid
+            )
         conversation = _active_conversation(db, conversation_id, for_update=True)
         lead = _lead_from_conversation_metadata(db, conversation)
         subscriber = (
@@ -2568,6 +2916,13 @@ def merge_contact(
     clean_query = str(target_query or "").strip()
 
     def action() -> ContactMergeOutcome:
+        if clean_target in {"subscriber", "reseller"}:
+            conversation_uuid = coerce_uuid(conversation_id)
+            if conversation_uuid is None:
+                raise ConversationNotFoundError()
+            team_inbox_contact_links.lock_conversation_contact_route(
+                db, conversation_id=conversation_uuid
+            )
         conversation = _active_conversation(db, conversation_id, for_update=True)
         if clean_target == "lead":
             created = create_lead_from_conversation_uncommitted(
@@ -2852,17 +3207,24 @@ def resolve_comment(
 def update_status(
     db: Session,
     *,
+    principal: WorkqueuePrincipal,
     conversation_id: str | UUID,
     status_value: str,
     actor_person_id: str | UUID | None = None,
+    completion_override_grant_id: str | UUID | None = None,
+    resolution_reason: str | None = None,
 ) -> StatusOutcome:
     clean_status = str(status_value or "").strip().lower()
     allowed_statuses = {item.value for item in InboxConversationStatus}
     if clean_status not in allowed_statuses:
         raise InboxCommandError("Unsupported conversation status.")
+    typed_resolution_reason = _coerce_resolution_reason(resolution_reason)
 
     def action() -> StatusOutcome:
         conversation = _active_conversation(db, conversation_id, for_update=True)
+        _require_conversation_team_scope(
+            db, conversation=conversation, principal=principal
+        )
         _require_human_control(
             db,
             conversation,
@@ -2883,6 +3245,8 @@ def update_status(
             reason=team_inbox_status.InboxStatusReason.operator_change,
             source_id=f"operator-status:{uuid4()}",
             compatibility_source="admin_inbox_status_action",
+            resolution_reason=typed_resolution_reason,
+            completion_override_grant_id=coerce_uuid(completion_override_grant_id),
         )
         inbox_sla.update_status(db, conversation, clean_status)
         return StatusOutcome(
@@ -3348,6 +3712,9 @@ def start_conversation(
         if clean_contact_name:
             conversation_metadata["contact_name"] = clean_contact_name[:200]
         conversation = InboxConversation(
+            customer_completion_policy_version_id=team_inbox_customer_completion_policy.snapshot_active_policy_id(
+                db
+            ),
             channel_type=clean_channel,
             subject=(
                 (subject or "").strip()
@@ -3368,17 +3735,24 @@ def start_conversation(
         # operator-started conversation used to have no `InboxConversationTeam`
         # row at all, so it was invisible to every team filter and to "My team"
         # the moment it was created â€” including to the operator who started it.
+        owning_team_id = coerce_uuid(service_team_id) or coerce_uuid(
+            team_inbox_routing.default_service_team_id(db)
+        )
         team_inbox_routing.apply_email_routing_plan(
             db,
             conversation=conversation,
-            plan=team_inbox_routing.build_email_team_routing_plan(
-                db,
-                to_addresses=[],
-                cc_addresses=[],
-                fallback_service_team_id=(
-                    coerce_uuid(service_team_id)
-                    or team_inbox_routing.default_service_team_id(db)
-                ),
+            plan=(
+                team_inbox_routing.build_operator_email_team_routing_plan(
+                    db,
+                    service_team_id=owning_team_id,
+                )
+                if clean_channel == InboxChannelType.email.value
+                else team_inbox_routing.build_email_team_routing_plan(
+                    db,
+                    to_addresses=[],
+                    cc_addresses=[],
+                    fallback_service_team_id=owning_team_id,
+                )
             ),
         )
         staged_attachment_ids = list(attachment_ids or ())

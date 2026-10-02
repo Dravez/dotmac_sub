@@ -105,19 +105,79 @@ class ExpenseFormContext {
       );
 }
 
+enum ExpensePaymentMode {
+  erpProfile('erp_profile'),
+  expenseOverride('expense_override');
+
+  const ExpensePaymentMode(this.apiValue);
+
+  final String apiValue;
+
+  factory ExpensePaymentMode.fromApiValue(Object? value) => switch (value) {
+    'erp_profile' => ExpensePaymentMode.erpProfile,
+    'expense_override' => ExpensePaymentMode.expenseOverride,
+    _ => throw FormatException('Unknown expense payment mode: $value'),
+  };
+}
+
 class VerifiedExpenseDestination {
-  const VerifiedExpenseDestination(this.data);
-  final Map<String, dynamic> data;
+  const VerifiedExpenseDestination({
+    required this.destinationToken,
+    required this.mode,
+    required this.bankCode,
+    required this.bankName,
+    required this.maskedAccountNumber,
+    required this.verifiedBeneficiaryName,
+    required this.verifiedAt,
+    required this.expiresAt,
+  });
+
+  final String destinationToken;
+  final ExpensePaymentMode mode;
+  final String bankCode;
+  final String bankName;
+  final String maskedAccountNumber;
+  final String verifiedBeneficiaryName;
+  final DateTime verifiedAt;
+  final DateTime expiresAt;
+
+  factory VerifiedExpenseDestination.fromJson(Map<String, dynamic> json) =>
+      VerifiedExpenseDestination(
+        destinationToken: _requiredString(json, 'destination_token'),
+        mode: ExpensePaymentMode.fromApiValue(json['mode']),
+        bankCode: _requiredString(json, 'bank_code'),
+        bankName: _requiredString(json, 'bank_name'),
+        maskedAccountNumber: _requiredString(json, 'masked_account_number'),
+        verifiedBeneficiaryName: _requiredString(
+          json,
+          'verified_beneficiary_name',
+        ),
+        verifiedAt: _requiredDate(json, 'verified_at'),
+        expiresAt: _requiredDate(json, 'expires_at'),
+      );
+
+  Map<String, dynamic> toJson() => {
+    'destination_token': destinationToken,
+    'mode': mode.apiValue,
+    'bank_code': bankCode,
+    'bank_name': bankName,
+    'masked_account_number': maskedAccountNumber,
+    'verified_beneficiary_name': verifiedBeneficiaryName,
+    'verified_at': verifiedAt.toUtc().toIso8601String(),
+    'expires_at': expiresAt.toUtc().toIso8601String(),
+  };
 }
 
 class ExpenseReceiptUploadResult {
   const ExpenseReceiptUploadResult({
     required this.attachmentId,
     required this.downloadPath,
+    this.fileName,
   });
 
   final String attachmentId;
   final String downloadPath;
+  final String? fileName;
 
   factory ExpenseReceiptUploadResult.fromJson(Map<String, dynamic> json) {
     final attachmentId = json['id']?.toString().trim() ?? '';
@@ -130,8 +190,31 @@ class ExpenseReceiptUploadResult {
     return ExpenseReceiptUploadResult(
       attachmentId: attachmentId,
       downloadPath: downloadPath,
+      fileName: _string(json['file_name']),
     );
   }
+}
+
+class ExpenseSubmissionRetryResult {
+  const ExpenseSubmissionRetryResult({
+    required this.id,
+    required this.erpSyncStatus,
+    required this.eventId,
+    required this.replayed,
+  });
+
+  final String id;
+  final String erpSyncStatus;
+  final String eventId;
+  final bool replayed;
+
+  factory ExpenseSubmissionRetryResult.fromJson(Map<String, dynamic> json) =>
+      ExpenseSubmissionRetryResult(
+        id: _requiredString(json, 'id'),
+        erpSyncStatus: _requiredString(json, 'erp_sync_status'),
+        eventId: _requiredString(json, 'erp_sync_event_id'),
+        replayed: json['replayed'] == true,
+      );
 }
 
 class ExpenseItemDraft {
@@ -209,6 +292,7 @@ class ExpenseRequestItem {
     required this.id,
     required this.categoryCode,
     required this.amount,
+    this.approvedAmount,
     this.categoryName,
     this.description,
     this.expenseDate,
@@ -221,6 +305,7 @@ class ExpenseRequestItem {
   final String id;
   final String categoryCode;
   final double amount;
+  final double? approvedAmount;
   final String? categoryName;
   final String? description;
   final String? expenseDate;
@@ -238,6 +323,7 @@ class ExpenseRequestItem {
         id: json['id'].toString(),
         categoryCode: json['category_code']?.toString() ?? '',
         amount: _double(json['amount']) ?? 0,
+        approvedAmount: _double(json['approved_amount']),
         categoryName: _string(json['category_name']),
         description: _string(json['description']),
         expenseDate: _string(json['expense_date']),
@@ -265,12 +351,18 @@ class ExpenseRequest {
     this.paymentStatus,
     this.paymentIntentId,
     this.paymentError,
+    this.requestedByName,
     this.selectedApproverName,
     this.paymentDestinationMode,
     this.recipientBankName,
     this.maskedAccountNumber,
     this.verifiedBeneficiaryName,
     this.total,
+    this.requestedTotal,
+    this.approvedTotal,
+    this.amountsAdjusted = false,
+    this.approvalAdjustmentReason,
+    this.revision = 1,
     this.ticketId,
     this.projectId,
     this.workOrderId,
@@ -298,12 +390,18 @@ class ExpenseRequest {
   final String? paymentStatus;
   final String? paymentIntentId;
   final String? paymentError;
+  final String? requestedByName;
   final String? selectedApproverName;
   final String? paymentDestinationMode;
   final String? recipientBankName;
   final String? maskedAccountNumber;
   final String? verifiedBeneficiaryName;
   final double? total;
+  final double? requestedTotal;
+  final double? approvedTotal;
+  final bool amountsAdjusted;
+  final String? approvalAdjustmentReason;
+  final int revision;
   final String? ticketId;
   final String? projectId;
   final String? workOrderId;
@@ -335,12 +433,22 @@ class ExpenseRequest {
     paymentStatus: _string(json['payment_status']),
     paymentIntentId: _string(json['payment_intent_id']),
     paymentError: _string(json['payment_error']),
+    requestedByName: _string(json['requested_by_name']),
     selectedApproverName: _string(json['selected_approver_name']),
     paymentDestinationMode: _string(json['payment_destination_mode']),
     recipientBankName: _string(json['recipient_bank_name']),
     maskedAccountNumber: _string(json['masked_account_number']),
     verifiedBeneficiaryName: _string(json['verified_beneficiary_name']),
     total: _double(json['total_amount']),
+    requestedTotal: _double(json['requested_total_amount']),
+    approvedTotal: _double(json['approved_total_amount']),
+    amountsAdjusted: json['amounts_adjusted'] == true,
+    approvalAdjustmentReason: _string(json['approval_adjustment_reason']),
+    revision: switch (json['revision']) {
+      int value => value,
+      String value => int.tryParse(value) ?? 1,
+      _ => 1,
+    },
     ticketId: json['ticket_id']?.toString(),
     projectId: json['project_id']?.toString(),
     workOrderId: json['work_order_id']?.toString(),
@@ -359,10 +467,54 @@ class ExpenseRequest {
   double get totalAmount =>
       total ?? items.fold<double>(0, (sum, item) => sum + item.amount);
 
-  String get statusLabel => status.replaceAll('_', ' ');
+  double get requestedTotalAmount =>
+      requestedTotal ?? items.fold<double>(0, (sum, item) => sum + item.amount);
+
+  String get statusLabel {
+    final value = status.replaceAll('_', ' ');
+    return value.isEmpty
+        ? value
+        : '${value[0].toUpperCase()}${value.substring(1)}';
+  }
+
+  bool get isErpSubmissionPending =>
+      status == 'submitted' && {'pending', 'sent'}.contains(erpSyncStatus);
+
+  bool get hasErpSubmissionFailed =>
+      status == 'submitted' && {'dead', 'rejected'}.contains(erpSyncStatus);
+
+  String get displayStatus => switch ((status, erpSyncStatus)) {
+    ('submitted', 'pending' || 'sent') => 'submitting to ERP',
+    ('submitted', 'dead' || 'rejected') => 'submission failed',
+    _ => status,
+  };
+}
+
+class ExpenseRequestHistory {
+  const ExpenseRequestHistory({required this.items, required this.totalCount});
+
+  final List<ExpenseRequest> items;
+  final int totalCount;
 }
 
 String? _string(Object? value) => value?.toString();
+
+String _requiredString(Map<String, dynamic> json, String key) {
+  final value = _string(json[key])?.trim() ?? '';
+  if (value.isEmpty) {
+    throw FormatException('Expense payment response is missing $key.');
+  }
+  return value;
+}
+
+DateTime _requiredDate(Map<String, dynamic> json, String key) {
+  final value = _requiredString(json, key);
+  final parsed = DateTime.tryParse(value);
+  if (parsed == null) {
+    throw FormatException('Expense payment response has an invalid $key.');
+  }
+  return parsed;
+}
 
 double? _double(Object? value) => switch (value) {
   num() => value.toDouble(),

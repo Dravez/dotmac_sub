@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -450,4 +455,15 @@ DOMAIN = DomainSOT(
     "becomes a decision owner or durable event log. Infrastructure "
     "tasks use shared DB/session/lock and heartbeat helpers; polling "
     "writes observations while network/device resolvers interpret state.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="network.infrastructure_polling",
+                label="Infrastructure polling",
+                group="Network and monitoring",
+                state=AutomationCatalogState.unavailable,
+                explanation="Health snapshots are collected by the existing infrastructure scheduler; Center schedule controls are not available.",
+            ),
+        ),
+    ),
 )

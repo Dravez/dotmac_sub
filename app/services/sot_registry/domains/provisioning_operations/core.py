@@ -891,15 +891,20 @@ SERVICES: tuple[SOTService, ...] = (
             "field expense request cancellation",
             "field expense ERP form context",
             "expense receipt staging for submitted claims",
-            "field expense approval and ERP delivery staging",
+            "field expense lifecycle ERP delivery staging",
+            "dead submitted expense delivery retry",
             "dead expense delivery recovery",
+            "dead expense payment delivery recovery",
+            "ERP expense-claim payment outcome observation",
             "field expense payment initiation and ERP delivery staging",
             "field expense vendor picker",
             "requester-owned field expense history",
+            "manager field expense review projection",
             "field expense requester-identity repair",
         ),
         depends_on=(
             "auth.permission_gate",
+            "auth.staff_provisioning",
             "integration.backoffice_adapter",
             "operations.expense_categories",
             "operations.work_orders",
@@ -910,18 +915,37 @@ SERVICES: tuple[SOTService, ...] = (
             "supplies exact RBAC-authorized work-order evidence and derives the actor "
             "from the authenticated session. Every submission requires current "
             "technician-assignment evidence. Receipt metadata is staged flush-only "
-            "inside the same command. Submission never stages ERP delivery. Manager "
-            "approval is the sole ERP release point and atomically stages one event "
-            "that creates or reuses a draft, uploads missing receipts, then approves. "
-            "Rejection remains local. Explicit previewed recovery appends a linked "
-            "replacement without changing the original dead event. A "
+            "inside the same command. Submission atomically stages expense_submit_v3; "
+            "the worker creates a hidden draft, uploads receipts, and explicitly "
+            "submits it. Manager approval and rejection remain authoritative in Sub "
+            "and stage separate ordered v3 consequences. Explicit previewed claim "
+            "recovery appends a linked replacement without changing the original "
+            "dead event. Permission-denied payment recovery instead requeues the "
+            "same event and idempotency key only after ERP proves the claim remains "
+            "approved with no payment evidence. A "
             "separately authorized payment command stages reimbursement initiation, "
-            "while ERP remains the payment and settlement authority. The client reference and "
-            "normalized fingerprint make retries safe. The vendor picker remains "
+            "while ERP remains the payment and settlement authority. New claims use one "
+            "canonical UUID for the client reference, local request primary key, "
+            "claim-bound destination verification, ERP delivery, and status polling. "
+            "Approval fails closed before mutation or enqueue when a token-bearing "
+            "legacy request has inconsistent claim identity. The canonical client "
+            "reference and normalized fingerprint make retries safe. The vendor picker remains "
             "read-only and projects active vendor labels for expense entry. ERP "
             "owns eligible approvers, bank identity, account verification, and the "
             "opaque claim-bound destination token. Sub stores no raw account number; "
-            "it owns the selected local approver link and masked expense snapshot."
+            "it owns the selected local approver link and masked expense snapshot, "
+            "excludes the requester from local approver choices, and refuses "
+            "self-selection and self-approval before mutation or ERP staging. "
+            "Approval preserves immutable requested line amounts and supports "
+            "either unchanged approval or one approved amount per existing line; "
+            "adjustments require a reason and are staged to ERP in the same owner "
+            "transaction. "
+            "ERP delivery failures retain only typed allowlisted diagnostic codes, "
+            "HTTP status, and request identifiers alongside partial-delivery progress."
+            " Requester history resolves exact SystemUser, Person Party, and every "
+            "historically linked technician-profile identity without treating "
+            "profile lifecycle as history authorization. Manager review resolves "
+            "requester labels through the staff display-identity owner."
         ),
         contract=ServiceContract(
             concerns=(
@@ -967,13 +991,24 @@ SERVICES: tuple[SOTService, ...] = (
                     canonical_writer="operations.expense_requests",
                 ),
                 ConcernContract(
-                    name="field expense approval and ERP delivery staging",
+                    name="field expense lifecycle ERP delivery staging",
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "canonical submitted expense request",
                         "selected expense approver",
                         "ERP-owned expense category rules",
                         "validated receipt content",
+                        "expense ERP delivery cutover control",
+                    ),
+                    canonical_writer="operations.expense_requests",
+                ),
+                ConcernContract(
+                    name="dead submitted expense delivery retry",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "canonical submitted expense request",
+                        "validated receipt content",
+                        "failed expense submission delivery evidence",
                         "expense ERP delivery cutover control",
                     ),
                     canonical_writer="operations.expense_requests",
@@ -990,10 +1025,31 @@ SERVICES: tuple[SOTService, ...] = (
                     canonical_writer="operations.expense_requests",
                 ),
                 ConcernContract(
+                    name="dead expense payment delivery recovery",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "canonical approved expense request",
+                        "permission-denied ERP payment delivery evidence",
+                        "ERP expense claim and payment status observation",
+                        "expense ERP delivery cutover control",
+                    ),
+                    canonical_writer="operations.expense_requests",
+                ),
+                ConcernContract(
                     name="field expense payment initiation and ERP delivery staging",
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "canonical approved expense request",
+                        "expense ERP delivery cutover control",
+                    ),
+                    canonical_writer="operations.expense_requests",
+                ),
+                ConcernContract(
+                    name="ERP expense-claim payment outcome observation",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "canonical field expense request state",
+                        "ERP expense claim and payment status observation",
                         "expense ERP delivery cutover control",
                     ),
                     canonical_writer="operations.expense_requests",
@@ -1008,7 +1064,16 @@ SERVICES: tuple[SOTService, ...] = (
                     role=OwnerRole.RESOLVER,
                     input_names=(
                         "canonical field expense request state",
-                        "authenticated requester and work-order access evidence",
+                        "authenticated requester identity evidence",
+                    ),
+                ),
+                ConcernContract(
+                    name="manager field expense review projection",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "canonical field expense request state",
+                        "authorized manager expense review scope",
+                        "canonical staff display identity",
                     ),
                 ),
                 ConcernContract(
@@ -1040,6 +1105,34 @@ SERVICES: tuple[SOTService, ...] = (
                         "Authenticated system-user identity and global, reseller, or "
                         "region operations:dispatch:read access resolved for the exact "
                         "work order"
+                    ),
+                ),
+                AuthorityInput(
+                    name="authenticated requester identity evidence",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "Active authenticated SystemUser identity normalized at the "
+                        "field API boundary; no current technician-profile or "
+                        "work-order assignment is required to read owned history"
+                    ),
+                ),
+                AuthorityInput(
+                    name="authorized manager expense review scope",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "Authenticated SystemUser identity with exact "
+                        "operations:expense_request:read authorization"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical staff display identity",
+                    owner="auth.staff_provisioning",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "Persisted SystemUser display name, personal name, or email "
+                        "fallback resolved for exact requester SystemUser identifiers"
                     ),
                 ),
                 AuthorityInput(
@@ -1080,6 +1173,36 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
+                    name="ERP expense claim and payment status observation",
+                    owner="external:dotmac_erp",
+                    kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                    source=(
+                        "Authenticated ERP status read for the canonical Sub claim "
+                        "UUID, including claim status and absence or presence of "
+                        "payment intent, payment status, and paid time"
+                    ),
+                ),
+                AuthorityInput(
+                    name="permission-denied ERP payment delivery evidence",
+                    owner="integration.backoffice_adapter",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "Durable dead outbox event for initiate_payment with an "
+                        "allowlisted permission_denied diagnostic, HTTP 403, and "
+                        "the original stable ERP idempotency key"
+                    ),
+                ),
+                AuthorityInput(
+                    name="failed expense submission delivery evidence",
+                    owner="integration.backoffice_adapter",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "Durable dead expense_submit_v3 outbox event, stable ERP "
+                        "idempotency key, partial-delivery progress, and allowlisted "
+                        "diagnostic evidence"
+                    ),
+                ),
+                AuthorityInput(
                     name="selected expense approver",
                     owner="operations.expense_requests",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
@@ -1094,7 +1217,8 @@ SERVICES: tuple[SOTService, ...] = (
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
                     source=(
                         "Locked active FieldExpenseRequest, item rows, requester "
-                        "identity, and submitted lifecycle evidence"
+                        "identity, immutable requested amounts, request revision, "
+                        "and submitted lifecycle evidence"
                     ),
                 ),
                 AuthorityInput(
@@ -1137,25 +1261,40 @@ SERVICES: tuple[SOTService, ...] = (
             transaction=TransactionContract(
                 mode=TransactionMode.OWNER_MANAGED,
                 boundary=(
-                    "Create, submit, optional receipt metadata, and work-order activity "
-                    "marking complete in one owner transaction without ERP staging. "
+                    "Create, submit, optional receipt metadata, work-order activity, "
+                    "and one expense_submit_v3 intent in one owner transaction. "
+                    "New request identity equals its client reference. "
                     "Receipt storage is a flush-only participant. Manager approval "
-                    "requires the selected approver, locks the verified payment "
-                    "snapshot, and stages the sole ERP release intent in the "
-                    "same transaction. Rejection and cancellation remain local; payment "
-                    "stages a later ordered intent. Previewed recovery locks and "
-                    "revalidates before appending linked replacement evidence. "
+                    "or rejection requires the selected approver; submission and "
+                    "approval independently require that approver to differ from the "
+                    "requester. Approval locks the verified "
+                    "payment snapshot, validates canonical claim identity, and stages "
+                    "a separate ordered v3 decision intent in the same transaction. "
+                    "Cancellation remains local; payment stages a later intent ordered "
+                    "after ERP approval. Previewed claim recovery locks and "
+                    "revalidates before appending linked replacement evidence; "
+                    "previewed payment recovery locks and requeues the same event "
+                    "and idempotency key after verifying exact failure and ERP state. "
                     "The vendor picker performs a "
                     "read-only session-scoped query. Requester-history reads are "
-                    "side-effect free; ERP form-context and destination-verification "
-                    "queries are also side-effect free. "
-                    "Revision 584 performs the bounded, idempotent "
+                    "side-effect free; manager-review reads resolve staff display "
+                    "identity without mutation; ERP form-context and destination-"
+                    "verification queries are also side-effect free. "
+                    "Revision 587 performs the bounded, idempotent "
                     "identity repair during schema migration."
                 ),
                 locking=(
                     "Submission locks the scoped active work order; approval, "
                     "rejection, and payment initiation lock the active expense "
-                    "request before their transitions."
+                    "request before their transitions. The ERP expense-claim "
+                    "payment outcome reconciler is caller-committed and takes no "
+                    "row lock of its own; it relies on the per-flow ownership "
+                    "gate (checked before and after each row's ERP call, or once "
+                    "per row in the repair sweep) rather than database-level "
+                    "locking to bound its write window — see the debt register "
+                    "for the row-locking/command-wrapping gap this leaves, "
+                    "shared identically with material's equivalent automated "
+                    "write-back path."
                 ),
                 idempotency=(
                     "A unique client reference replays only when the normalized "
@@ -1163,7 +1302,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "request returns its current delivery outcome; the first "
                     "transition records its command id. Approval and receipt upload "
                     "have stable versioned delivery keys; each payment command id "
-                    "has one stable key and one ERP payment intent."
+                    "has one stable key and one ERP payment intent. Payment recovery "
+                    "never creates a replacement key, and an identical recovery "
+                    "command returns its recorded outcome."
                 ),
                 retries=(
                     "Identical submission retries return the committed request. "
@@ -1175,14 +1316,19 @@ SERVICES: tuple[SOTService, ...] = (
             errors=ErrorContract(
                 domain_codes=(
                     "operations.expense_requests.invalid_request",
+                    "operations.expense_requests.invalid_approval_amount",
                     "operations.expense_requests.approver_invalid",
                     "operations.expense_requests.approver_mismatch",
+                    "operations.expense_requests.adjustment_reason_required",
+                    "operations.expense_requests.approval_lines_mismatch",
+                    "operations.expense_requests.claim_identity_inconsistent",
                     "operations.expense_requests.destination_expired",
                     "operations.expense_requests.destination_invalid",
                     "operations.expense_requests.destination_unavailable",
                     "operations.expense_requests.form_context_unavailable",
                     "operations.expense_requests.form_context_required",
                     "operations.expense_requests.idempotency_conflict",
+                    "operations.expense_requests.identity_mismatch",
                     "operations.expense_requests.erp_delivery_not_configured",
                     "operations.expense_requests.erp_staging_failed",
                     "operations.expense_requests.incomplete_approval",
@@ -1193,11 +1339,18 @@ SERVICES: tuple[SOTService, ...] = (
                     "operations.expense_requests.request_not_found",
                     "operations.expense_requests.receipt_required",
                     "operations.expense_requests.receipt_url_invalid",
+                    "operations.expense_requests.stale_approval",
                     "operations.expense_requests.recovery_not_available",
                     "operations.expense_requests.recovery_state_invalid",
                     "operations.expense_requests.recovery_erp_unavailable",
                     "operations.expense_requests.recovery_ambiguous",
                     "operations.expense_requests.recovery_preview_stale",
+                    "operations.expense_requests.payment_recovery_not_available",
+                    "operations.expense_requests.payment_recovery_state_invalid",
+                    "operations.expense_requests.payment_recovery_erp_unavailable",
+                    "operations.expense_requests.payment_recovery_ambiguous",
+                    "operations.expense_requests.payment_recovery_preview_stale",
+                    "operations.expense_requests.payment_recovery_forbidden",
                     "operations.expense_requests.work_order_not_found",
                     "operations.expense_requests.work_order_unauthorized",
                     "operations.expense_requests.work_order_unassigned",
@@ -1216,9 +1369,14 @@ SERVICES: tuple[SOTService, ...] = (
                     "work order without a current technician assignment",
                     "unavailable or invalid ERP category rules",
                     "unavailable or mismatched ERP approver identity",
-                    "missing, expired, or invalid ERP payment-destination token",
+                    "requester selected as or acting as their own approver",
+                    "missing, expired, invalid, or claim-mismatched ERP "
+                    "payment-destination token",
+                    "token-bearing request with inconsistent canonical claim identity",
                     "invalid receipt evidence",
                     "ambiguous ERP state during dead-event recovery",
+                    "payment recovery without exact pay scope, permission-denied "
+                    "delivery evidence, or confirmed absence of ERP payment state",
                     "client-reference fingerprint conflict",
                     "expense-flow ownership not assigned to Sub",
                     "ERP outbox staging failure after expense-flow cutover",
@@ -1244,6 +1402,7 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "canonical approved expense request",
                         "expense ERP delivery cutover control",
+                        "ERP expense claim and payment status observation",
                     ),
                     writer="operations.expense_requests",
                     freshness=(
@@ -1256,7 +1415,9 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     drift_signal=(
                         "ERP reports a payment intent or paid claim state that differs "
-                        "from the request's erp_payment metadata projection."
+                        "from the request's erp_payment metadata projection, or ERP "
+                        "reports the claim's payment as paid while the request's own "
+                        "status/paid_at pair still shows it unpaid."
                     ),
                     rebuild_operation=(
                         "Poll the ERP expense-claim status endpoint by the stable Sub "
@@ -1268,12 +1429,12 @@ SERVICES: tuple[SOTService, ...] = (
                     name="field expense requester identity bridge",
                     input_names=(
                         "canonical field expense request state",
-                        "authenticated requester and work-order access evidence",
+                        "authenticated requester identity evidence",
                     ),
                     writer="operations.expense_requests",
                     freshness=(
                         "Written with each native submission and repaired once by "
-                        "revision 584 for exact legacy identity matches."
+                        "revision 587 for exact legacy identity matches."
                     ),
                     stale_behavior=(
                         "Ambiguous legacy rows remain hidden from requester history "
@@ -1286,7 +1447,7 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     rebuild_operation=(
                         "Apply the idempotent requester-identity repair from Alembic "
-                        "revision 584 to the bounded drift cohort."
+                        "revision 587 to the bounded drift cohort."
                     ),
                     repair_owner="operations.expense_requests",
                 ),
@@ -1297,8 +1458,9 @@ SERVICES: tuple[SOTService, ...] = (
                 new_owner="operations.expense_requests",
                 verification=(
                     "Work-order-bound submission, approval-only release, private receipt "
-                    "delivery, partial-failure replay, explicit dead-event recovery, "
-                    "conflict, requester-history, and identity-repair tests pass."
+                    "delivery, typed payment delivery and write-back, partial-failure "
+                    "replay, explicit dead-event recovery, conflict, requester-history, "
+                    "and identity-repair tests pass."
                 ),
                 cutover_gate=(
                     "Mobile clients use the typed submit, decision, and payment "
@@ -1321,6 +1483,7 @@ SERVICES: tuple[SOTService, ...] = (
             ),
             test_refs=(
                 "tests/test_field_expense_requests.py",
+                "tests/test_field_manager_api.py",
                 "tests/test_work_order_expense_web.py",
                 "tests/test_dotmac_erp_expense_sync.py",
                 "tests/playwright/e2e/test_work_order_expense_disclosure.py",
@@ -1337,6 +1500,7 @@ SERVICES: tuple[SOTService, ...] = (
             "contextual material need and ERP submission",
             "service-work-order material need and operational approval",
             "ERP material status observation",
+            "ERP-confirmed material request cancellation",
             "backoffice material-outcome projection into the service workflow",
             "work-order material allocation after confirmed external issue",
             "committed material output consumption",
@@ -1357,7 +1521,10 @@ SERVICES: tuple[SOTService, ...] = (
             "never posts inventory. Backoffice unavailability never "
             "reverses a valid Sub approval. Local "
             "issue/fulfil transitions are compatibility-only and fail "
-            "closed after the material flow is cut over to Sub."
+            "closed after the material flow is cut over to Sub. Versioned ERP "
+            "line snapshots are matched by immutable SKU, retain cumulative "
+            "issued quantities in request-line metadata, reject regression, and "
+            "keep partial fulfillment in pending_stock without a fulfilled event."
         ),
         contract=ServiceContract(
             concerns=(
@@ -1381,6 +1548,16 @@ SERVICES: tuple[SOTService, ...] = (
                     name="ERP material status observation",
                     role=OwnerRole.RECONCILER,
                     input_names=("ERP material-support outcome observation",),
+                    canonical_writer="operations.material_dependencies",
+                ),
+                ConcernContract(
+                    name="ERP-confirmed material request cancellation",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "canonical material dependency state",
+                        "ERP material-support outcome observation",
+                        "material dependency transition protocol",
+                    ),
                     canonical_writer="operations.material_dependencies",
                 ),
                 ConcernContract(
@@ -1467,8 +1644,8 @@ SERVICES: tuple[SOTService, ...] = (
                     owner="operations.work_order_status",
                     kind=AuthorityKind.CONTROL_INPUT,
                     source=(
-                        "draft, submission, approval, refusal, issued, and "
-                        "fulfilled transition invariants"
+                        "draft, submission, approval, cancellation-pending, "
+                        "refusal, issued, and fulfilled transition invariants"
                     ),
                 ),
                 AuthorityInput(
@@ -1494,9 +1671,11 @@ SERVICES: tuple[SOTService, ...] = (
                 mode=TransactionMode.OWNER_MANAGED,
                 boundary=(
                     "Each material command owns the request, workflow, allocation, "
-                    "event evidence, and ERP outbox transaction; reconciled ERP "
+                    "event evidence, and ERP outbox transaction; cancellation stays "
+                    "pending until an ERP refusal observation, while an issued "
+                    "observation wins a concurrent cancellation race. Reconciled ERP "
                     "outcomes commit one locked request at a time. Requester-history "
-                    "reads are side-effect free; revision 584 performs the bounded, "
+                    "reads are side-effect free; revision 587 performs the bounded, "
                     "idempotent identity repair during schema migration."
                 ),
                 locking=(
@@ -1506,7 +1685,10 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 idempotency=(
                     "Stable request identity plus normalized ERP identity/status "
-                    "makes repeated delivery and scheduled reconciliation converge."
+                    "makes repeated delivery and scheduled reconciliation converge. Source "
+                    "timestamps reject older snapshots; issued quantities never decrease. "
+                    "A partial issue blocks cancellation and full allocation until all "
+                    "original quantities are observed as issued."
                 ),
                 retries=(
                     "Transport failures retry outside the owner transaction; "
@@ -1545,13 +1727,15 @@ SERVICES: tuple[SOTService, ...] = (
             events=EventContract(
                 event_types=(
                     "field_material_request.approved",
+                    "field_material_request.cancellation_requested",
                     "field_material_request.fulfilled",
                 ),
                 schema_version=1,
                 delivery_owner="events.dispatcher",
                 compatibility=(
                     "Version 1 is additive and identifies the request, work order, "
-                    "transition, actor or ERP source, and occurrence time."
+                    "transition or cancellation intent, actor or ERP source, and "
+                    "occurrence time."
                 ),
                 replay=(
                     "Canonical material-request, item, allocation, ERP mirror, and "
@@ -1593,7 +1777,7 @@ SERVICES: tuple[SOTService, ...] = (
                     writer="operations.material_dependencies",
                     freshness=(
                         "Written with each native submission and repaired once by "
-                        "revision 584 for exact legacy identity matches."
+                        "revision 587 for exact legacy identity matches."
                     ),
                     stale_behavior=(
                         "Ambiguous legacy rows remain hidden from requester history "
@@ -1606,7 +1790,7 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     rebuild_operation=(
                         "Apply the idempotent requester-identity repair from Alembic "
-                        "revision 584 to the bounded drift cohort."
+                        "revision 587 to the bounded drift cohort."
                     ),
                     repair_owner="operations.material_dependencies",
                 ),
@@ -1642,6 +1826,8 @@ SERVICES: tuple[SOTService, ...] = (
                 "tests/test_field_material_requests.py",
                 "tests/test_dotmac_erp_material_sync.py",
                 "tests/test_admin_material_requests.py",
+                "tests/test_erp_material_webhook.py",
+                "field_mobile/test/materials_test.dart",
                 "tests/architecture/test_field_request_history_identity.py",
                 "tests/integration/test_field_request_requester_history_migration.py",
             ),
@@ -1757,6 +1943,7 @@ SERVICES: tuple[SOTService, ...] = (
         module="app.services.projects",
         owns=(
             "Project and ProjectTask identity and lifecycle",
+            "ProjectTemplate task-plan definition and application",
             "project customer-account eligibility",
             "project infrastructure relationship",
             "project creation customer email consequence",
@@ -1803,6 +1990,15 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 ConcernContract(
                     name="Project and ProjectTask identity and lifecycle",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "canonical project aggregate",
+                        "authorized project command",
+                    ),
+                    canonical_writer="operations.project_lifecycle",
+                ),
+                ConcernContract(
+                    name="ProjectTemplate task-plan definition and application",
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "canonical project aggregate",
@@ -1936,7 +2132,7 @@ SERVICES: tuple[SOTService, ...] = (
                     name="canonical project aggregate",
                     owner="operations.project_lifecycle",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                    source="locked native Project, ProjectTask, ProjectTaskAssignee, dependency, comment, and SLA records keyed only by native UUIDs",
+                    source="locked native Project, ProjectTask, ProjectTemplate, template revision, hierarchy, dependency, assignee, comment, and SLA records keyed only by native UUIDs",
                 ),
                 AuthorityInput(
                     name="project transition protocol",
@@ -2045,6 +2241,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "project_task.updated",
                     "project_task.completed",
                     "project_task.dependencies_replaced",
+                    "project_template.plan_replaced",
+                    "project.template_applied",
                     "project.assignment_changed",
                     "project.infrastructure_changed",
                 ),

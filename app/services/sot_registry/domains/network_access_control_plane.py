@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -32,6 +37,9 @@ DOMAIN = DomainSOT(
                 "enforcement lock lifecycle",
                 "persisted access restriction intent",
                 "subscription access-status transitions",
+                "subscription pause episodes and independently releasable causes",
+                "prepaid pause-compensation entitlement evidence",
+                "exact pause-duration billing-anchor adjustment",
                 "subscription billing-anchor projection",
                 "active subscription billing-anchor invariant",
                 "subscriber access-status projection",
@@ -58,7 +66,15 @@ DOMAIN = DomainSOT(
                 "operationally-current customer-health cohort policy lives in "
                 "subscription_lifecycle_policy: a disabled or stopped service is "
                 "historical only after its explicit end instant has passed. This "
-                "read classification never transitions lifecycle state."
+                "read classification never transitions lifecycle state. Pending-to-active "
+                "transitions invoke the typed PPPoE credential participant before the "
+                "active status and activation event are staged. A pause preserves "
+                "service configuration while denying access; resume releases one "
+                "cause at a time and moves the billing anchor by the exact effective "
+                "pause interval only after the final cause is released. For prepaid "
+                "service it first stages one zero-value ServiceEntitlement linked "
+                "uniquely to the pause episode, preserving paid invoice periods and "
+                "failing closed when canonical coverage evidence is ambiguous."
             ),
         ),
         SOTService(
@@ -239,12 +255,211 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="access.pppoe_credentials",
+            module="app.services.pppoe_credentials",
+            owns=(
+                "canonical PPPoE access credential identity and secret",
+                "subscription PPPoE login projection",
+            ),
+            depends_on=(
+                "access.subscription_lifecycle",
+                "control.settings_spec",
+                "customer.accounts",
+                "events.dispatcher",
+                "secrets.credential_crypto",
+                "service_intent.catalog_policy",
+            ),
+            notes=(
+                "This typed, flush-only participant ensures one active credential for "
+                "an exact subscriber and optional subscription. Activation invokes it "
+                "before staging active status, so missing credentials fail closed and "
+                "subscription.login always follows the bound credential. Secrets never "
+                "leave the owner outcome or enter events and logs."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="canonical PPPoE access credential identity and secret",
+                        role=OwnerRole.AUTHORITATIVE_RECORD,
+                        input_names=(
+                            "canonical subscriber identity",
+                            "canonical subscription lifecycle state",
+                            "catalog-linked target RADIUS profile",
+                            "PPPoE credential generation settings",
+                            "credential encryption policy",
+                            "typed PPPoE credential command",
+                        ),
+                        canonical_writer="access.pppoe_credentials",
+                    ),
+                    ConcernContract(
+                        name="subscription PPPoE login projection",
+                        role=OwnerRole.PROJECTION_WRITER,
+                        input_names=(
+                            "canonical PPPoE credential record",
+                            "canonical subscription lifecycle state",
+                        ),
+                        canonical_writer="access.pppoe_credentials",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="canonical subscriber identity",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Locked Subscriber identity and canonical subscriber number",
+                    ),
+                    AuthorityInput(
+                        name="canonical subscription lifecycle state",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Locked Subscription identity, subscriber, status, and profile",
+                    ),
+                    AuthorityInput(
+                        name="catalog-linked target RADIUS profile",
+                        owner="service_intent.catalog_policy",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Optional active RadiusProfile selected for the subscription",
+                    ),
+                    AuthorityInput(
+                        name="PPPoE credential generation settings",
+                        owner="control.settings_spec",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Typed username sequence and password-length settings",
+                    ),
+                    AuthorityInput(
+                        name="credential encryption policy",
+                        owner="secrets.credential_crypto",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="Application credential encryption boundary",
+                    ),
+                    AuthorityInput(
+                        name="typed PPPoE credential command",
+                        owner="access.pppoe_credentials",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "Exact subscriber, optional subscription, and optional profile "
+                            "UUIDs admitted by the coordinating owner"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical PPPoE credential record",
+                        owner="access.pppoe_credentials",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "The active AccessCredential row bound to the exact subscriber "
+                            "and service"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.PARTICIPANT,
+                    boundary=(
+                        "The lifecycle, catalog, or provisioning coordinator owns "
+                        "completion; this participant locks, stages, and flushes only."
+                    ),
+                    locking=(
+                        "Lock the target subscription and existing exact or legacy active "
+                        "credential before reuse, binding, or creation."
+                    ),
+                    idempotency=(
+                        "An existing exact active credential is reused without rotating its "
+                        "secret; one legacy unbound credential is deterministically bound."
+                    ),
+                    retries=(
+                        "Retry only through the coordinating command; identity, profile, "
+                        "and username ambiguity fail closed."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "access.pppoe_credentials.radius_profile_unavailable",
+                        "access.pppoe_credentials.subscriber_missing",
+                        "access.pppoe_credentials.subscriber_mismatch",
+                        "access.pppoe_credentials.subscription_missing",
+                        "access.pppoe_credentials.username_conflict",
+                        "access.pppoe_credentials.username_unavailable",
+                    ),
+                    mapping_owner="subscription lifecycle and provisioning adapters",
+                    fail_closed_on=(
+                        "missing subscriber or missing or mismatched subscription",
+                        "missing or inactive RADIUS profile",
+                        "unavailable or conflicting username",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("access_credential.ensured",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "Version 1 contains credential, subscriber, service, profile, "
+                        "and disposition identifiers only; username and secret are omitted."
+                    ),
+                    replay=(
+                        "Exact unchanged credentials emit no second event; coordinating "
+                        "command idempotency prevents duplicate mutation events."
+                    ),
+                ),
+                projections=(
+                    ProjectionContract(
+                        name="subscription PPPoE login projection",
+                        input_names=(
+                            "canonical PPPoE credential record",
+                            "canonical subscription lifecycle state",
+                        ),
+                        writer="access.pppoe_credentials",
+                        freshness="Updated in the credential participant transaction",
+                        stale_behavior="Activation fails before active status is staged",
+                        drift_signal=(
+                            "Subscription.login differs from the exact active bound "
+                            "AccessCredential.username"
+                        ),
+                        rebuild_operation=(
+                            "Replay EnsurePppoeCredentialCommand for the exact service"
+                        ),
+                        repair_owner="access.pppoe_credentials",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.SHADOWING,
+                    new_owner="access.pppoe_credentials",
+                    old_owner=(
+                        "generic AccessCredential CRUD and external credential import "
+                        "paths outside subscription activation"
+                    ),
+                    verification=(
+                        "Focused lifecycle and credential tests prove exact binding, "
+                        "idempotent reuse, login projection, and fail-closed activation."
+                    ),
+                    cutover_gate=(
+                        "All subscription activation, catalog, and sales provisioning "
+                        "callers use EnsurePppoeCredentialCommand."
+                    ),
+                    fallback_retirement=(
+                        "The untyped auto_generate_pppoe_credential boundary and "
+                        "create-form activation fallback are removed in this slice; "
+                        "remaining generic credential CRUD and import writers require a "
+                        "separate reviewed credential-lifecycle migration."
+                    ),
+                ),
+                steward="network access",
+                design_refs=(
+                    "docs/designs/PROVISIONING_LIFECYCLE_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_pppoe_auto_generation.py",
+                    "tests/test_web_catalog_subscriptions.py",
+                    "tests/architecture/test_pppoe_activation_boundary.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="access.credential_binding",
             module="app.services.access_credential_binding",
             owns=("access credential subscription and RADIUS-profile binding",),
             depends_on=(
                 "access.subscription_lifecycle",
-                "access.radius_projection",
+                "access.pppoe_credentials",
                 "service_intent.catalog_policy",
                 "events.dispatcher",
             ),
@@ -272,7 +487,7 @@ DOMAIN = DomainSOT(
                 authoritative_inputs=(
                     AuthorityInput(
                         name="canonical subscriber access credential",
-                        owner="access.radius_projection",
+                        owner="access.pppoe_credentials",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source=(
                             "Active AccessCredential identity, subscriber, username, "
@@ -996,27 +1211,210 @@ DOMAIN = DomainSOT(
         SOTService(
             name="access.session_enforcement",
             module="app.services.enforcement",
-            owns=(
-                "typed access-state CoA/disconnect execution",
-                "NAS-evidenced accounting-session closure",
-                "single-flight access-control recovery execution",
-            ),
+            owns=("typed access-state CoA/disconnect execution",),
             depends_on=(
                 "access.radius_projection",
                 "access.radius_state",
                 "sessions.radius_resolution",
             ),
             notes=(
-                "Disconnect ACK, RFC 5176 session-not-found, rejection, timeout "
-                "and configuration failure remain distinct outcomes. Accounting "
-                "closes only when the NAS explicitly reports that the session "
-                "context is absent. Exact-old-IP projection repair issues one "
-                "disconnect and bounded-polls authoritative radacct for up to "
-                "15 seconds; it does not fall back to the lagging imported "
-                "accounting mirror, and polling never sends a second customer "
-                "interruption. "
-                "The periodic recovery loop is single-flight and caps attempts "
-                "rather than successes."
+                "Read-only transport of access-state consequences to NAS devices: "
+                "RADIUS Disconnect/CoA, RouterOS API/SSH session kicks and "
+                "address-list blocks. Disconnect ACK, RFC 5176 session-not-found, "
+                "rejection, timeout and configuration failure remain distinct "
+                "outcomes. Exact-old-IP projection repair issues one disconnect "
+                "and bounded-polls authoritative radacct for up to 15 seconds "
+                "without a second customer interruption. This concern (the "
+                "transport functions: update_subscription_sessions, "
+                "disconnect_subscription_sessions[_confirmed], "
+                "disconnect_account_sessions, the CoA senders and the "
+                "address-list block/unblock paths) writes no database row; each "
+                "final per-NAS outcome is recorded by access.enforcement_evidence "
+                "(ADR 0017). The same module ALSO performs state writes that are "
+                "not this concern (credential RADIUS profiles, cancel/suspend/"
+                "restore activation, served-IPv4 release, the FUP-lift step); "
+                "they are declared under sessions.enforcement as migration "
+                "debt, with NAS-evidenced closure and single-flight recovery."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="typed access-state CoA/disconnect execution",
+                        role=OwnerRole.TRANSPORT,
+                        input_names=(
+                            "subscription service identity",
+                            "open RADIUS accounting sessions",
+                            "NAS device inventory",
+                            "NAS response to the enforcement command",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="subscription service identity",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="subscriptions and access_credentials",
+                    ),
+                    AuthorityInput(
+                        name="open RADIUS accounting sessions",
+                        owner="external:freeradius",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source="authoritative radacct rows with acctstoptime IS NULL",
+                    ),
+                    AuthorityInput(
+                        name="NAS device inventory",
+                        owner="network.nas_inventory",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="nas_devices",
+                    ),
+                    AuthorityInput(
+                        name="NAS response to the enforcement command",
+                        owner="external:routeros",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "Disconnect-ACK/NAK Error-Cause and RouterOS API read-back"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "the transport functions read through the caller's "
+                        "session and never flush or commit; per-NAS outcome "
+                        "evidence is written by access.enforcement_evidence on "
+                        "its own unit of work (ADR 0017). Other writes in the "
+                        "same module belong to the debt concerns declared under "
+                        "sessions.enforcement, not to this contract"
+                    ),
+                    locking=(
+                        "none; a process-local CoA negative cache avoids repeating "
+                        "known-unsupported CoA"
+                    ),
+                    idempotency=(
+                        "none: each call is a new customer interruption; the "
+                        "confirmed path sends one disconnect and then only polls"
+                    ),
+                    retries=(
+                        "caller-owned; the confirmed poll is bounded to 15 seconds "
+                        "and never re-sends"
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                        "access.session_enforcement.terminal_session_timeout",
+                        "access.session_enforcement.subscription_not_found",
+                    ),
+                    mapping_owner=(
+                        "app.services.events.handlers (enforcement, "
+                        "ip_assignment_projection)"
+                    ),
+                    fail_closed_on=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="access.session_enforcement",
+                ),
+                steward="network operations",
+                design_refs=(
+                    "docs/adr/0017-enforcement-application-evidence.md",
+                    "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
+                ),
+                test_refs=(
+                    "tests/test_ip_assignment_projection_handler.py",
+                    "tests/test_enforcement_gaps.py",
+                    "tests/integration/test_enforcement_application_evidence_durability.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="access.enforcement_evidence",
+            module="app.services.enforcement_evidence",
+            owns=("enforcement application evidence observation",),
+            notes=(
+                "One current-state EnforcementApplication row per "
+                "(subscription, NAS device, effect): the typed outcome of each "
+                "address-list block/unblock and session-kick attempt. Written "
+                "out-of-band so the evidence of an irreversible device effect "
+                "survives the caller's rollback. It is evidence, never the "
+                "intended access state."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="enforcement application evidence observation",
+                        role=OwnerRole.OBSERVATION_COLLECTOR,
+                        input_names=(
+                            "final per-NAS enforcement attempt outcome",
+                            "NAS device response to the enforcement command",
+                        ),
+                        canonical_writer="access.enforcement_evidence",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="final per-NAS enforcement attempt outcome",
+                        owner="access.session_enforcement",
+                        kind=AuthorityKind.OBSERVATION,
+                        source=(
+                            "typed EnforcementOutcome from the per-NAS helpers in "
+                            "app/services/enforcement.py"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="NAS device response to the enforcement command",
+                        owner="external:routeros",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "RouterOS API/SSH result or exception, classified once "
+                            "by app/services/nas/enforcement_failure.py"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OUT_OF_BAND_EVIDENCE,
+                    boundary=(
+                        "one db_session_adapter.create_session() unit of work "
+                        "per record, independent of the caller (ADR 0017)"
+                    ),
+                    locking=(
+                        "no foreign keys; SET LOCAL lock_timeout 2s; never waits "
+                        "on the caller's subscription row lock"
+                    ),
+                    idempotency=(
+                        "upsert ON CONFLICT (subscription_id, nas_device_id, "
+                        "effect); the row is current state, not a log"
+                    ),
+                    retries=(
+                        "none; a failed write logs ERROR and is dropped, except "
+                        "a Celery soft time limit, which is re-raised"
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="access.enforcement_evidence",
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="access.enforcement_evidence",
+                ),
+                steward="network access",
+                design_refs=(
+                    "docs/adr/0017-enforcement-application-evidence.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_enforcement_application_writer.py",
+                    "tests/test_enforcement_application_outcomes.py",
+                    "tests/test_enforcement_failure_classifier.py",
+                    "tests/architecture/test_enforcement_application_single_writer.py",
+                    "tests/integration/test_enforcement_application_evidence_durability.py",
+                ),
             ),
         ),
         SOTService(
@@ -1530,13 +1928,113 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="usage.quota_cycle_policy",
+            module="app.services.usage",
+            owns=("catalogue-driven quota cycle and rollover policy resolution",),
+            depends_on=(
+                "access.subscription_lifecycle",
+                "financial.prepaid_service_renewals",
+                "service_intent.catalog_policy",
+                "sessions.radius_reconciliation",
+            ),
+            notes=(
+                "Resolves calendar-month versus funded renewal intervals, "
+                "one-cycle fresh-base rollover, and open-session counter deltas. "
+                "The prepaid renewal and usage-metering owners persist its result."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name=(
+                            "catalogue-driven quota cycle and rollover policy "
+                            "resolution"
+                        ),
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "usage allowance reset policy",
+                            "funded subscription interval",
+                            "RADIUS accounting facts",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="usage allowance reset policy",
+                        owner="service_intent.catalog_policy",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "UsageAllowance reset_basis, validity_days, "
+                            "rollover_enabled, and rollover_validity_cycles"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="funded subscription interval",
+                        owner="financial.prepaid_service_renewals",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="latest active ServiceEntitlement containing the observation",
+                    ),
+                    AuthorityInput(
+                        name="RADIUS accounting facts",
+                        owner="sessions.radius_reconciliation",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="session start/end and cumulative octet counters",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "Resolution is deterministic over catalogue, entitlement, "
+                        "prior-bucket, and accounting facts; callers own persistence."
+                    ),
+                    locking="The caller locks its renewal or metering scope.",
+                    idempotency="The same evidence returns the same interval and grants.",
+                    retries="Callers may repeat resolution before flushing.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="prepaid renewal and usage task adapters",
+                    fail_closed_on=("missing funded interval for renewal-cycle usage",),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.COMPLETE,
+                    old_owner="hard-coded UTC calendar-month quota arithmetic",
+                    new_owner="usage.quota_cycle_policy",
+                    verification=(
+                        "Renewal boundary, rollover provenance, and crossing-session "
+                        "baseline regression tests."
+                    ),
+                    cutover_gate=(
+                        "High-speed capped allowances are classified as 30-day "
+                        "renewal cycles by migration 618."
+                    ),
+                    fallback_retirement=(
+                        "Calendar-month arithmetic remains only for allowances "
+                        "whose catalogue reset_basis explicitly selects it."
+                    ),
+                ),
+                steward="billing and network access",
+                design_refs=(
+                    "docs/designs/USAGE_ALLOWANCE_RESET_CYCLES.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_usage_metering.py",
+                    "tests/test_usage_rollover.py",
+                    "tests/test_prepaid_service_renewals.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="access.fup_usage_windows",
             module="app.services.fup_usage",
             owns=(
                 "FUP consumption window bounds",
                 "windowed FUP usage aggregation",
             ),
-            depends_on=("sessions.radius_reconciliation",),
+            depends_on=(
+                "sessions.radius_reconciliation",
+                "usage.quota_cycle_policy",
+            ),
             notes=(
                 "Single source of truth for FUP consumption windows and "
                 "windowed usage reads; read-only over usage facts."
@@ -1572,8 +2070,8 @@ DOMAIN = DomainSOT(
                         owner="sessions.radius_reconciliation",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source=(
-                            "rated QuotaBucket totals and timestamped RADIUS "
-                            "usage samples"
+                            "rated QuotaBucket totals, exact bucket interval, and "
+                            "crossing-session baselines"
                         ),
                     ),
                 ),
@@ -1797,9 +2295,11 @@ DOMAIN = DomainSOT(
                         "expired lifts are idempotent."
                     ),
                     retries=(
-                        "One failed subscription rolls back independently and can retry "
-                        "with its correlation evidence; earlier subscription commands "
-                        "remain committed."
+                        "Known PostgreSQL lock/deadlock/serialization contention retries "
+                        "one rolled-back subscription command at most once. A typed "
+                        "sweep outcome identifies only deferred subscriptions for one "
+                        "delayed targeted task; later full sweeps remain the safety net. "
+                        "Other failures propagate and earlier commands remain committed."
                     ),
                 ),
                 errors=ErrorContract(
@@ -1865,6 +2365,7 @@ DOMAIN = DomainSOT(
                 ),
                 test_refs=(
                     "tests/test_fup_evaluate_commits.py",
+                    "tests/test_fup_contention_isolation.py",
                     "tests/test_fup_enforcement_hardening.py",
                     "tests/test_fup_hysteresis.py",
                     "tests/test_fup_notifications.py",
@@ -1882,4 +2383,85 @@ DOMAIN = DomainSOT(
     rule="Billing, FUP, and admin actions resolve the desired access outcome "
     "once, map it to RADIUS state once, then let enforcement apply the "
     "network-side change.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="usage.radius_accounting_import",
+                label="RADIUS accounting import",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing importer reads network usage on its configured schedule; no Center schedule trigger or import action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.metering",
+                label="Usage metering",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage totals are written by the existing metering owner; rules cannot yet start or change metering safely.",
+            ),
+            AutomationCatalogItem(
+                key="usage.rating",
+                label="Usage rating",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage rating remains an existing scheduled owner process and has no Center trigger or action contract.",
+            ),
+            AutomationCatalogItem(
+                key="usage.fup_evaluation",
+                label="Fair Usage Policy evaluation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="FUP decisions can change service access and remain under the existing policy and enforcement owners.",
+            ),
+            AutomationCatalogItem(
+                key="usage.expired_fup_removal",
+                label="Expired FUP removal",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expiry and removal continue through the FUP owner; no Automation Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.data_bundle_warning",
+                label="Expiring data-bundle warning",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Warning timing and delivery remain managed by the existing usage and notification owners.",
+            ),
+            AutomationCatalogItem(
+                key="access.stale_session_cleanup",
+                label="Stale session cleanup",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session cleanup is a protected maintenance job and has no business-rule action in the Center.",
+            ),
+            AutomationCatalogItem(
+                key="access.active_session_reconstruction",
+                label="Active-session reconstruction",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session reconstruction repairs access observations through its existing owner; it is not a configurable action.",
+            ),
+            AutomationCatalogItem(
+                key="access.device_login_radius_sync",
+                label="Device-login RADIUS synchronization",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The synchronization process remains in the existing access service and has no Center trigger/action contract.",
+            ),
+            AutomationCatalogItem(
+                key="access.enforcement_reconciliation",
+                label="Access enforcement reconciliation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reconciliation may restrict or restore access and remains protected by the access lifecycle owner.",
+            ),
+            AutomationCatalogItem(
+                key="access.consistency_audits",
+                label="Access consistency audits",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="These audits remain in their existing schedule; the Center does not yet provide approved schedule rules.",
+            ),
+        ),
+    ),
 )

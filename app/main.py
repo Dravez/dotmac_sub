@@ -26,6 +26,7 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.requests import ClientDisconnect
 from starlette.responses import Response
 
 from app.csrf import (
@@ -38,6 +39,7 @@ from app.errors import register_error_handlers
 from app.logging import configure_logging
 from app.metrics import APPLICATION_READINESS, WORKER_STARTUP_DURATION
 from app.models.domain_settings import DomainSetting, SettingDomain
+from app.models.subscriber import Subscriber
 from app.monitoring import setup_monitoring
 from app.observability import ObservabilityMiddleware
 from app.request_meta import client_ip
@@ -81,6 +83,7 @@ _CORE_ROUTER_SPECS = [
     ("app.api.crm_webhooks", "router", "api", "none"),
     ("app.api.inbox_webhooks", "router", "api", "none"),
     ("app.api.meta_inbox_webhooks", "router", "api", "none"),
+    ("app.api.zeptomail_webhooks", "router", "api", "none"),
     ("app.api.fiber_inquiry_webhooks", "router", "api", "none"),
     ("app.api.erp_material_webhooks", "router", "api", "none"),
     ("app.api.erp_staff_access_webhooks", "router", "api", "none"),
@@ -114,6 +117,15 @@ _DEFERRED_API_ROUTER_SPECS = [
     ("app.api.billing_treatments", "router", "api", "user"),
     ("app.api.files", "router", "api", "admin"),
     ("app.api.catalog", "router", "api", "user"),
+    # Offer-version admission (POST/PATCH /offer-versions) lives on its own
+    # router with NO blanket router-level dependency, deliberately: unlike
+    # "router" above, its ONLY gate is _require_offer_version_admission,
+    # which fully delegates to the owning service's authorization function
+    # (the single decision owner — round 12 finding 2). Mounted with the
+    # same "user" (bare authentication) dependency
+    # mode as "router" — this table entry adds no additional permission or
+    # leave-restriction gate of its own, on purpose.
+    ("app.api.catalog", "admission_router", "api", "user"),
     ("app.api.auth", "router", "api", "admin"),
     ("app.api.auth_flow", "router", "api", "none"),
     # Pre-authentication continuation, same class as `POST /auth/login`, so the
@@ -130,6 +142,7 @@ _DEFERRED_API_ROUTER_SPECS = [
     ("app.api.staff_sync", "router", "api", "user"),
     ("app.api.customers", "router", "api", "user"),
     ("app.api.subscribers", "router", "api", "user"),
+    ("app.api.custom_fields", "router", "api", "user"),
     # Native referrals: staff surface rides crm:lead:* per-route
     # permissions; capture and signed-context signup are public continuations
     # from shared /r/{code} links.
@@ -556,6 +569,9 @@ def _startup_preflight() -> None:
     idempotent default-settings seeding is deferred off the serving path — see
     [_run_deferred_startup]."""
     _check_test_environment_leakage()
+    from app.services.avatar import require_compatible_avatar_policy
+
+    require_compatible_avatar_policy()
     from app.config import settings
     from app.services.credential_crypto import require_encryption_key
     from app.services.kernel_key_provider import (
@@ -1040,9 +1056,14 @@ def _csrf_safe_return_url(request: Request) -> str | None:
 
 
 async def _terminated_request_response(
-    request: Request, method: str, path: str
+    request: Request,
+    method: str,
+    path: str,
+    *,
+    disconnected: bool | None = None,
 ) -> Response:
-    disconnected = await request.is_disconnected()
+    if disconnected is None:
+        disconnected = await request.is_disconnected()
     logger.info(
         "No response returned from downstream app; request terminated (%s): %s %s",
         "client_disconnected" if disconnected else "reload_or_shutdown",
@@ -1060,6 +1081,7 @@ async def customer_service_location_gate_middleware(request: Request, call_next)
     location_route = path == "/portal/location" or path.startswith("/portal/location/")
     auth_route = path == "/portal/auth" or path.startswith("/portal/auth/")
     request.state.service_location_required = False
+    request.state.profile_biodata_required = False
     if (
         not is_customer_portal
         or location_route
@@ -1070,9 +1092,7 @@ async def customer_service_location_gate_middleware(request: Request, call_next)
 
     db = SessionLocal()
     try:
-        from starlette.responses import RedirectResponse
-
-        from app.services import location_capture
+        from app.services import location_capture, web_customer_actions
         from app.services.customer_context import optional_customer_subscriber_id
         from app.web.customer.auth import get_current_customer_from_request
 
@@ -1092,8 +1112,25 @@ async def customer_service_location_gate_middleware(request: Request, call_next)
                     "customer service location gate failed for subscriber %s",
                     subscriber_id,
                 )
-            if request.state.service_location_required:
-                return RedirectResponse(url="/portal/location", status_code=303)
+            if (
+                not request.state.service_location_required
+                and not location_route
+                and location_capture.service_location_requirement_enabled(db)
+            ):
+                try:
+                    subscriber = db.get(Subscriber, subscriber_id)
+                    if subscriber is not None:
+                        completion = web_customer_actions.evaluate_individual_biodata(
+                            subscriber
+                        )
+                        request.state.profile_biodata_required = (
+                            completion.applicable and not completion.complete
+                        )
+                except Exception:
+                    logger.exception(
+                        "customer biodata completion gate failed for subscriber %s",
+                        subscriber_id,
+                    )
     finally:
         db.close()
     return await call_next(request)
@@ -1311,7 +1348,15 @@ async def csrf_middleware(request: Request, call_next):
                 or "multipart/form-data" in content_type
             ):
                 # Read body and check token
-                body = await request.body()
+                try:
+                    body = await request.body()
+                except ClientDisconnect:
+                    return await _terminated_request_response(
+                        request,
+                        method,
+                        path,
+                        disconnected=True,
+                    )
 
                 # Parse form data to get CSRF token
                 from urllib.parse import parse_qs
@@ -1446,6 +1491,7 @@ _API_SYNC_FEED_PATHS = frozenset(
         "/api/v1/billing-accounts/sync",
         "/api/v1/credit-notes/sync",
         "/api/v1/invoices/sync",
+        "/api/v1/invoices/accounting-sync/v2",
         "/api/v1/payment-channels/sync",
         "/api/v1/payments/sync",
         "/api/v1/resellers/sync",

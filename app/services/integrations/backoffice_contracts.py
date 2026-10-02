@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -103,6 +104,28 @@ class ErpExpenseReceiptUploadOutcome(BaseModel):
     created: bool
 
 
+class ErpExpenseSubmissionCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_claim_id: UUID
+
+
+class ErpExpenseClaimTransitionOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_claim_id: UUID
+    claim_id: UUID
+    claim_number: str
+    status: Literal["submitted", "approved", "rejected"]
+
+
+class ErpExpenseApprovalLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_line_id: UUID
+    approved_amount: str
+
+
 class ErpExpenseApprovalCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -111,3 +134,46 @@ class ErpExpenseApprovalCommand(BaseModel):
     decided_by_email: str
     decided_at: str
     notes: str | None = None
+    items: tuple[ErpExpenseApprovalLine, ...] = ()
+    adjustment_reason: str | None = None
+
+
+class ErpExpenseRejectionCommand(ErpExpenseApprovalCommand):
+    reason: str
+
+
+ErpExpensePaymentStatus = Literal[
+    "pending",
+    "processing",
+    "completed",
+    "failed",
+    "reversed",
+    "abandoned",
+    "expired",
+    "indeterminate",
+]
+
+
+class ErpExpensePaymentCommand(BaseModel):
+    """One manager-authorized, idempotent ERP reimbursement command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_claim_id: UUID
+    command_id: UUID
+    initiated_by_email: str
+    initiated_at: datetime
+
+
+class ErpExpensePaymentOutcome(BaseModel):
+    """ERP-owned payout fact returned after accepting a payment command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: UUID
+    claim_number: str
+    claim_status: Literal["approved", "paid"]
+    source_claim_id: UUID
+    payment_intent_id: UUID
+    payment_status: ErpExpensePaymentStatus
+    retryable: bool

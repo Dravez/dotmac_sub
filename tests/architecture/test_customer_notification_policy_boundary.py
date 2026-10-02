@@ -32,6 +32,15 @@ def test_customer_notification_policy_has_complete_read_only_contract() -> None:
     assert "communications.customer_policy" not in baseline.splitlines()
 
 
+def test_bulk_send_uses_persisted_template_purpose_for_policy_category() -> None:
+    web_source = (ROOT / "app/services/web_customer_actions.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "category = template.purpose.value" in web_source
+    assert 'resolve_notification_category("service_bulk_message")' not in web_source
+
+
 def test_bulk_preview_adapter_does_not_define_a_parallel_intent_writer() -> None:
     web_source = (ROOT / "app/services/web_customer_actions.py").read_text(
         encoding="utf-8"

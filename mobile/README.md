@@ -119,6 +119,11 @@ and iOS Info.plist; for a white-label build, override `BRAND_PAYMENT_SCHEME` in
 the Dart build *and* the matching native entries (Gradle `-PpaymentScheme=`,
 iOS `CFBundleURLSchemes`).
 
+Gateway return links are owned by `PaymentLinkHandler`, which verifies the
+returned reference with the API and refreshes billing data. Flutter's default
+deep-link router is disabled for this app because a URL cannot reconstruct the
+in-memory checkout context required to open `/pay`.
+
 ## How auth works
 
 1. `POST /auth/login` returns either a token pair **or** an MFA challenge
@@ -154,6 +159,32 @@ The Usage tab is driven primarily by RADIUS **accounting sessions** (download/
 upload octets) — this ISP meters via RADIUS, not quota buckets, so quota cards
 only appear when present.
 
+### Ticket conversations
+
+The ticket detail timeline renders the API-owned comment `author_type` instead
+of inferring the sender from layout or identifiers: customer replies appear as
+**You**, staff replies as **Support Team**, and system/unknown authors remain
+visibly distinct. Internal staff notes are never rendered.
+
+Pull-to-refresh and the ticket refresh action reload the comments and ticket
+header from the authoritative `/me/support` reads. Successful reply and
+resolution actions request the same refresh.
+
+While the ticket screen is visible, its authenticated `/ws/inbox` connection
+listens only for the typed `support_ticket_comment_changed` invalidation on the
+server-assigned principal topic. The token is sent through the `dotmac-auth`
+WebSocket subprotocol and never in the URL. The hint contains identifiers only;
+the app never renders content from it. A matching Ticket event, connection
+acknowledgement, reconnect, or app resume coalesces into one authoritative
+comments read. These automatic reconciliations do not reload the Ticket header.
+There is no periodic Ticket-comment REST poll.
+
+The socket closes while the app is backgrounded and reconnects with the latest
+access token on resume. Existing comments remain visible through transient
+socket or REST failures, with a compact reconnect/unavailable status and manual
+pull-to-refresh fallback. This Support-owned invalidation is separate from the
+Team Inbox chat WebSocket.
+
 `accountIdProvider` (`Me.id` = the subscriber id) is still used where the caller's
 id is needed explicitly (e.g. creating a ticket). No staff scopes required.
 
@@ -168,10 +199,13 @@ bearer-auth API clients:
 1. `POST /api/v1/payments/initiate {invoice_id}` → `{provider_type,
    provider_public_key, payment_reference, customer_email, amount, currency}`.
    Self-scoped to the caller's own invoice; no `billing:*` permission required.
-2. The app opens `PaymentWebViewScreen`, which runs the **Paystack** or
-   **Flutterwave** inline JS keyed by that public key + reference. On success the
-   provider callback redirects to a `dotmacpay://success?reference=…` sentinel
-   the WebView intercepts.
+2. The app opens the server-returned, provider-hosted HTTPS checkout in
+   `PaymentWebViewScreen`. Browser-based bank and 3-D Secure redirects remain in
+   that WebView. Native-wallet links (including OPay custom, Android
+   `intent://`, and iOS/Android app links) are handed to the installed app while
+   the checkout stays on the back stack. The WebView intercepts the API's HTTPS
+   verification callback (or the legacy `dotmacpay://success` sentinel) and
+   returns the reference to the owning payment flow.
 3. `POST /api/v1/payments/verify {reference}` → verifies with the provider,
    records the `Payment`, allocates it to the invoice (idempotent on the
    provider's external id), and returns the result.
@@ -181,8 +215,8 @@ Requirements:
   (`default_payment_provider_type` + the provider public/secret keys).
 - `webview_flutter` needs Android `minSdkVersion >= 19` (default is fine) and,
   for iOS, no extra setup for https content.
-- The provider inline JS loads from the internet, so the device/emulator needs
-  network access.
+- The provider-hosted checkout loads from the internet, so the device/emulator
+  needs network access.
 
 ## Crash reporting (GlitchTip)
 

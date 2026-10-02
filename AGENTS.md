@@ -25,7 +25,8 @@ authoritative documents in the same change that updates the contract.
   transactions.
 - Adapters create and close sessions. A registered public command owner controls
   the atomic business transaction. Nested helpers use `flush()` and never
-  commit independently.
+  commit independently; the only exception is a declared
+  `out_of_band_evidence` writer approved by its own ADR (see ADR 0002).
 - An optional participant consequence may use only
   `app.services.owner_commands.execute_owner_savepoint`; its callback remains
   flush-only, and the owner must record durable failure evidence after rollback.
@@ -100,10 +101,13 @@ authoritative documents in the same change that updates the contract.
   environment is reached from that one branch by DIGEST, never by another merge.
 - `main` is the machine-owned integration and release branch: it is the
   repository default branch and the ONLY protected branch. Its protection is
-  what makes the trunk machine-owned rather than a convention -- 19 required
-  status contexts, `strict` (a branch must be up to date before merging), and
-  `enforce_admins` (nobody, including an administrator, merges around the
-  gates); force pushes and deletion are refused. A workflow trigger, runbook,
+  what makes the trunk machine-owned rather than a convention: repository
+  ruleset `24078272` requires 15 status contexts and an up-to-date branch,
+  with no bypass actors, including administrators. Branch protection also
+  requires one approving review; Michael's temporary admin review exception
+  is recorded in Governance decision 53, with review due 2026-10-27
+  (`docs/runbooks/STAGING_PROMOTION.md`). It does not bypass CI or the current
+  base requirement. Force pushes and deletion are refused. A workflow trigger, runbook,
   or agent instruction that names any other integration branch contradicts
   this and is a defect, not a local variation. `feature -> dev -> main` is
   retired and must not be reintroduced in tracked normative text or in a

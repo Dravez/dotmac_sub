@@ -29,12 +29,13 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.stored_file import StoredFile
 from app.services import support as support_service
+from app.services import web_custom_fields as web_custom_fields_service
 from app.services import web_support_ticket_bulk as support_ticket_bulk_service
 from app.services import (
     web_support_ticket_bulk_actions as support_ticket_bulk_actions_service,
 )
 from app.services import web_support_tickets as support_web_service
-from app.services.auth_dependencies import can, require_permission
+from app.services.auth_dependencies import can, load_permission_keys, require_permission
 from app.services.domain_errors import DomainError
 from app.services.file_storage import build_content_disposition, file_uploads
 from app.services.list_query import ListQuery
@@ -118,6 +119,7 @@ def tickets_list(
     status: str | None = Query(default=None),
     ticket_type: str | None = Query(default=None),
     region: str | None = Query(default=None),
+    service_team_id: str | None = Query(default=None),
     assigned_to_me: bool = Query(default=False),
     project_manager_person_id: str | None = Query(default=None),
     site_coordinator_person_id: str | None = Query(default=None),
@@ -144,6 +146,9 @@ def tickets_list(
             status=status,
             ticket_type=ticket_type,
             region=region,
+            service_team_id=(
+                service_team_id if isinstance(service_team_id, str) else None
+            ),
             assigned_to_me=assigned_to_me,
             project_manager_person_id=project_manager_person_id,
             site_coordinator_person_id=site_coordinator_person_id,
@@ -209,6 +214,7 @@ def tickets_export_csv(
     status: str | None = Query(default=None),
     ticket_type: str | None = Query(default=None),
     region: str | None = Query(default=None),
+    service_team_id: str | None = Query(default=None),
     assigned_to_me: bool = Query(default=False),
     project_manager_person_id: str | None = Query(default=None),
     site_coordinator_person_id: str | None = Query(default=None),
@@ -234,6 +240,7 @@ def tickets_export_csv(
             status=status,
             ticket_type=ticket_type,
             region=region,
+            service_team_id=service_team_id,
             assigned_to_me=assigned_to_me,
             project_manager_person_id=project_manager_person_id,
             site_coordinator_person_id=site_coordinator_person_id,
@@ -313,6 +320,14 @@ def ticket_new(request: Request, db: Session = Depends(get_db)):
             can_assign_ticket=True,
         )
     )
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="support_ticket",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     context.update({"page_title": "New Ticket", "form_mode": "create", "ticket": None})
     return templates.TemplateResponse("admin/support/tickets/new.html", context)
 
@@ -342,7 +357,7 @@ def ticket_edit_page(
     response_class=HTMLResponse,
     dependencies=[Depends(require_permission("support:ticket:create"))],
 )
-def ticket_create(
+async def ticket_create(
     request: Request,
     title: str = Form(...),
     description: str = Form(""),
@@ -367,6 +382,7 @@ def ticket_create(
     duplicate_override: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    raw_form = await request.form()
     actor_id = _actor_id(request)
     duplicate_confirmed = str(duplicate_override or "").strip().lower() in {
         "1",
@@ -402,6 +418,15 @@ def ticket_create(
             related_outage_ticket_id=related_outage_ticket_id,
             assignee_person_ids=assignee_person_ids,
         )
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="support_ticket",
+            target_id=ticket.id,
+            form=raw_form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=actor_id,
+        )
     except support_web_service.DuplicateTicketWarningError as exc:
         # Similar open tickets exist and the operator has not confirmed the
         # override — re-render the form with the duplicate warning (409, like
@@ -431,6 +456,16 @@ def ticket_create(
                     "related_outage_ticket_id": related_outage_ticket_id or "",
                 },
                 can_assign_ticket=True,
+            )
+        )
+        context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="support_ticket",
+                permission_keys=load_permission_keys(
+                    getattr(getattr(request, "state", None), "auth", None) or {}, db
+                ),
+                form=raw_form,
             )
         )
         context.update(
@@ -484,6 +519,16 @@ def ticket_create(
             )
         )
         context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="support_ticket",
+                permission_keys=load_permission_keys(
+                    getattr(getattr(request, "state", None), "auth", None) or {}, db
+                ),
+                form=raw_form,
+            )
+        )
+        context.update(
             {
                 "page_title": "New Ticket",
                 "form_mode": "create",
@@ -532,6 +577,16 @@ def ticket_detail(request: Request, ticket_lookup: str, db: Session = Depends(ge
     context["handoff_notice"] = request.query_params.get("handoff_notice")
     context["handoff_error"] = request.query_params.get("handoff_error")
     context["action_error"] = request.query_params.get("action_error")
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="support_ticket",
+            target_id=context["ticket"].id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
+    )
     return templates.TemplateResponse("admin/support/tickets/detail.html", context)
 
 

@@ -9,6 +9,7 @@
 {% set status_val = subscription.status.value if subscription.status else 'pending' %}
 {% set can_activate = status_val == 'pending' %}
 {% set can_restore = status_val in ('suspended', 'blocked', 'stopped', 'disabled') %}
+{% set can_resume_pause = status_val == 'paused' and ticket_pause_resume_preview %}
 {% set can_suspend = status_val == 'active' %}
 {% set can_disable = status_val not in ('disabled', 'canceled', 'expired', 'hidden', 'archived') %}
 {% set can_cancel = cancel_subscription_preview and cancel_subscription_preview.eligible %}
@@ -52,6 +53,12 @@
             {% if prepaid_bill_now_eligibility and prepaid_bill_now_eligibility.eligible %}
             <form method="post" action="/admin/catalog/subscriptions/{{ subscription.id }}/bill-now/preview">
                 {% include "components/forms/csrf_input.html" %}
+                <label class="sr-only" for="prepaid-bill-now-effective-at">Service period start in UTC</label>
+                <input id="prepaid-bill-now-effective-at" name="effective_at" type="datetime-local"
+                       class="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                       title="Optional historical service-period start in UTC"
+                       aria-describedby="prepaid-bill-now-effective-at-help">
+                <span id="prepaid-bill-now-effective-at-help" class="sr-only">Leave blank to start now. Enter a historical service-period start in UTC when finance has approved a backdated recovery period.</span>
                 <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700">Bill now</button>
             </form>
             {% elif prepaid_bill_now_eligibility %}
@@ -96,6 +103,13 @@
                         <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                         Restore
                     </button>
+                    {% endif %}
+                    {% if can_resume_pause %}
+                    <a href="#ticket-service-pause" @click="open = false"
+                       class="flex w-full items-center gap-2 px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/20">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"/></svg>
+                        Resume Subscription
+                    </a>
                     {% endif %}
                     {% if can_suspend %}
                     <button type="button" @click="open = false; openLifecycle('suspend')"
@@ -242,6 +256,51 @@
         </div>
     </div>
 
+    {% if ticket_pause_resume_preview %}
+    <section id="ticket-service-pause"
+             class="rounded-2xl border border-amber-300 bg-amber-50 p-5 dark:border-amber-800 dark:bg-amber-950/20"
+             aria-labelledby="ticket-service-pause-heading">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+                <h2 id="ticket-service-pause-heading" class="text-base font-semibold text-slate-950 dark:text-white">Ticket-linked service pause</h2>
+                <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">Billing and network access are paused while the linked support issue is unresolved.</p>
+            </div>
+            <span class="inline-flex rounded-full bg-amber-200 px-3 py-1 text-xs font-semibold text-amber-950 dark:bg-amber-900 dark:text-amber-100">Paused</span>
+        </div>
+        <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <div><dt class="text-slate-500 dark:text-slate-400">Ticket status</dt><dd class="mt-1 font-semibold text-slate-900 dark:text-white">{{ ticket_pause_resume_preview.ticket_status.value | replace('_', ' ') | title }}</dd></div>
+            <div><dt class="text-slate-500 dark:text-slate-400">Paused since</dt><dd class="mt-1 font-semibold text-slate-900 dark:text-white">{{ ticket_pause_resume_preview.effective_at | app_datetime('%b %d, %Y %H:%M:%S') }}</dd></div>
+            <div><dt class="text-slate-500 dark:text-slate-400">Paused duration</dt><dd class="mt-1 font-semibold text-slate-900 dark:text-white">{{ ticket_pause_resume_preview.duration_label }}</dd></div>
+            <div><dt class="text-slate-500 dark:text-slate-400">Projected billing date</dt><dd class="mt-1 font-semibold text-slate-900 dark:text-white">{{ ticket_pause_resume_preview.projected_next_billing_at | app_datetime('%b %d, %Y %H:%M:%S', '—') }}</dd></div>
+        </dl>
+        {% if ticket_pause_resume_preview.blocking_reasons %}
+        <div class="mt-4 rounded-lg border border-amber-300 bg-white/70 px-4 py-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-slate-900/50 dark:text-amber-100">
+            <p class="font-semibold">Resume is not available yet.</p>
+            <ul class="mt-1 list-disc pl-5">{% for blocker in ticket_pause_resume_preview.blocking_reasons %}<li>{{ blocker | replace('_', ' ') | capitalize }}</li>{% endfor %}</ul>
+        </div>
+        {% elif can_resume_ticket_pause %}
+        <form method="post" action="/admin/catalog/subscriptions/{{ subscription.id }}/ticket-pause/resume"
+              class="mt-5 space-y-3"
+              data-confirm="Resume this service and extend its billing date by the exact paused duration?"
+              data-confirm-variant="warning" data-confirm-label="Resume service">
+            {% include "components/forms/csrf_input.html" %}
+            <input type="hidden" name="cause_id" value="{{ ticket_pause_resume_preview.cause_id }}">
+            <input type="hidden" name="preview_fingerprint" value="{{ ticket_pause_resume_preview.fingerprint }}">
+            <input type="hidden" name="idempotency_key" value="{{ pause_resume_idempotency_key }}">
+            <input type="hidden" name="confirmed" value="yes">
+            <label for="ticket-pause-resume-reason" class="block text-sm font-medium text-slate-800 dark:text-slate-200">Administrative resume reason</label>
+            <textarea id="ticket-pause-resume-reason" name="reason" required rows="2"
+                      class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                      placeholder="Confirm the resolved issue and reason for resuming service"></textarea>
+            <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"/></svg>
+                Resume service
+            </button>
+        </form>
+        {% endif %}
+    </section>
+    {% endif %}
+
     <script>
         function subscriptionDetailActions() {
             return {
@@ -360,7 +419,7 @@
                         body.set('expected_head', this.preview.expected_head);
                         if (this.kind === 'change_plan' && this.effectiveTiming === 'immediate') {
                             body.set('preview_fingerprint', this.billingQuote().preview_fingerprint);
-                            body.set('effective_at', this.preview.effective_at);
+                            body.set('effective_at', this.billingQuote().preview_effective_at);
                         }
                         const resp = await fetch(`/admin/catalog/subscriptions/${this.subscriptionId}/lifecycle/execute`, {
                             method: 'POST',
@@ -588,7 +647,7 @@
                         <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">{{ subscription.start_at | app_datetime('%b %d, %Y %H:%M', '—') }}</p>
                     </div>
                     <div x-data="{ showCommercialTerms: false }">
-                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Next Billing</p>
+                        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{% if subscription.billing_mode and subscription.billing_mode.value == 'prepaid' %}Service Expiry{% else %}Next Billing{% endif %}</p>
                         <p class="mt-1 text-sm text-slate-700 dark:text-slate-300">{{ subscription.next_billing_at | app_datetime('%b %d, %Y %H:%M', '—') }}</p>
                         <button type="button"
                                 @click="showCommercialTerms = true"

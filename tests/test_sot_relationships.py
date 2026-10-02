@@ -20,6 +20,8 @@ def test_domain_sot_relationships_cover_expected_domains():
         "observability",
         "workforce_operations",
         "support_operations",
+        "automation_control_plane",
+        "custom_fields_control_plane",
         "tenancy",
         "ai_advisory",
         "provisioning_operations",
@@ -95,6 +97,7 @@ def test_domain_sot_relationships_encode_cross_domain_dependencies():
         "sales.lead_lifecycle",
     )
     assert sot_relationships.dependencies_for("sales.orders") == (
+        "financial.billing_tax_resolution",
         "sales.service",
         "sales.lead_lifecycle",
         "sales.fulfillment",
@@ -532,9 +535,11 @@ def test_domain_sot_relationships_encode_cross_domain_dependencies():
         "financial.payments",
         "financial.billing_tax_resolution",
         "financial.prepaid_funding_reconstruction",
+        "financial.service_extensions",
         "financial.subscription_billing_grants",
         "financial.subscription_billing_treatments",
         "events.dispatcher",
+        "service_intent.catalog_policy",
     )
     assert sot_relationships.dependencies_for("financial.payment_reconciliation") == (
         "control.settings_spec",
@@ -609,10 +614,14 @@ def test_domain_sot_relationships_encode_cross_domain_dependencies():
         "customer.accounts",
         "access.subscription_lifecycle",
         "financial.billing_profile",
+        "financial.customer_chargeability",
+        "financial.invoices",
+        "financial.payments",
         "financial.subscription_billing_treatments",
         "service_intent.catalog_policy",
         "network.identity",
         "network.ip_assignment_lifecycle",
+        "support.ticket_lifecycle",
     )
     account_visibility = sot_relationships.owning_service_for(
         "legacy imported Subscriber deletion classification"
@@ -769,6 +778,7 @@ def test_domain_sot_relationships_encode_cross_domain_dependencies():
         "auth.permission_gate",
         "communications.nextcloud_talk_staff",
         "communications.staff_notifications",
+        "communications.conversation_lead_relationships",
         "communications.team_inbox_threads",
         "communications.team_inbox_contact_resolution",
         "communications.team_inbox_routing",
@@ -924,7 +934,6 @@ def test_domain_sot_relationships_resolve_owning_service_by_concern():
     )
     assert sot_relationships.dependencies_for("support.ticket_region_projection") == (
         "support.ticket_configuration",
-        "support.ticket_lifecycle",
     )
 
     ticket_presentation = sot_relationships.owning_service_for(

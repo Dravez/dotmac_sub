@@ -39,7 +39,9 @@ COMMENTS = Path("templates/admin/inbox/comments.html").read_text(encoding="utf-8
 LAYOUT = Path("templates/layouts/admin.html").read_text(encoding="utf-8")
 OVERLAYS = Path("templates/admin/inbox/_overlays.html").read_text(encoding="utf-8")
 QUEUE = Path("templates/admin/inbox/_queue_macros.html").read_text(encoding="utf-8")
-SIDEBAR = Path("templates/admin/inbox/_sidebar.html").read_text(encoding="utf-8")
+SIDEBAR = Path("templates/admin/inbox/_sidebar.html").read_text(
+    encoding="utf-8"
+) + Path("templates/admin/inbox/_queue.html").read_text(encoding="utf-8")
 TICKET_PANEL = Path("templates/admin/inbox/_ticket_panel.html").read_text(
     encoding="utf-8"
 )
@@ -259,7 +261,8 @@ def test_reply_submission_refreshes_inbox_fragments_without_page_navigation():
     assert 'workspace?.refreshConversationList?.("reply")' not in JAVASCRIPT
     assert 'this.draft = ""' in JAVASCRIPT
     assert "window.location.reload" not in JAVASCRIPT
-    assert "admin-inbox.js?v=20260910a" in INDEX
+    assert "admin-inbox.js?v=20260915-navigation" in INDEX
+    assert "admin-inbox.js?v=20260910a" not in INDEX
     assert "admin-inbox.js?v=20260904a" not in INDEX
     assert "admin-inbox.js?v=20260830a" not in INDEX
     assert "admin-inbox.js?v=20260827a" not in INDEX
@@ -373,7 +376,16 @@ def test_conversation_drilldown_and_reply_fallback_preserve_queue_page_state():
     pagination_marker = JAVASCRIPT.index("navigatePage(urlValue)")
     pagination_body = JAVASCRIPT[pagination_marker : pagination_marker + 500]
     assert 'url.searchParams.set("c", this.selectedId)' in pagination_body
-    assert "window.__inboxReturnUrl" in pagination_body
+    assert 'intent: "pagination"' in pagination_body
+    assert 'target: "#inbox-conversation-queue"' in pagination_body
+    assert 'historyMode: "push"' in pagination_body
+    # Return state must describe rendered rows, not a pending pagination intent.
+    assert "window.__inboxReturnUrl =" not in pagination_body
+    swap_marker = JAVASCRIPT.index('"htmx:afterSwap"')
+    swap_end = JAVASCRIPT.index('"htmx:beforeCleanupElement"', swap_marker)
+    swap_body = JAVASCRIPT[swap_marker:swap_end]
+    assert "request.applied = true" in swap_body
+    assert "window.__inboxReturnUrl = `${url.pathname}${url.search}`" in swap_body
 
 
 def test_macro_menu_dispatches_identity_not_just_text():
@@ -548,19 +560,21 @@ def test_stats_filters_scroll_without_hiding_the_conversation_queue():
 
 
 def test_sidebar_filters_replace_stale_requests_and_expose_busy_state():
-    assert 'hx-sync="this:replace"' in SIDEBAR
-    assert 'hx-sync="#inbox-sidebar-content:replace"' in SIDEBAR
+    assert '@submit.prevent="applyAdvancedFilters($el)"' in SIDEBAR
     assert ':aria-busy="filterLoading.toString()"' in SIDEBAR
     assert "Checking for updates" in JAVASCRIPT
     assert "stale.xhr.abort()" in JAVASCRIPT
     assert "if (this.filterLoading) return" in JAVASCRIPT
-    assert 'document.body.addEventListener("htmx:sendAbort", release)' in JAVASCRIPT
+    abort_marker = JAVASCRIPT.index('document.body.addEventListener("htmx:sendAbort"')
+    abort_end = JAVASCRIPT.index("\n        );", abort_marker)
+    assert "release(event, true)" in JAVASCRIPT[abort_marker:abort_end]
     assert "InboxQueueComposition.sidebar" in ROUTES
     assert "InboxQueueComposition.queue_only" in ROUTES
     assert "manager_dashboard = None" in ROUTES
     assert 'hx-get="/admin/inbox/manager-dashboard"' in SIDEBAR
     assert "def team_inbox_manager_dashboard(" in ROUTES
     assert 'htmx_target == "inbox-conversation-queue"' in ROUTES
+    assert '"admin/inbox/_queue.html"' in ROUTES
 
 
 def test_inbox_refresh_status_precedes_stats_filters_and_conversation_list():
@@ -572,13 +586,15 @@ def test_inbox_refresh_status_precedes_stats_filters_and_conversation_list():
         "Waiting for new activity",
         "Checking for updates",
         "Inbox updated just now",
-        "Couldn’t update — retrying",
+        "Couldn’t update conversations — retry available",
     ):
         assert label in SIDEBAR or label in JAVASCRIPT
     for contract in (
         'inboxRefreshState: "idle"',
         "this.inboxRefreshStarted()",
-        "this.inboxRefreshFinished(requestFailed)",
+        "requestFailed || event.detail?.xhr?.status === 204",
+        "this.inboxRefreshFinished(failed)",
+        "if (!failed && !request.applied) return",
         "event.detail?.successful === false",
     ):
         assert contract in JAVASCRIPT
@@ -715,14 +731,17 @@ def test_sidebar_resize_handle_has_exact_shape_states_and_tooltip():
     ):
         assert class_name in handle
     assert 'x-show="!managerDashboardOpen"' in handle
-    assert "hidden" in handle and "sm:flex" in handle
+    assert "hidden" in handle and "lg:flex" in handle
     assert "Drag to resize inbox" in handle
 
 
-def test_sidebar_resize_drag_state_is_bounded_and_persisted():
+def test_sidebar_resize_drag_state_is_desktop_only_bounded_and_persisted():
+    style_marker = JAVASCRIPT.index("      desktopSidebarStyle() {")
+    style_body = JAVASCRIPT[style_marker : style_marker + 300]
+    assert 'if (window.innerWidth < 1024) return ""' in style_body
     marker = JAVASCRIPT.index("startSidebarResize(event)")
     body = JAVASCRIPT[marker : marker + 2600]
-    assert "window.innerWidth <= 639" in body
+    assert "window.innerWidth < 1024" in body
     assert "this.resizingSidebar = true" in body
     assert "this.resizingSidebar = false" in body
     assert 'document.body.style.cursor = "ew-resize"' in body
@@ -1169,6 +1188,21 @@ def test_lifecycle_assignment_and_channel_filters_are_composable():
     assert 'clearScope === "assignment"' in body
     assert '@change="navigateFilter({ channel_type: $el.value })"' in SIDEBAR
     assert '@change="navigateFilter({ service_team_id: $el.value })"' in SIDEBAR
+
+
+def test_operator_filters_and_background_refreshes_use_the_queue_only_projection():
+    start = JAVASCRIPT.index("requestInboxList(urlValue, options = {}) {")
+    end = JAVASCRIPT.index("conversationIdFromPath(path) {", start)
+    body = JAVASCRIPT[start:end]
+    assert '"operator_filter"' in body
+    assert '"search"' in body
+    assert '"history"' in body
+    assert 'const backgroundIntents = ["poll", "read_state", "realtime"]' in body
+    assert "...backgroundIntents" in body
+    assert "target: options.target || (" in body
+    assert '"#inbox-conversation-queue"' in body
+    assert 'select: options.select || (queueOnly ? "#inbox-conversation-queue"' in body
+    assert 'swap: options.swap || (queueOnly ? "outerHTML"' in body
 
 
 def test_by_agent_panel_uses_live_agent_and_activity_filters():

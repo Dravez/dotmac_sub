@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -1232,4 +1237,57 @@ DOMAIN = DomainSOT(
     "may hold several independent roles. Domain records and security "
     "principals link to Party; they do not create parallel identity. "
     "No adapter treats the additive foundation as a completed cutover.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="identity.staff_invitation",
+                label="Staff account invitation",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Secure invitations remain part of account provisioning; the Center has no approved identity trigger or invitation action.",
+            ),
+            AutomationCatalogItem(
+                key="identity.reseller_invitation",
+                label="Reseller account invitation",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reseller identity and access safeguards remain with account provisioning; no Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="identity.password_recovery",
+                label="Password recovery",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Recovery links are security-sensitive and remain in the existing identity flow; they cannot yet be configured as rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="identity.session_revocation_after_credential_change",
+                label="Revoke sessions after a credential change",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session revocation follows the credential owner's verified identity event and is not exposed as an independent Center action.",
+            ),
+            AutomationCatalogItem(
+                key="identity.invitation_expiry",
+                label="Invitation expiry",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expiry is driven by the existing durable timer and identity lifecycle; Center schedule support is not registered.",
+            ),
+            AutomationCatalogItem(
+                key="identity.nin_verification",
+                label="NIN verification",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Identity verification requires an authorized request and a verified provider result; no Center trigger or action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="identity.credential_encryption_key_rotation",
+                label="Credential encryption-key rotation",
+                group="Customer identity",
+                state=AutomationCatalogState.unavailable,
+                explanation="Key rotation is a security-sensitive maintenance schedule and remains managed by the existing credential owner.",
+            ),
+        ),
+    ),
 )

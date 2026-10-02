@@ -73,8 +73,8 @@ Funding, verified implementation, service-order release, and CX acceptance are
 consumed through `sales.fulfillment`'s receipted owner commands
 (`consume_funding_satisfaction` / `consume_verified_implementation` /
 `consume_service_order_release` / `consume_cx_acceptance`). The funding
-consumer's catalog, invoice, add-on, route, service-order, and payment helpers
-are flush-only participants; its complete effect and unique
+consumer's installation-invoice and account-payment helpers are flush-only
+participants; its complete effect and unique
 `(consumer, event_id)` receipt commit atomically via `events.owner_outputs`
 (ADR 0007 §2), so redelivery is an exact no-op.
 
@@ -88,8 +88,8 @@ drives an invoice, payment, balance, access decision, or funding transition.
 
 ```text
 sales_order.funding_satisfied   (sales.orders, atomically with the paid edge)
-  -> pending Subscription + draft ServiceOrder per service line
-     + order payment evidence            [sales.fulfillment, receipted]
+  -> installation settlement + order payment evidence
+     + unapplied remainder as account credit       [sales.fulfillment, receipted]
   -> sales.fulfillment.funding_applied
   -> proposed BillingContractVersion     [billing.contracts, shadow + receipted]
   -> proposed first-period obligation    [billing.obligations, shadow + receipted]
@@ -124,6 +124,41 @@ later commercial change makes that approval stale and every payment endpoint
 fails closed until the revised snapshot is approved. Approval changes the
 customer projection to `Approved — Payment required`; it does not create an
 Invoice, SalesOrder, or Project. Those remain consequences of verified payment.
+
+Mobile service requests first select a typed installation or relocation choice.
+The destination pin and the choice are stored on the Lead and Quote. Relocation
+inherits the exact source Subscription already selected on the mobile Service
+tab instead of asking the customer to select it again. Only relocation choices
+compatible with that Subscription's access technology are offered, and the
+server rechecks that the source is owned and active. A technology change uses
+the customer's selected destination plan; moves that keep
+the same technology retain the current plan. The selected plan must be an
+active, priced, customer-visible offer compatible with the source service.
+Fiber destinations use the native fiber proximity check. Airfiber destinations require a site check and
+must not borrow the fiber feasibility result. No self-service installation or
+relocation request receives a system-generated preliminary price. Every choice
+begins without priced lines, so Sales must author the commercial amount before approval. Customer
+Quote projections omit all price, deposit, and line amounts while review is
+pending or stale; approval requires a priced line, positive total, and deposit
+policy. The existing subscription is not changed by request intake.
+Relocation approval requires the payment percentage to be 100%; its approved
+customer projection labels the payable amount as the full relocation charge.
+Relocation quotes cannot enter the installation Quote-deposit conversion path:
+that path creates a new installation scope and does not settle the canonical
+subscription-change relocation charge. On customer booking, the typed
+`service_intent.subscription_change_execution` handoff locks the approved Quote,
+rechecks the source Subscription and destination offer, records the pinned
+Address and qualification, and issues exactly one Invoice for the full
+staff-approved Quote total. The approved Quote snapshot is the one-time fee
+authority for this path. Quote edits and payment re-review are refused after
+handoff so that the billed amount remains the approved snapshot. A retry
+returns the same Invoice. The existing invoice
+payment owner collects it; only canonical full settlement releases the
+relocation ServiceOrder and WorkOrder. The verified field completion changes
+the existing Subscription to the selected destination offer and address.
+The full quoted relocation charge covers this service change, so finalization
+does not create a second plan-proration charge. The configured wireless
+relocation fee remains the authority for the separate plan-change preview path.
 
 ## Named owners
 
@@ -207,6 +242,29 @@ depend on HTTP request/response or exception types.
   history, import/export, bulk Lead commands, aging analytics, or parallel
   Lead persistence is introduced by these screens.
 
+### Lead creation-date filters
+
+At `/admin/sales/leads`, All time preserves the existing active-Lead scope.
+Last 7 days and Last 30 days include today's UTC calendar date plus the
+preceding 6 or 29 dates. Custom range requires ISO start and end dates and
+includes both endpoints, using `created_at >= start midnight` and
+`created_at < midnight after end`. Filtering is by Lead creation, not update,
+expected close, Quote, or conversion date.
+
+The typed `sales.service` query owns normalization and combines this condition
+with all existing filters using AND. The same predicates drive paginated rows,
+exact count, matching open/won totals, and matching pipeline value. Relative
+URLs store only the preset, so bookmarks remain relative; custom URLs retain
+both dates. Sorting and page-size navigation retain the scope, Filter resets
+to page one, and Reset clears all filters. Database-failure retry retains the
+date scope without database reads. Legacy callers default to All time.
+
+Unknown presets, malformed, incomplete, reversed, and unsupported custom dates
+canonicalize to All time. An end date of 9999-12-31 is unsupported because its
+exclusive next-day bound cannot be represented. Native browser controls guide
+valid input, but the backend owns validation even without JavaScript. Existing
+permissions and empty/error states remain unchanged. No schema change is needed.
+
 ## Selfcare CRM Quotes list page contract
 
 - Screen identifier and route: `sales-quotes-list` at
@@ -231,11 +289,19 @@ depend on HTTP request/response or exception types.
   to the Quote's `json` metadata column. The exact same predicate tuple drives
   count and rows before stable created/updated ordering, Quote-ID tie-breaking,
   and pagination.
-- Filters and state: status and Lead filters work independently and combine
+- Filters and state: status, Lead, and Quote-created date filters work
+  independently and combine
   with search using AND semantics. Unknown status, malformed/stale Lead,
-  sort, direction, page, and page-size values canonicalize to the owner-defined
-  safe URL. Search/filter/sort/page-size state remains URL-addressable; changing
-  the form resets page to one and Reset clears the complete scope.
+  date preset, incomplete or reversed custom range, sort, direction, page, and
+  page-size values canonicalize to the owner-defined safe URL. Date presets cover
+  the current UTC calendar day plus the preceding 6 or 29 days; a custom start and
+  end are inclusive. Search/filter/sort/page-size state remains URL-addressable;
+  changing the form resets page to one and Reset clears the complete scope.
+  `normalize_quote_date_range` is the public date-policy owner used by both
+  successful reads and unavailable retry views. Custom dates must be canonical
+  ISO dates; an end date of 9999-12-31 becomes All time before constructing its
+  unrepresentable exclusive next-day bound. Relative bookmarks carry only the
+  preset. Appended optional fields preserve legacy typed query constructors.
 - States and recovery: empty and database-failure states are distinct. A failed
   read reports that Quotes could not be loaded and no CRM data was changed,
   offers a retry using safe normalized list state, emits a structured diagnostic
@@ -307,14 +373,22 @@ depend on HTTP request/response or exception types.
   rows stack on narrow screens; each Line Item becomes a touch-friendly card;
   keyboard focus, accessible labels, and light/dark variants use shared admin
   design tokens.
+- Quote-detail line controls: a staff member with `crm:quote:write` may edit
+  or remove a Draft or Sent Line Item when the Quote has no active discount and
+  is not a booked relocation. The visible Remove control submits the canonical
+  line-removal command after a browser confirmation; Edit opens the adjacent
+  typed line editor. Both nested actions bind the Line Item to the displayed
+  Quote before the owner mutates it.
 
-## Selfcare mobile installation quote page contract
+## Selfcare mobile service quote page contract
 
 - Screen identifiers and routes: the quote list at `/quotes` and the
   map-pinned request form at `/quotes/request`.
-- Audience and job: an authenticated subscriber reviews installation quotes
-  and, only when eligible, requests an estimate for a precisely pinned service
-  location.
+- Audience and job: an authenticated subscriber reviews installation and
+  relocation quotes and, only when eligible, requests an estimate for a
+  precisely pinned service location. Relocation uses the exact Subscription
+  selected on the Service tab, does not expose a second service picker, and
+  offers only relocation types compatible with that service's access type.
 - Authoritative owners: the selected quote read owner supplies
   `source_state`, `actions_available`, and an optional customer-safe
   `actions_unavailable_message`. The mobile adapter renders those values and
@@ -423,16 +497,42 @@ configuration. Changing one requires a migration/versioned contract and tests.
 5. Every non-cancelled SalesOrder receives at most one structurally linked
    Project and InstallationProject. Users may create a WorkOrder against the
    Project or an individual ProjectTask. ProjectTask may own several
-   WorkOrders; WorkOrder owns the foreign key.
-6. A partially paid SalesOrder records the receipt but creates no Subscription
-   or ServiceOrder. Full funding stages `sales_order.funding_satisfied`
-   atomically with the paid transition; the lifecycle projection handler
-   creates one pending Subscription and one idempotent ServiceOrder per
-   service line through `sales.fulfillment.consume_funding_satisfaction`. The
-   same receipted transaction stages the Phase 1 structural shadow input. An
-   unresolved consequence (for example an offer that no longer resolves)
-   fails the delivery visibly instead of being skipped.
-7. Sales ServiceOrders remain `draft` until the vendor-project owner records an
+   WorkOrders; WorkOrder owns the foreign key. When the order records tax,
+   the installation invoice uses the single active TaxRate that reproduces
+   the order's effective tax percentage. The invoice owner snapshots that
+   rate on the installation line and derives subtotal, tax, gross receivable,
+   and balance; the project stores the gross invoiced amount. A missing or
+   ambiguous matching rate blocks invoice issuance and records a retryable
+   project error instead of silently understating tax.
+6. An operator never sets a SalesOrder to `paid` (or `fulfilled`) from the
+   generic sales edit. The SalesOrder detail action opens Finance's canonical
+   account-scoped **Record Payment** flow with the remaining order balance
+   suggested. Finance previews and confirms the receipt, posts it to the
+   customer account, allocates it to eligible open invoices oldest/soonest-due
+   first (including the structurally linked installation invoice), and retains
+   any remainder as account credit. The linked-invoice allocation is the
+   structural evidence used to reconcile SalesOrder coverage. A partial
+   receipt updates the SalesOrder to partial but creates no Subscription or
+   ServiceOrder. Once successful payment evidence covers the complete order,
+   Sales advances it to `paid` and stages `sales_order.funding_satisfied`
+   atomically. The lifecycle projection records the order payment and settles
+   the installation invoice through
+   `sales.fulfillment.consume_funding_satisfaction`; any excess remains
+   customer account credit. Funding creates no Subscription, recurring invoice,
+   credential, add-on, IP assignment, or ServiceOrder. An authorized staff user
+   creates the Subscription explicitly after confirming the offer, service
+   address, access method, NAS/site and IP requirements. Pending creation keeps
+   `start_at` and `next_billing_at` empty; invoice generation is a separate,
+   explicit option. The same receipted funding transaction stages the Phase 1
+   structural shadow input.
+   Once any receipt or waiver exists, the SalesOrder's commercial header and
+   line terms are immutable. Corrections use the Finance refund, credit-note,
+   or adjustment owners; deleting or repricing the receipted sale is refused.
+7. A staff-created pending Subscription may create its provisioning
+   ServiceOrder only after the operator has selected the required IPAM and
+   access-network inputs. Sales funding itself never allocates network
+   resources. Sales-linked ServiceOrders remain `draft` until the
+   vendor-project owner records an
    append-only staff verification event. After that fact commits, the registered
    lifecycle projection handler asks `sales.fulfillment` to complete the native
    Project and release linked ServiceOrders. Replay is idempotent and failure is
@@ -440,7 +540,7 @@ configuration. Changing one requires a migration/versioned contract and tests.
    The committed `service_order.released` output then moves the sales-linked
    ServiceOrder into `provisioning` through its lifecycle owner; repair and
    reprovisioning orders keep manual progression.
-8. Billing cannot directly activate a sales-created pending Subscription.
+8. Billing cannot directly activate a pending Subscription.
    Only a successful provisioning result may transition the linked ServiceOrder
    to `active`; that transition asks the subscription owner to activate access.
 9. Successful activation emits the committed service-order completion fact.

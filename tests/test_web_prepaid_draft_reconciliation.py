@@ -119,6 +119,32 @@ def test_admin_review_exposes_exact_owner_breakdown_and_signed_confirmation(
     assert signed["effective_at"] == int(NOW.timestamp())
 
 
+def test_admin_review_allows_exact_historical_partial_repair(monkeypatch):
+    preview = _preview(
+        disposition=(PrepaidDraftDisposition.reviewed_historical_partial_fundable)
+    )
+    monkeypatch.setattr(
+        web_reconciliation,
+        "preview_prepaid_draft_reconciliation",
+        lambda _db, _invoice_id: preview,
+    )
+    monkeypatch.setattr(
+        web_reconciliation.context_signing,
+        "sign_context_token",
+        lambda _db, _claims: "signed-review-token",
+    )
+
+    review = web_reconciliation.build_admin_review(
+        object(),
+        invoice_id=INVOICE_ID,
+        actor=ACTOR,
+        now=NOW,
+    )
+
+    assert review.action_form.allowed is True
+    assert review.action_form.confirmation is not None
+
+
 def test_confirm_uses_signed_time_fingerprint_and_stable_token_idempotency(
     monkeypatch,
 ):
@@ -430,3 +456,10 @@ def test_subscription_page_uses_owner_bill_now_eligibility_and_invoice_route():
     assert "prepaid_bill_now_eligibility.reason" in template
     assert "prepaid_bill_now_eligibility.existing_invoice_id" in template
     assert "Open existing invoice" in template
+
+
+def test_bill_now_form_accepts_an_explicit_utc_historical_start():
+    template = Path("templates/admin/catalog/subscription_detail.html").read_text()
+
+    assert 'name="effective_at"' in template
+    assert 'title="Optional historical service-period start in UTC"' in template

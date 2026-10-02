@@ -1,6 +1,6 @@
 [project]
 name = "dotmac_sm"
-version = "8.44.1"
+version = "9.9.0"
 description = "Subscriber management API and web UI"
 authors = [{name = "DotMac", email = "engineering@dotmac.local"}]
 requires-python = ">=3.11,<3.13"
@@ -37,7 +37,8 @@ dependencies = [
     "pydyf==0.10.0",
     "aiosmtpd==1.4.6",
     "sse-starlette>=1.6.0",
-    "boto3>=1.40.0",
+    "minio==7.2.20",
+    "urllib3>=2,<3",
     "pymysql>=1.1.2",
     "sshtunnel>=0.4.0",
     "textfsm>=1.1.3",
@@ -49,13 +50,14 @@ dependencies = [
     "langgraph==0.6.6",
     "defusedxml==0.7.1",
     "dotmac-auth-oidc==0.1.0a2",
-    "dotmac-kernel==0.1.0a94",
+    "dotmac-kernel==0.1.0a97",
     "dotmac-billing==0.1.0a1",
     "dotmac-collections==0.1.0a1",
     "dotmac-inbox==0.1.0a1",
     "dotmac-payments==0.1.0a1",
     "dotmac-service-orders==0.1.0a1",
     "dotmac-subscriptions==0.1.0a3",
+    "dotmac-template-studio==0.2.0a5",
     "dotmac-ui==0.1.0a7",
 ]
 
@@ -77,7 +79,7 @@ dotmac-integration-client = { git = "https://github.com/michaelayoade/dotmac-int
 # unrelated lock refresh must never move the code that decides which key
 # verified a field technician's assertion.
 dotmac-auth-oidc = { version = "0.1.0a2", source = "forgejo" }
-dotmac-kernel = { version = "0.1.0a94", source = "forgejo" }
+dotmac-kernel = { version = "0.1.0a97", source = "forgejo" }
 # Dual-plane commercial owners selected TENANT-only for migration and shadow
 # preparation. Sub's incumbent money and collections writers remain active.
 dotmac-billing = { version = "0.1.0a1", source = "forgejo" }
@@ -91,6 +93,9 @@ dotmac-service-orders = { version = "0.1.0a1", source = "forgejo" }
 # Selectable tenant-plane schema composed for verification/shadow preparation
 # only. Runtime paths and commercial authority remain with Sub's local owners.
 dotmac-subscriptions = { version = "0.1.0a3", source = "forgejo" }
+# Dormant payment email backfill and read-only parity only. Sub's legacy live
+# writer and renderer retain authority until a separate sealed cutover.
+dotmac-template-studio = { version = "0.2.0a5", source = "forgejo" }
 # The conversation owner Sub is the product-first source of. COMPOSITION ONLY:
 # the `ib` lineage is registered in alembic.ini so `mod_inbox` exists, and Sub
 # declares its channel traits against it. Sub's own `public.inbox_*` tables
@@ -113,7 +118,7 @@ dotmac-ui = { version = "0.1.0a7", source = "forgejo" }
 # Same-source enrichment for the dev-group `dotmac-kernel[testing]` entry in
 # [dependency-groups] below.
 [tool.poetry.group.dev.dependencies]
-dotmac-kernel = { version = "0.1.0a94", extras = ["testing"], source = "forgejo" }
+dotmac-kernel = { version = "0.1.0a97", extras = ["testing"], source = "forgejo" }
 
 # Private Dotmac package index (Forgejo). URL only — credentials live in
 # Poetry's auth store under this source name, never in Git.
@@ -128,19 +133,6 @@ asyncio_mode = "strict"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-# tests/architecture/composition_schema.py is a byte-for-byte mirror of
-# dotmac_starter_mt's frozen dimensional-composition.v2 contract (protected
-# main 08a2dae1) — the cross-product schema every product's composition
-# record is checked against. It must never be reformatted or rule-fixed
-# locally: doing so would make this repository's copy diverge from the
-# contract it exists to mirror, byte for byte, defeating the point of
-# mirroring it at all. Scoped to that one file, not the directory — every
-# other file under tests/architecture/ is still linted and formatted
-# normally. (ERP's own mirror of the same contract passes ruff 0.15.0
-# clean; this repository pins ruff 0.15.1, which additionally flags one
-# C420 finding on the identical, unmodified source — a linter-version
-# difference, not a defect in the mirror.)
-#
 # docs/kernel-runtime-composition.json and docs/kernel-runtime-readiness.json
 # are strict-JSON evidence documents, not formattable source: `ruff format`
 # rewrites a JSON file with a trailing comma before the closing `}`/`]`,
@@ -154,7 +146,6 @@ target-version = "py311"
 # never by accepting ruff-formatted pseudo-JSON. Scoped to exactly these two
 # documents, not docs/ wholesale.
 extend-exclude = [
-    "tests/architecture/composition_schema.py",
     "docs/kernel-runtime-composition.json",
     "docs/kernel-runtime-readiness.json",
 ]
@@ -207,17 +198,6 @@ ignore = [
 # rules don't apply cleanly.
 "alembic/**" = ["E402", "S608"]
 "alembic/versions_archive/**" = ["S104", "S608"]
-# tests/architecture/fixtures/starter_packages_08a2dae1/**/manifest.py are
-# byte-for-byte verbatim copies of the real packages/<dist>/src/<pkg>/
-# manifest.py files from dotmac_starter_mt's protected main 08a2dae1 (see
-# EXTRACTION_PROVENANCE.md in that directory) — the fixture's whole value is
-# that it is NOT locally re-normalized, so a wrong measurement of the real
-# manifest's lineage applicability can actually fail the round-trip. Their
-# import ordering follows Starter's own isort configuration, not this
-# repository's; only import-sort (I001) is ignored — every other rule
-# (including S-series and Pyflakes) still applies to them.
-"tests/architecture/fixtures/starter_packages_08a2dae1/**/manifest.py" = ["I001"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -408,7 +388,7 @@ dev = [
     # above; the [testing] extra adds only httpx (>=0.27,<0.28), which matches
     # Sub's own httpx==0.27.0. tests/-only per the adoption ledger — the S1
     # import guard keeps dotmac_kernel.testing out of app/.
-    "dotmac-kernel[testing]==0.1.0a94",
+    "dotmac-kernel[testing]==0.1.0a97",
 ]
 
 # ─── Import boundaries (DCP-1 network / subscription decoupling) ──────────

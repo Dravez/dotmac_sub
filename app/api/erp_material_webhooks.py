@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -15,6 +16,7 @@ from app.schemas.erp_material_webhook import (
     ErpMaterialStatusWebhook,
 )
 from app.services.db_session_adapter import db_session_adapter
+from app.services.dotmac_erp.material_sync import material_line_progress
 from app.services.field import material_requests
 from app.services.integrations import inbox as integration_inbox
 from app.services.integrations.backoffice_contracts import (
@@ -28,6 +30,7 @@ from app.services.owner_commands import CommandContext
 
 router = APIRouter(prefix="/webhooks/erp-material", tags=["erp-material-webhook"])
 MAX_BODY_BYTES = 128 * 1024
+logger = logging.getLogger(__name__)
 
 
 @router.post("/{capability_binding_id}", response_model=ErpMaterialStatusReceipt)
@@ -64,7 +67,28 @@ async def receive_erp_material_status(
         raise HTTPException(status_code=401, detail="Invalid ERP webhook signature")
     try:
         payload = ErpMaterialStatusWebhook.model_validate_json(raw)
-    except (ValueError, ValidationError):
+    except (ValueError, ValidationError) as exc:
+        validation_errors = (
+            [
+                {
+                    "location": ".".join(str(part) for part in error.get("loc", ())),
+                    "type": str(error.get("type") or "validation_error"),
+                }
+                for error in exc.errors()
+            ]
+            if isinstance(exc, ValidationError)
+            else [{"location": "", "type": type(exc).__name__}]
+        )
+        logger.warning(
+            "Rejected invalid ERP material status payload",
+            extra={
+                "capability_binding_id": str(capability_binding_id),
+                "delivery_id": delivery_id,
+                "payload_size_bytes": len(raw),
+                "validation_error_count": len(validation_errors),
+                "validation_errors": validation_errors,
+            },
+        )
         raise HTTPException(
             status_code=422, detail="Invalid ERP material status payload"
         ) from None
@@ -102,7 +126,11 @@ async def receive_erp_material_status(
                     idempotency_key=delivery_id,
                 ),
                 request_id=payload.source_request_id,
-                provider_request_id=payload.request_number or payload.request_id,
+                provider_request_id=payload.request_id,
+                provider_request_number=payload.request_number,
+                line_progress=material_line_progress(
+                    payload.model_dump(mode="json", exclude_none=True)
+                ),
                 provider_status=payload.new_status,
                 observed_at=payload.updated_at or datetime.now(UTC),
                 serial_numbers_by_sequence=tuple(

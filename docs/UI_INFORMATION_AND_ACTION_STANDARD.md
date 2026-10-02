@@ -158,6 +158,12 @@ A detail page establishes the decision context before exposing exhaustive data.
   detail pages project requests from their linked native work orders and scope
   the create action to an actively assigned work order; they do not maintain
   duplicate material-request relationships.
+- The field Materials destination is requester-owned history. It remains
+  available when the requester also has manager capabilities, shows the
+  authoritative total before pagination, and exposes every owner-observed
+  lifecycle state and rejection reason. List and detail refresh from the API;
+  neither technician-profile lifecycle nor work-order reassignment may hide an
+  exactly owned historical request.
 
 ### Editor Or Form
 
@@ -408,7 +414,11 @@ implementation.
   both template types are published. Manual Lead actions require
   `crm:lead:write`, a reply-capable supported channel, and owner-resolved proof
   that the sender is neither a customer nor a customer contact; ambiguous
-  identity fails closed. The Lead action is rendered beside the conversation
+  identity fails closed. Exact identity evidence is distinct from manual
+  discovery suggestions: unrelated recent records never block Create Lead or
+  appear as possible exact matches. The Lead action shows the normalized
+  inbound endpoint that will be bound, including provider/account scope for an
+  opaque social subject. The Lead action is rendered beside the conversation
   composer. The catalogue action is visible for every conversation and enables
   only plan families with a currently published PDF and a reply-capable thread.
 - State semantics: issued, effectively expired, revoked, completed, and failed
@@ -435,10 +445,22 @@ implementation.
   invoice or payment intent. Missing or unauthorized quotations render the same
   not-found state.
 - Review state: Draft/Sent Quotes without a current approval show `Awaiting
-  staff review` and no payment action. Approved Quotes show `Approved — Payment
-  required`. Rejected Quotes show the owner-supplied rejection message. Mobile
-  must consume `can_pay_deposit`; it must not infer payment eligibility from
-  Quote status or deposit amount.
+  staff review` and no payment action. Approved unpaid Quotes show `Approved —
+  Payment required`. Rejected Quotes show the owner-supplied rejection message.
+  A paid Quote shows `Paid` and no payment action, including when its linked
+  deposit Invoice is paid. Mobile consumes `deposit_paid` and `can_pay_deposit`;
+  it must not infer payment eligibility from Quote status or deposit amount.
+- Customer service requests show the selected installation or relocation type
+  and coverage before review. A move that changes access technology requires
+  the customer to choose a compatible destination plan before pinning the new
+  location. Customer Quote reads omit subtotal, tax, total,
+  deposit policy and amount, and priced line items until approval applies to the
+  current commercial snapshot. Staff must add at least one priced line and a
+  positive total before approving a request for payment. A changed Quote hides
+  prices again until staff approves its new snapshot. An approved relocation
+  shows the full charge and uses the canonical subscription-change Invoice
+  payment path. After settlement, the Home screen shows relocation progress
+  from the issued WorkOrder.
 - Mutation: the customer confirms through the CSRF-protected POST intent route.
   The request carries idempotency evidence only; it cannot submit amount,
   currency, invoice identity, or provider choice. The server fixes the provider
@@ -446,7 +468,9 @@ implementation.
   quotation-deposit capability.
 - States: unauthenticated, unauthorized/not found, expired, cancelled/inactive,
   already paid, Paystack unavailable, checkout failed, pending verification,
-  and confirmed are distinct and fail closed.
+  and confirmed are distinct and fail closed. Expected Paystack routing or
+  checkout-start failures return a generic retryable unavailable response; the
+  adapter logs the typed failure without exposing its configuration details.
 - Responsive behavior: summary and action stack on small screens, retain the
   authoritative amount and primary action, and do not expose internal
   collection-account or payment-intent identifiers.
@@ -460,8 +484,24 @@ implementation.
 - Customer-specific examples and fabricated fallback values are prohibited.
 - Profile and Lead actions are permission-scoped server outcomes. The browser
   never selects identity, pipeline defaults, or duplicate-prevention policy.
+- The Existing Customer control is a validated lazy typeahead. Focusing its
+  empty field requests a bounded set of conversation-derived likely matches.
+  Typing at least two characters replaces those options with a bounded search
+  across all active Customers using only the entered name, email, phone,
+  company/legal name, account number, subscriber number, display name, or exact
+  Customer UUID. Empty suggestions never fall back to unrelated recent
+  Customers. Loading, empty, failure/retry, and selected states remain distinct;
+  stale requests are cancelled. Results are discovery only, and the reviewed
+  server command links only the exact selected UUID after explicit submission.
 - Successful actions return to the exact originating conversation and trigger
   a fresh drawer query; read failure never replays the mutation.
+- A structural conversation-to-Lead link remains visible as `Origin Lead` even
+  when the channel supplies no Party-bound contact point. Conflicting
+  Subscriber, participant, intake, or Lead Parties show identity review while
+  retaining a read path to the exact linked Lead.
+- Reapplying the same reviewed Customer endpoint link is an idempotent success.
+  Replacing a different active endpoint target preserves the prior evidence;
+  stale reviewed route evidence is refused and the drawer must be refreshed.
 - The drawer keeps customer identity visible while Details and Conversations
   tabs provide progressive disclosure. The Conversations badge is the
   authoritative full count of matching previous active and resolved
@@ -473,6 +513,12 @@ implementation.
   The bounded newest-first list shows endpoint, channel, status, and last
   activity and routes each row to the exact prior Inbox conversation.
   Assignment does not narrow this customer history.
+- Resolve eligibility and team scope come from the command/status owners, not
+  template conditions. Expired WhatsApp threads show their expired channel
+  state separately from unresolved/resolved status, require an explicit reason
+  for direct or bulk Resolve, and never require temporary assignment. Resolved
+  expired rows leave the default unresolved view but remain searchable in
+  resolved/history projections.
 
 ## Inbox Email Recipient And Copy Contract
 
@@ -530,6 +576,32 @@ implementation.
 - Queue heartbeats are off by default. If enabled in AI intake policy they are
   clearly identified as reassurance, use different copy from a position
   update, and never repeat the current position.
+
+## Ticket SLA Current Operations Page Contract
+
+- Audience and task: support leaders identify the live not-closed workload and
+  the tickets currently breaching SLA by status, service team, and region.
+- Authority: `ui.ticket_sla_report` owns the typed read projection;
+  `support.ticket_lifecycle` owns current Ticket status and assignments,
+  `support.ticket_sla_clock` owns current clock/breach facts, and
+  `operations.service_team_lifecycle` owns team identity. Routes and templates
+  only transport and render those outcomes.
+- Metric semantics: every summary and breakdown renders **currently breaching /
+  currently open**. Currently open means the canonical not-closed Ticket scope;
+  currently breaching means a distinct not-closed Ticket with a current
+  `breached` SLA clock. A completed clock or historical `breached_at` value does
+  not make a closed or canceled Ticket currently breaching.
+- Date semantics: optional date bounds select Tickets by `created_at`, then the
+  report evaluates their current state. The page states this explicitly.
+- Drill-down: team and region links preserve the date bounds and add the
+  canonical `not_closed` Ticket-list scope, so the destination count reconciles
+  with the card denominator.
+- Historical evidence: breach-record queues, CSV, and clock-start trends remain
+  available but are explicitly labelled as historical or record-oriented; they
+  are never presented as the live workload.
+- Freshness and states: the projection is calculated on demand and stamped with
+  its generation time. Empty, unavailable, current, and historical scopes remain
+  distinct, and no cached or estimated count substitutes for a failed read.
 
 ## Agent Performance Analytics Page Contract
 
@@ -664,7 +736,8 @@ implementation.
   user, or requester email input is accepted. A stable client reference prevents
   double creation. The command owner rechecks current technician assignment while
   holding the work-order lock, so a direct or stale form submission fails closed.
-  - Form: the submitter selects an ERP-eligible approver and either the masked
+  - Form: the submitter selects an ERP-eligible approver other than themselves;
+    the requester is omitted from the choices. They also select either the masked
     ERP profile destination or editable one-expense beneficiary/bank/account
     details. The override is verified by ERP and never updates the profile or
     survives a failed redisplay as a raw account number. Purpose and expense
@@ -677,9 +750,54 @@ implementation.
   acceptance, accepted, approved, rejected with reason, paid, and sync
   unavailable/failed remain distinct. A sent outbox event is never labelled
   accepted by ERP.
+- Approval actions: a selected approver with expense-write permission sees a
+  separate approval section for submitted claims on the exact work order.
+  **Approve** accepts every requested line amount unchanged and requires no
+  reason. **Adjust amount** opens positive line-level approved amounts and ends
+  with **Approve adjusted amount**; a reason is required only when a value
+  differs. Requested values remain visible and immutable.
 - Responsive behavior: line items are stacked cards at every width, controls
   retain labels and text errors, totals name their currency, and add/remove and
   submit actions remain accessible without relying on colour.
+
+## Field Expense Request History Contract
+
+- Audience and task: field technicians review every expense claim they made and
+  its current approval, ERP-delivery, and payment state. Manager-technicians
+  also work the separate approval queue without losing personal history.
+- Authority: `operations.expense_requests` owns requester identity, filtered
+  total, claim state, and detail projection. The mobile client renders those
+  facts and does not infer ownership from the current technician profile.
+- First viewport: `My expense requests` shows the authoritative total before
+  pagination, newest requests first, purpose, amount and currency, status, and
+  relevant time. Detail retains rejection and delivery explanations.
+- Identity and authorization: an exact SystemUser, canonical Person Party, or
+  historically linked technician profile proves ownership. Profile inactivity,
+  replacement, work-order completion, or reassignment cannot hide history;
+  another requester's claim remains unavailable. New submission continues to
+  require the owner-resolved active technician and assigned work order.
+- States: loading, empty, read failure, locally queued drafts, submitting to
+  ERP, submitted after ERP acceptance, submission failed with an inline Retry
+  action, approved, rejected, canceled, paid, and ERP/payment delivery problems
+  remain distinct. Manager mode defaults to `Pending` and provides separate
+  `My request` and `History` tabs. The requester tab uses the same requester
+  query. The pending and resolved manager tabs filter the authoritative manager
+  projection without reinterpreting expense status, and every history item
+  links to a detailed expense projection.
+- Manager approval list: every expense card labels `Raised by` from the
+  owner-supplied staff display identity. Missing historical identity is rendered
+  as unavailable and is never inferred from current assignment. The manager
+  cannot approve a claim they raised, including a historical self-selected claim;
+  the owner refuses that transition before changing status or staging delivery.
+  The manager bottom navigation omits the Materials destination. While manager capability
+  is unresolved or unavailable, navigation also omits Materials, and a manager
+  restored onto that branch receives manager content rather than the material
+  list.
+- Manager approval actions: **Approve** remains the primary one-tap action for
+  an unchanged request. **Adjust amount** is secondary and prepopulates every
+  line with its requested value. Adjusted approvals show requested total,
+  approved total, and reason in manager and requester history. Approval is
+  online-only and a stale revision fails closed with refresh guidance.
 
 ## Field Work-Order Note Contract
 

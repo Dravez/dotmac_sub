@@ -192,7 +192,10 @@ class DotmacErpRunner:
                 "upload_purchase_invoice_attachment",
                 "create_expense_claim_draft",
                 "upload_expense_receipt",
+                "submit_expense_claim",
                 "approve_expense_claim",
+                "reject_expense_claim",
+                "initiate_expense_payment",
                 "expense_claim_status",
                 "material_request_status",
                 "purchase_invoice_status",
@@ -348,10 +351,40 @@ class DotmacErpRunner:
                     ),
                     expected_status_codes={200, 201},
                 )
+            if action == "submit_expense_claim":
+                return client.post(
+                    "/api/v1/sync/sub/expense-claims/"
+                    f"{params['source_claim_id']}/submit",
+                    dict(params["payload"]),
+                    idempotency_key=str(
+                        params.get("idempotency_key") or idempotency_key
+                    ),
+                    expected_status_codes={200},
+                )
             if action == "approve_expense_claim":
                 return client.post(
                     "/api/v1/sync/sub/expense-claims/"
                     f"{params['source_claim_id']}/approve",
+                    dict(params["payload"]),
+                    idempotency_key=str(
+                        params.get("idempotency_key") or idempotency_key
+                    ),
+                    expected_status_codes={200},
+                )
+            if action == "reject_expense_claim":
+                return client.post(
+                    "/api/v1/sync/sub/expense-claims/"
+                    f"{params['source_claim_id']}/reject",
+                    dict(params["payload"]),
+                    idempotency_key=str(
+                        params.get("idempotency_key") or idempotency_key
+                    ),
+                    expected_status_codes={200},
+                )
+            if action == "initiate_expense_payment":
+                return client.post(
+                    "/api/v1/sync/sub/expense-claims/"
+                    f"{params['source_claim_id']}/payments",
                     dict(params["payload"]),
                     idempotency_key=str(
                         params.get("idempotency_key") or idempotency_key
@@ -423,6 +456,11 @@ class DotmacErpRunner:
                     raise ValueError("unsupported staff access projection entity")
                 return client.get_staff_access_projection(
                     entity=cast(Literal["leave_restriction", "account_status"], entity),
+                    updated_after=(
+                        str(params["updated_after"])
+                        if params.get("updated_after") is not None
+                        else None
+                    ),
                     limit=int(params.get("limit") or 500),
                 )
         elif capability_id == WORKFORCE_ATTENDANCE_READ_CAPABILITY:

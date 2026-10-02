@@ -5,7 +5,6 @@ access.radius_projection
 access.radius_reject
 access.radius_state
 access.radius_target_registry
-access.session_enforcement
 access.subscription_lifecycle
 ai.generation
 ai.insights

@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.domain_settings import SettingDomain
 from app.models.notification import NotificationChannel, NotificationStatus
 from app.models.sales import Lead
+from app.models.service_team import ServiceTeam
 from app.models.stored_file import StoredFile
 from app.models.subscriber import Subscriber
 from app.models.support import (
@@ -33,6 +34,7 @@ from app.models.support import (
     TicketCommentMention,
     TicketLink,
     TicketMerge,
+    TicketPriority,
     TicketSlaEvent,
     TicketStatus,
     canonical_ticket_status_value,
@@ -84,9 +86,23 @@ from app.services.owner_commands import (
     execute_owner_savepoint,
     owner_command_active,
 )
+from app.services.realtime_platform import (
+    EventType as RealtimeEventType,
+)
+from app.services.realtime_platform import (
+    principal_topic,
+    publish_topic_event,
+)
 from app.services.sales import lifecycle as lead_lifecycle
+from app.services.session_hooks import run_after_commit
 from app.services.staff_notifications import queue_staff_email
-from app.services.support_ticket_contracts import InternalOperationalTicketSource
+from app.services.support_ticket_contracts import (
+    AssignTicketServiceTeamFromAutomationCommand,
+    InternalOperationalTicketSource,
+    SetTicketPriorityFromAutomationCommand,
+    SupportTicketCommentRealtimeChange,
+    SupportTicketCommentRealtimeHint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +186,34 @@ class TicketCommentAttachmentRepairOutcome:
     ambiguous_file_record: int
 
 
+def _schedule_customer_comment_realtime_hint(
+    db: Session,
+    *,
+    ticket: Ticket,
+    change: SupportTicketCommentRealtimeChange,
+    comment_id: UUID | None,
+) -> None:
+    """Publish a private, identifier-only comment invalidation after commit."""
+    subscriber_id = ticket.subscriber_id
+    if subscriber_id is None:
+        return
+    hint = SupportTicketCommentRealtimeHint(
+        ticket_id=ticket.id,
+        change=change,
+        comment_id=comment_id,
+    )
+    topic = principal_topic(subscriber_id)
+
+    def publish(_callback_session: Session) -> None:
+        publish_topic_event(
+            topic,
+            event_type=RealtimeEventType.SUPPORT_TICKET_COMMENT_CHANGED,
+            payload=hint.model_dump(mode="json"),
+        )
+
+    run_after_commit(db, publish)
+
+
 def _ticket_error(code: str, message: str, **details: object) -> SupportTicketError:
     return SupportTicketError(code=code, message=message, details=details)
 
@@ -220,11 +264,17 @@ def ticket_owner_command(name: str):
 
             db_session_adapter.release_read_transaction(db)
             actor = str(kwargs.get("actor_id") or "support-system")
-            context = CommandContext.system(
-                actor=actor,
-                scope=f"support.ticket:{name}",
-                reason=f"execute canonical Ticket {name} command",
-                idempotency_key=_command_idempotency_key(kwargs.get("request")),
+            command = kwargs.get("command")
+            command_context = getattr(command, "context", None)
+            context = (
+                command_context
+                if isinstance(command_context, CommandContext)
+                else CommandContext.system(
+                    actor=actor,
+                    scope=f"support.ticket:{name}",
+                    reason=f"execute canonical Ticket {name} command",
+                    idempotency_key=_command_idempotency_key(kwargs.get("request")),
+                )
             )
             result = execute_owner_command(
                 db,
@@ -234,7 +284,10 @@ def ticket_owner_command(name: str):
             )
             if name == "create" and isinstance(result, Ticket):
                 _notify_workqueue(result, "added")
-            elif name == "update" and isinstance(result, Ticket):
+            elif name in {
+                "update",
+                "assign_ticket_service_team_from_automation",
+            } and isinstance(result, Ticket):
                 previous = db.info.pop("_support_previous_assignee_id", None)
                 _notify_workqueue(
                     result,
@@ -1180,6 +1233,7 @@ class TicketComments:
             raise _ticket_error("ticket_not_found", "Ticket not found")
         _ensure_not_merged_source(ticket)
 
+        was_internal = comment.is_internal
         data = payload.model_dump(exclude_unset=True)
         if "body" in data:
             comment.body = str(data["body"]).strip()
@@ -1238,6 +1292,18 @@ class TicketComments:
         )
         db.flush()
         db.refresh(comment)
+        if data and (not was_internal or not comment.is_internal):
+            change = (
+                SupportTicketCommentRealtimeChange.comment_visibility_changed
+                if was_internal != comment.is_internal
+                else SupportTicketCommentRealtimeChange.comment_updated
+            )
+            _schedule_customer_comment_realtime_hint(
+                db,
+                ticket=ticket,
+                change=change,
+                comment_id=comment.id,
+            )
         return comment
 
     @staticmethod
@@ -1245,10 +1311,26 @@ class TicketComments:
     def delete(
         db: Session, *, comment: TicketComment, actor_id: str | None, request=None
     ) -> None:
-        ticket = db.get(Ticket, comment.ticket_id)
+        locked_comment = (
+            db.query(TicketComment)
+            .filter(TicketComment.id == comment.id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if locked_comment is None:
+            raise _ticket_error("comment_not_found", "Ticket comment not found")
+        comment = locked_comment
+        ticket = (
+            db.query(Ticket)
+            .filter(Ticket.id == comment.ticket_id)
+            .with_for_update()
+            .one_or_none()
+        )
         if not ticket:
             raise _ticket_error("ticket_not_found", "Ticket not found")
         _ensure_not_merged_source(ticket)
+        was_public = not comment.is_internal
+        comment_id = comment.id
         db.delete(comment)
         log_audit_event(
             db=db,
@@ -1260,6 +1342,13 @@ class TicketComments:
             metadata={"comment_id": str(comment.id)},
         )
         db.flush()
+        if was_public:
+            _schedule_customer_comment_realtime_hint(
+                db,
+                ticket=ticket,
+                change=SupportTicketCommentRealtimeChange.comment_deleted,
+                comment_id=comment_id,
+            )
 
 
 class TicketSlaEvents:
@@ -1357,6 +1446,7 @@ class Tickets:
         status: str | None = None,
         ticket_type: str | None = None,
         region: str | None = None,
+        service_team_id: str | None = None,
         assigned_to_person_id: str | None = None,
         assigned_to_audience: TicketAudienceScope | None = None,
         project_manager_person_id: str | None = None,
@@ -1378,6 +1468,7 @@ class Tickets:
             status=status,
             ticket_type=ticket_type,
             region=region,
+            service_team_id=service_team_id,
             assigned_to_person_id=assigned_to_person_id,
             project_manager_person_id=project_manager_person_id,
             site_coordinator_person_id=site_coordinator_person_id,
@@ -2326,11 +2417,20 @@ class Tickets:
             "status": ticket.status,
             "priority": ticket.priority,
             "channel": ticket.channel.value,
+            "customer_id": str(ticket.customer_account_id or ticket.subscriber_id)
+            if ticket.customer_account_id or ticket.subscriber_id
+            else None,
             "customer_account_id": str(ticket.customer_account_id)
             if ticket.customer_account_id
             else None,
             "subscriber_id": str(ticket.subscriber_id)
             if ticket.subscriber_id
+            else None,
+            "service_team_id": str(ticket.service_team_id)
+            if ticket.service_team_id
+            else None,
+            "assigned_to_person_id": str(ticket.assigned_to_person_id)
+            if ticket.assigned_to_person_id
             else None,
             "actor_id": actor_id,
         }
@@ -2361,6 +2461,69 @@ class Tickets:
             account_id=ticket.customer_account_id or ticket.subscriber_id,
             dispatch_after_commit=dispatch_after_commit,
         )
+
+    @staticmethod
+    def _stage_automation_ticket_created_event(
+        db: Session,
+        ticket: Ticket,
+        *,
+        dispatch_after_commit: bool,
+    ) -> None:
+        """Stage the bounded event identity used by Automation Center rules.
+
+        The existing custom ticket event remains for its legacy consumers. This
+        separate envelope is intentionally small: it contains only the
+        operator tenant, Ticket identity, and declared condition fields.
+        """
+
+        from app.services.operator_tenant import OPERATOR_TENANT_ID
+
+        emit_event(
+            db,
+            EventType.support_ticket_created,
+            {
+                "tenant_id": str(OPERATOR_TENANT_ID),
+                "ticket_id": str(ticket.id),
+                "priority": str(ticket.priority or "").strip().lower(),
+                "ticket_type": str(ticket.ticket_type or "").strip(),
+                "channel": ticket.channel.value,
+                "region": str(ticket.region or "").strip(),
+                "customer_id": str(ticket.customer_account_id or ticket.subscriber_id)
+                if ticket.customer_account_id or ticket.subscriber_id
+                else None,
+            },
+            actor="support.ticket_lifecycle",
+            subscriber_id=ticket.subscriber_id,
+            account_id=ticket.customer_account_id or ticket.subscriber_id,
+            dispatch_after_commit=dispatch_after_commit,
+        )
+
+    @staticmethod
+    def _ticket_creation_audit_actor(
+        request: object | None,
+        actor_id: str | None,
+    ):
+        """Return the authenticated Ticket creator as a typed audit actor."""
+
+        from app.services.audit_adapter import AuditActor
+
+        state = getattr(request, "state", None)
+        auth = getattr(state, "auth", None)
+        principal_type = (
+            str(auth.get("principal_type") or "").strip().lower()
+            if isinstance(auth, Mapping)
+            else str(getattr(state, "actor_type", "") or "").strip().lower()
+        )
+        resolved_actor_id = str(
+            actor_id or getattr(state, "actor_id", "") or ""
+        ).strip()
+        if principal_type == "api_key" and resolved_actor_id:
+            return AuditActor.api_key(resolved_actor_id)
+        if principal_type == "service" and resolved_actor_id:
+            return AuditActor.service(resolved_actor_id)
+        if resolved_actor_id:
+            return AuditActor.user(resolved_actor_id)
+        return AuditActor.system("support.ticket_lifecycle")
 
     @staticmethod
     def _stage_create(
@@ -2506,13 +2669,14 @@ class Tickets:
                 metadata=audit_metadata,
             )
         else:
-            log_audit_event(
-                db=db,
-                request=request,
+            from app.services.audit_adapter import stage_audit_event
+
+            stage_audit_event(
+                db,
                 action="create",
                 entity_type="support_ticket",
                 entity_id=str(ticket.id),
-                actor_id=actor_id,
+                actor=Tickets._ticket_creation_audit_actor(request, actor_id),
                 metadata=audit_metadata,
             )
         Tickets._emit_ticket_event(
@@ -2525,6 +2689,12 @@ class Tickets:
             creation_acknowledgement_mode=acknowledgement_mode,
             creation_consequence_mode=consequence_mode,
         )
+        if consequence_mode is TicketCreationConsequenceMode.standard:
+            Tickets._stage_automation_ticket_created_event(
+                db,
+                ticket,
+                dispatch_after_commit=dispatch_event_after_commit,
+            )
         from app.services import sla_operational_notifications
 
         sla_operational_notifications.emit_ticket_created(db, ticket)
@@ -2672,6 +2842,111 @@ class Tickets:
         if not ticket or not ticket.is_active:
             raise _ticket_error("ticket_not_found", "Ticket not found")
         return ticket
+
+    @staticmethod
+    @ticket_owner_command("assign_ticket_service_team_from_automation")
+    def assign_ticket_service_team_from_automation(
+        db: Session,
+        *,
+        command: AssignTicketServiceTeamFromAutomationCommand,
+    ) -> Ticket:
+        """Apply one declared automation assignment through the Ticket owner."""
+
+        active_team = db.scalar(
+            select(ServiceTeam)
+            .where(
+                ServiceTeam.id == command.service_team_id,
+                ServiceTeam.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if active_team is None:
+            raise _ticket_error(
+                "automation_assignment_team_unavailable",
+                "The automation rule's Service Team is no longer active.",
+                service_team_id=str(command.service_team_id),
+            )
+        ticket = db.scalar(
+            select(Ticket)
+            .where(Ticket.id == command.ticket_id, Ticket.is_active.is_(True))
+            .with_for_update()
+        )
+        if ticket is None:
+            raise _ticket_error("ticket_not_found", "Ticket not found")
+        if ticket.service_team_id == command.service_team_id:
+            return ticket
+        updated = Tickets.update(
+            db,
+            ticket_id=str(command.ticket_id),
+            payload=TicketUpdate(service_team_id=command.service_team_id),
+            actor_id=command.context.actor,
+        )
+        from app.services.audit_adapter import AuditActor, stage_audit_event
+
+        stage_audit_event(
+            db,
+            action="automation_service_team_assigned",
+            entity_type="support_ticket",
+            entity_id=str(updated.id),
+            actor=AuditActor.service(command.context.actor),
+            metadata={
+                "event_id": str(command.event_id),
+                "rule_id": str(command.rule_id),
+                "rule_version_id": str(command.rule_version_id),
+                "step_index": command.step_index,
+                "service_team_id": str(command.service_team_id),
+            },
+        )
+        return updated
+
+    @staticmethod
+    @ticket_owner_command("set_ticket_priority_from_automation")
+    def set_ticket_priority_from_automation(
+        db: Session,
+        *,
+        command: SetTicketPriorityFromAutomationCommand,
+    ) -> Ticket:
+        """Set priority through Ticket lifecycle with stable step provenance."""
+
+        from app.services.audit_adapter import AuditActor, stage_audit_event
+
+        try:
+            priority_value = TicketPriority(command.priority).value
+        except (TypeError, ValueError):
+            raise _ticket_error(
+                "automation_priority_invalid",
+                "The automation rule's Ticket priority is no longer supported.",
+            )
+        ticket = db.scalar(
+            select(Ticket)
+            .where(Ticket.id == command.ticket_id, Ticket.is_active.is_(True))
+            .with_for_update()
+        )
+        if ticket is None:
+            raise _ticket_error("ticket_not_found", "Ticket not found")
+        if ticket.priority == priority_value:
+            return ticket
+        updated = Tickets.update(
+            db,
+            ticket_id=str(command.ticket_id),
+            payload=TicketUpdate(priority=priority_value),
+            actor_id=command.context.actor,
+        )
+        stage_audit_event(
+            db,
+            action="automation_ticket_priority_set",
+            entity_type="support_ticket",
+            entity_id=str(updated.id),
+            actor=AuditActor.service(command.context.actor),
+            metadata={
+                "event_id": str(command.event_id),
+                "rule_id": str(command.rule_id),
+                "rule_version_id": str(command.rule_version_id),
+                "step_index": command.step_index,
+                "priority": priority_value,
+            },
+        )
+        return updated
 
     @staticmethod
     @ticket_owner_command("set_satisfaction")
@@ -3330,6 +3605,7 @@ class Tickets:
         status: str | None = None,
         ticket_type: str | None = None,
         region: str | None = None,
+        service_team_id: str | None = None,
         assigned_to_person_id: str | None = None,
         assigned_to_audience: TicketAudienceScope | None = None,
         project_manager_person_id: str | None = None,
@@ -3381,6 +3657,8 @@ class Tickets:
             query = query.filter(
                 func.lower(func.trim(Ticket.region)) == normalized_region
             )
+        if service_team_id:
+            query = query.filter(Ticket.service_team_id == service_team_id)
         if priority:
             query = query.filter(Ticket.priority == str(priority).strip())
         if channel:
@@ -3451,6 +3729,7 @@ class Tickets:
         status: str | None = None,
         ticket_type: str | None = None,
         region: str | None = None,
+        service_team_id: str | None = None,
         assigned_to_person_id: str | None = None,
         assigned_to_audience: TicketAudienceScope | None = None,
         project_manager_person_id: str | None = None,
@@ -3472,6 +3751,7 @@ class Tickets:
                 status=status,
                 ticket_type=ticket_type,
                 region=region,
+                service_team_id=service_team_id,
                 assigned_to_person_id=assigned_to_person_id,
                 assigned_to_audience=assigned_to_audience,
                 project_manager_person_id=project_manager_person_id,
@@ -3495,6 +3775,7 @@ class Tickets:
         status: str | None = None,
         ticket_type: str | None = None,
         region: str | None = None,
+        service_team_id: str | None = None,
         assigned_to_person_id: str | None = None,
         assigned_to_audience: TicketAudienceScope | None = None,
         project_manager_person_id: str | None = None,
@@ -3517,6 +3798,7 @@ class Tickets:
             status=status,
             ticket_type=ticket_type,
             region=region,
+            service_team_id=service_team_id,
             assigned_to_person_id=assigned_to_person_id,
             assigned_to_audience=assigned_to_audience,
             project_manager_person_id=project_manager_person_id,
@@ -3739,6 +4021,11 @@ class Tickets:
         ):
             Tickets._emit_ticket_event(db, "ticket.assigned", ticket, actor_id)
 
+        if before["status"] != after["status"]:
+            Tickets._emit_ticket_event(db, "ticket.status_changed", ticket, actor_id)
+        if before["priority"] != after["priority"]:
+            Tickets._emit_ticket_event(db, "ticket.priority_changed", ticket, actor_id)
+
         db.flush()
         db.refresh(ticket)
         previous_assignee = before.get("assigned_to_person_id")
@@ -3873,6 +4160,13 @@ class Tickets:
         Tickets._notify_staff_of_customer_comment(db, ticket, comment)
         db.flush()
         db.refresh(comment)
+        if not comment.is_internal:
+            _schedule_customer_comment_realtime_hint(
+                db,
+                ticket=ticket,
+                change=SupportTicketCommentRealtimeChange.comment_created,
+                comment_id=comment.id,
+            )
         return comment
 
     @staticmethod
@@ -3896,6 +4190,13 @@ class Tickets:
         db.flush()
         for comment in comments:
             db.refresh(comment)
+        if any(not comment.is_internal for comment in comments):
+            _schedule_customer_comment_realtime_hint(
+                db,
+                ticket=ticket,
+                change=SupportTicketCommentRealtimeChange.comment_created,
+                comment_id=None,
+            )
         return comments
 
     @staticmethod

@@ -236,7 +236,7 @@
                                 {"value": "", "label": "All Billing"},
                                 {"value": "prepaid", "label": "Prepaid"},
                                 {"value": "postpaid", "label": "Postpaid"},
-                                {"value": "non_billable", "label": "Non-billable"}
+                                {"value": "non_billable", "label": "Non-billable / review"}
                             ] %}
                             {{ filter_select("billing_mode", billing_mode_options, value=billing_mode or "", label="Billing", color="amber", attrs=live_filter_attrs) }}
                         </div>
@@ -246,6 +246,7 @@
                                 {"value": "active", "label": "Active"},
                                 {"value": "blocked", "label": "Blocked"},
                                 {"value": "suspended", "label": "Suspended"},
+                                {"value": "delinquent", "label": "Delinquent"},
                                 {"value": "disabled", "label": "Disabled"},
                                 {"value": "new", "label": "New"},
                                 {"value": "canceled", "label": "Canceled"},
@@ -611,6 +612,7 @@
                         <div class="mt-2 space-y-2">
                             <p class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedTemplate().label || selectedTemplate().name"></p>
                             <p class="text-xs text-slate-500 dark:text-slate-400" x-text="selectedTemplate().code"></p>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 capitalize" x-text="'Purpose: ' + (selectedTemplate().purpose || 'general').replace('_', ' ')"></p>
                             <p class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300" x-show="selectedTemplate().subject" x-text="selectedTemplate().subject"></p>
                         </div>
                     </template>
@@ -963,6 +965,24 @@ function customersPage(bulkContract) {
                 label: 'Contact completeness',
                 description: 'Email and phone availability',
                 csvHeader: 'contact_completeness'
+            },
+            {
+                sourceColumn: 'open_ticket_ids',
+                label: 'Open ticket IDs',
+                description: 'Active support ticket identifiers',
+                csvHeader: 'open_ticket_ids'
+            },
+            {
+                sourceColumn: 'total_payment',
+                label: 'Total payment',
+                description: 'Sum of successful customer payments',
+                csvHeader: 'total_payment'
+            },
+            {
+                sourceColumn: 'last_billing_date',
+                label: 'Last billing date',
+                description: 'Most recent invoice billing date',
+                csvHeader: 'last_billing_date'
             }
         ],
         availableNotificationChannels: {{ bulk_notification_channels | tojson }},

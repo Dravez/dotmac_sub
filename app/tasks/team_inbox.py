@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
+
+from sqlalchemy.exc import OperationalError
 
 from app.celery_app import celery_app
 from app.models.domain_settings import SettingDomain
@@ -19,6 +22,51 @@ from app.services.owner_commands import CommandContext
 from app.services.settings_spec import resolve_integer
 
 logger = logging.getLogger(__name__)
+
+
+@celery_app.task(name="app.tasks.team_inbox.expire_whatsapp_service_windows")
+def expire_whatsapp_service_windows(
+    *, limit: int = 200, managed_after: str | None = None
+) -> dict[str, int]:
+    """Release routing state after the canonical WhatsApp window closes."""
+
+    if not managed_after:
+        raise ValueError("managed_after rollout watermark is required")
+    try:
+        expiry_watermark = datetime.fromisoformat(managed_after)
+    except ValueError as exc:
+        raise ValueError("managed_after must be an ISO-8601 datetime") from exc
+    if expiry_watermark.tzinfo is None or expiry_watermark.utcoffset() is None:
+        raise ValueError("managed_after must include a timezone")
+    expiry_watermark = expiry_watermark.astimezone(UTC)
+
+    with db_session_adapter.owner_command_session() as session:
+        result = team_inbox_maintenance.sweep_expired_whatsapp_windows(
+            session,
+            team_inbox_maintenance.WhatsAppWindowExpirySweepCommand(
+                context=CommandContext.system(
+                    actor="task:team-inbox-whatsapp-window-expiry",
+                    scope="team-inbox:maintenance",
+                    reason="release expired WhatsApp assignment and queue state",
+                ),
+                limit=limit,
+                expired_after=expiry_watermark,
+            ),
+        )
+        payload = {
+            "examined": result.examined,
+            "expired_found": result.expired_found,
+            "assignments_released": result.assignments_released,
+            "queues_cancelled": result.queues_cancelled,
+            "already_correct": result.already_correct,
+            "conflicts": result.conflicts,
+            "errors": result.errors,
+        }
+        logger.info(
+            "team inbox WhatsApp window expiry sweep complete",
+            extra={"event": "team_inbox_whatsapp_window_expiry", **payload},
+        )
+        return payload
 
 
 @celery_app.task(name="app.tasks.team_inbox.repair_whatsapp_locations")
@@ -142,7 +190,14 @@ def send_queue_position_notifications(*, limit: int = 200) -> dict[str, int]:
         return payload
 
 
-@celery_app.task(name="app.tasks.team_inbox.process_ai_intake_sessions")
+@celery_app.task(
+    name="app.tasks.team_inbox.process_ai_intake_sessions",
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
 def process_ai_intake_sessions(*, limit: int = 100) -> dict[str, int]:
     with db_session_adapter.session() as session:
         result = ai_conversation_intake.process_ready_sessions(
@@ -177,7 +232,9 @@ def recover_stale_ai_intake(*, limit: int = 200) -> dict[str, int]:
                 context=CommandContext.system(
                     actor="task:team-inbox-ai-intake-recovery",
                     scope="team-inbox:maintenance",
-                    reason="route expired AI intake waits through fallback policy",
+                    reason=(
+                        "hand off inactive AI intake sessions through normal human routing"
+                    ),
                 ),
                 limit=limit,
             ),

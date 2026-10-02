@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -286,14 +291,21 @@ DOMAIN = DomainSOT(
                 "composes customer wording for a backend-approved next action; a "
                 "typed validator rejects invented facts, unsafe promises, repeated "
                 "questions, and internal terminology. Customer inactivity remains "
-                "awaiting_customer until long-term expiry and never requests human "
-                "assignment by itself. An invalid, unavailable, or unaccepted "
+                "awaiting_customer for the configured ten-minute hold, then requests "
+                "normal human routing through assignment or FIFO queue admission. "
+                "An invalid, unavailable, or unaccepted "
                 "classifier result is a typed classification_unavailable condition: "
-                "deterministic facts and human-request precedence are preserved, and "
-                "the engine uses the existing bounded clarification budget before an "
+                "known DeepSeek null-for-default output is normalized into the "
+                "existing strict schema while other violations remain rejected; "
+                "sanitized validation structure is durable evidence. Deterministic "
+                "facts and human-request precedence are preserved, greeting-only "
+                "turns wait naturally, and fact-driven technical paths use the "
+                "adaptive planner. The engine uses the existing bounded clarification budget before an "
                 "explicit classifier_unavailable_after_retries handoff. The "
                 "unsupported_or_troubleshooting_exhausted reason requires an accepted "
-                "classification and genuinely unavailable support options."
+                "classification and genuinely unavailable support options. A final "
+                "qualifying social sales classification stages one PII-free durable "
+                "lead-candidate event; Sales remains the sole Lead writer."
             ),
             contract=ServiceContract(
                 concerns=(
@@ -556,8 +568,9 @@ DOMAIN = DomainSOT(
                     mode=TransactionMode.OWNER_MANAGED,
                     boundary=(
                         "Configuration mutation enters execute_owner_command once. "
-                        "Classification is read-only and its typed result is persisted "
-                        "by the Inbox coordinator with the inbound message."
+                        "Classification writes its typed result through the session "
+                        "owner and stages any qualifying sales-candidate event in the "
+                        "same transaction as the inbound-message projection."
                     ),
                     locking=(
                         "Configuration upsert locks the scope row; classification writes no row. "
@@ -568,6 +581,7 @@ DOMAIN = DomainSOT(
                     idempotency=(
                         "Configuration uses command evidence; provider message deduplication "
                         "precedes classification so one inbound fact produces at most one attempt. "
+                        "A message-derived event id makes the Sales handoff replay-safe. "
                         "Clarification delivery uses an inbound-message-derived communication-intent "
                         "dedupe key."
                     ),
@@ -595,11 +609,20 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("ai.intake_config_updated",),
+                    event_types=(
+                        "ai.intake_config_updated",
+                        "ai.intake_lead_candidate_classified",
+                    ),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
-                    compatibility="Version 1 carries only bounded configuration-change evidence.",
-                    replay="Configuration remains authoritative in AiIntakeConfig.",
+                    compatibility=(
+                        "Version 1 carries bounded configuration-change evidence or "
+                        "PII-free classification and allowlisted attribution."
+                    ),
+                    replay=(
+                        "Configuration remains authoritative in AiIntakeConfig; the "
+                        "message-derived candidate event id and Sales command are idempotent."
+                    ),
                 ),
                 migration=MigrationContract(
                     state=AuthorityMigrationState.COMPLETE,
@@ -941,7 +964,7 @@ DOMAIN = DomainSOT(
                 transaction=TransactionContract(
                     mode=TransactionMode.OWNER_MANAGED,
                     boundary="Session processing enters execute_owner_command once and delegates Inbox consequences to Team Inbox owners.",
-                    locking="Ready sessions are selected with row locks and skip_locked; human takeover, customer reply, and long-term wait-expiry races are rechecked before consequences.",
+                    locking="Ready sessions are selected with row locks and skip_locked; human takeover, customer reply, and minute-based customer-wait handoff races are rechecked before consequences.",
                     idempotency="Session/message/generation, welcome, wait-expiry, and outbound dedupe keys suppress duplicate webhook and worker execution.",
                     retries="Beat reruns pick up incomplete sessions; failed sessions are recorded and safely escalated.",
                 ),
@@ -1023,4 +1046,15 @@ DOMAIN = DomainSOT(
     "owning domain service, which applies its own guards, events, and "
     "audit. ai.intake is the separate bounded customer-message classifier; "
     "it may select a destination service team but never an agent or queue position.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="maintenance.expired_ai_insights",
+                label="Expired AI operational insights",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Insight cleanup is a protected background task; it does not have a customer-rule trigger or action in the Center.",
+            ),
+        ),
+    ),
 )

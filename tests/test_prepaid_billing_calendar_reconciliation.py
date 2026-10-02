@@ -63,6 +63,13 @@ LAPSED_PROPOSED_START = datetime(2026, 7, 20, 23, 0, tzinfo=UTC)
 LAPSED_PROPOSED_END = datetime(2026, 8, 20, 23, 0, tzinfo=UTC)
 LAPSED_RECONCILED_AT = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
 STALE_ANCHOR = datetime(2023, 10, 8, tzinfo=UTC)
+EXTENSION_PAID_AT = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+EXTENSION_GRANT_START = datetime(2026, 8, 3, 23, 0, tzinfo=UTC)
+EXTENSION_GRANT_END = datetime(2026, 8, 17, 23, 0, tzinfo=UTC)
+DOUBLE_APPLIED_START = datetime(2026, 8, 12, 23, 0, tzinfo=UTC)
+DOUBLE_APPLIED_END = datetime(2026, 9, 12, 23, 0, tzinfo=UTC)
+DOUBLE_APPLIED_ANCHOR = datetime(2026, 9, 26, 23, 0, tzinfo=UTC)
+CORRECTED_EXTENSION_END = datetime(2026, 9, 17, 23, 0, tzinfo=UTC)
 
 
 def _chain(db, subscriber):
@@ -170,6 +177,68 @@ def _chain(db, subscriber):
     return invoice, line, subscription, entitlement, payment
 
 
+def _split_funded_chain(db, subscriber):
+    invoice, line, subscription, entitlement, first_payment = _chain(db, subscriber)
+    first_allocation = (
+        db.query(PaymentAllocation)
+        .filter_by(invoice_id=invoice.id, payment_id=first_payment.id)
+        .one()
+    )
+    first_settlement = (
+        db.query(PaymentSettlement).filter_by(payment_id=first_payment.id).one()
+    )
+    first_amount = Decimal("387.50")
+    second_amount = Decimal("612.50")
+    first_payment.amount = first_amount
+    first_payment.paid_at = datetime(2023, 1, 12, 9, 0, tzinfo=UTC)
+    first_payment.created_at = first_payment.paid_at
+    first_allocation.amount = first_amount
+    first_settlement.amount = first_amount
+    first_settlement.prepaid_amount = first_amount
+
+    second_payment = Payment(
+        account_id=subscriber.id,
+        amount=second_amount,
+        currency="NGN",
+        status=PaymentStatus.succeeded,
+        paid_at=PAID_AT,
+        created_at=PAID_AT,
+        is_active=True,
+    )
+    db.add(second_payment)
+    db.flush()
+    db.add_all(
+        [
+            PaymentSettlement(
+                payment_id=second_payment.id,
+                amount=second_amount,
+                unallocated_amount=Decimal("0.00"),
+                prepaid_amount=second_amount,
+                currency="NGN",
+                origin=PaymentSettlementOrigin.system,
+                idempotency_key=f"calendar-test-settlement-{second_payment.id}",
+                created_at=PAID_AT,
+            ),
+            PaymentAllocation(
+                payment_id=second_payment.id,
+                invoice_id=invoice.id,
+                amount=second_amount,
+                idempotency_key=f"calendar-test-allocation-{second_payment.id}",
+                is_active=True,
+            ),
+        ]
+    )
+    db.commit()
+    return (
+        invoice,
+        line,
+        subscription,
+        entitlement,
+        first_payment,
+        second_payment,
+    )
+
+
 def _lapsed_chain(db, subscriber):
     invoice, line, subscription, entitlement, payment = _chain(db, subscriber)
     invoice.paid_at = LAPSED_PAID_AT
@@ -212,6 +281,47 @@ def _lapsed_chain(db, subscriber):
     )
     db.commit()
     return invoice, line, subscription, entitlement, payment, lock, extension
+
+
+def _extension_double_applied_chain(db, subscriber):
+    invoice, line, subscription, entitlement, payment = _chain(db, subscriber)
+    invoice.billing_period_start = DOUBLE_APPLIED_START
+    invoice.billing_period_end = DOUBLE_APPLIED_END
+    invoice.paid_at = EXTENSION_PAID_AT
+    line.metadata_ = {
+        "kind": "base_subscription",
+        "billing_period_start": DOUBLE_APPLIED_START.isoformat(),
+        "billing_period_end": DOUBLE_APPLIED_END.isoformat(),
+    }
+    entitlement.starts_at = DOUBLE_APPLIED_START
+    entitlement.ends_at = DOUBLE_APPLIED_END
+    payment.paid_at = EXTENSION_PAID_AT
+    payment.created_at = EXTENSION_PAID_AT
+    subscription.next_billing_at = DOUBLE_APPLIED_ANCHOR
+    extension = ServiceExtension(
+        reason="Applied outage compensation",
+        window_start=datetime(2026, 7, 24, 7, 47, tzinfo=UTC),
+        window_end=datetime(2026, 8, 6, 7, 47, tzinfo=UTC),
+        days=14,
+        scope_type=ServiceExtensionScope.subscribers,
+        scope_subscriber_ids=[str(subscriber.id)],
+        status=ServiceExtensionStatus.applied,
+    )
+    db.add(extension)
+    db.flush()
+    db.add(
+        ServiceExtensionEntry(
+            extension_id=extension.id,
+            subscription_id=subscription.id,
+            subscriber_id=subscriber.id,
+            previous_next_billing_at=EXTENSION_GRANT_START,
+            grant_starts_at=EXTENSION_GRANT_START,
+            grant_ends_at=EXTENSION_GRANT_END,
+            new_next_billing_at=EXTENSION_GRANT_END,
+        )
+    )
+    db.commit()
+    return invoice, line, subscription, entitlement, payment, extension
 
 
 def _command(
@@ -302,6 +412,95 @@ def test_exact_legacy_chain_previews_and_reconciles_without_economic_change(
     )
 
 
+def test_exact_legacy_chain_accepts_complete_split_funding_without_money_change(
+    db_session, subscriber
+):
+    (
+        invoice,
+        line,
+        subscription,
+        entitlement,
+        first_payment,
+        second_payment,
+    ) = _split_funded_chain(db_session, subscriber)
+
+    preview = preview_prepaid_billing_calendar_reconciliation(db_session, invoice.id)
+
+    assert preview.disposition is PrepaidBillingCalendarDisposition.eligible
+    assert preview.correction_kind is (
+        PrepaidBillingCalendarCorrectionKind.retired_utc_midnight
+    )
+    assert preview.payment_id is None
+    assert set(preview.payment_ids) == {first_payment.id, second_payment.id}
+    assert sum(item.allocated_amount for item in preview.funding_evidence) == Decimal(
+        "1000.00"
+    )
+    fingerprint = preview.fingerprint
+    invoice_id = invoice.id
+    db_session.commit()
+
+    result = reconcile_prepaid_billing_calendar(
+        db_session,
+        _command(
+            invoice_id,
+            fingerprint,
+            key="calendar-split-funding-repair",
+        ),
+    )
+
+    for row in (
+        invoice,
+        line,
+        subscription,
+        entitlement,
+        first_payment,
+        second_payment,
+    ):
+        db_session.refresh(row)
+    assert result.corrected_starts_at == WAT_START
+    assert result.corrected_ends_at == WAT_END
+    assert first_payment.amount == Decimal("387.50")
+    assert second_payment.amount == Decimal("612.50")
+    evidence = invoice.metadata_["prepaid_billing_calendar_reconciliation"]
+    assert set(evidence["payment_ids"]) == {
+        str(first_payment.id),
+        str(second_payment.id),
+    }
+    assert evidence["payment_id"] is None
+    assert len(evidence["funding_evidence"]) == 2
+    assert evidence["economic_delta"] == "0.00"
+
+
+def test_split_funding_does_not_infer_a_payment_timed_lapsed_repair(
+    db_session, subscriber
+):
+    invoice, _line, subscription, *_payments = _split_funded_chain(
+        db_session, subscriber
+    )
+    subscription.next_billing_at = STALE_ANCHOR
+    db_session.commit()
+
+    preview = preview_prepaid_billing_calendar_reconciliation(db_session, invoice.id)
+
+    assert preview.disposition is PrepaidBillingCalendarDisposition.anchor_changed
+    assert preview.actionable is False
+
+
+def test_split_funding_rejects_any_non_succeeded_allocated_payment(
+    db_session, subscriber
+):
+    invoice, _line, _subscription, _entitlement, _first, second_payment = (
+        _split_funded_chain(db_session, subscriber)
+    )
+    second_payment.status = PaymentStatus.failed
+    db_session.commit()
+
+    preview = preview_prepaid_billing_calendar_reconciliation(db_session, invoice.id)
+
+    assert preview.disposition is PrepaidBillingCalendarDisposition.ambiguous_payment
+    assert preview.actionable is False
+
+
 def test_lapsed_payment_period_reconciles_evidence_and_restores_prepaid_access(
     db_session, subscriber, monkeypatch
 ):
@@ -371,6 +570,53 @@ def test_lapsed_payment_period_reconciles_evidence_and_restores_prepaid_access(
     assert evidence["correction_kind"] == "lapsed_payment_period"
     assert evidence["economic_delta"] == "0.00"
     assert payment.amount == Decimal("1000.00")
+
+
+def test_applied_extension_double_count_previews_and_repairs_without_money_change(
+    db_session, subscriber
+):
+    invoice, line, subscription, entitlement, payment, extension = (
+        _extension_double_applied_chain(db_session, subscriber)
+    )
+
+    preview = preview_prepaid_billing_calendar_reconciliation(db_session, invoice.id)
+
+    assert preview.disposition is PrepaidBillingCalendarDisposition.eligible
+    assert preview.correction_kind is (
+        PrepaidBillingCalendarCorrectionKind.extension_covered_payment_period
+    )
+    assert preview.current_starts_at == DOUBLE_APPLIED_START
+    assert preview.current_ends_at == DOUBLE_APPLIED_END
+    assert preview.proposed_starts_at == EXTENSION_GRANT_END
+    assert preview.proposed_ends_at == CORRECTED_EXTENSION_END
+    invoice_id = invoice.id
+    db_session.commit()
+
+    result = reconcile_prepaid_billing_calendar(
+        db_session,
+        _command(
+            invoice_id,
+            preview.fingerprint,
+            key="extension-double-count-repair",
+            reason="Move the paid period after exact applied extension coverage.",
+        ),
+    )
+
+    for row in (invoice, line, subscription, entitlement, payment, extension):
+        db_session.refresh(row)
+    assert result.correction_kind is (
+        PrepaidBillingCalendarCorrectionKind.extension_covered_payment_period
+    )
+    assert invoice.billing_period_start.replace(tzinfo=UTC) == EXTENSION_GRANT_END
+    assert invoice.billing_period_end.replace(tzinfo=UTC) == CORRECTED_EXTENSION_END
+    assert entitlement.starts_at.replace(tzinfo=UTC) == EXTENSION_GRANT_END
+    assert entitlement.ends_at.replace(tzinfo=UTC) == CORRECTED_EXTENSION_END
+    assert subscription.next_billing_at.replace(tzinfo=UTC) == CORRECTED_EXTENSION_END
+    assert invoice.total == Decimal("1000.00")
+    assert payment.amount == Decimal("1000.00")
+    assert extension.status is ServiceExtensionStatus.applied
+    evidence = invoice.metadata_["prepaid_billing_calendar_reconciliation"]
+    assert evidence["economic_delta"] == "0.00"
 
 
 def test_lapsed_payment_repair_preserves_independent_access_lock(

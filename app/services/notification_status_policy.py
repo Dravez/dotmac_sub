@@ -26,7 +26,13 @@ from app.models.subscriber import SubscriberStatus
 _TERMINAL_STATUSES = frozenset({SubscriberStatus.canceled, SubscriberStatus.disabled})
 
 # Walled (service-cut) account states receive only these actionable categories.
-_WALLED_STATUSES = frozenset({SubscriberStatus.suspended, SubscriberStatus.blocked})
+_WALLED_STATUSES = frozenset(
+    {
+        SubscriberStatus.suspended,
+        SubscriberStatus.paused,
+        SubscriberStatus.blocked,
+    }
+)
 _WALLED_ALLOWED_CATEGORIES = frozenset({"billing", "account", "service", "credentials"})
 
 

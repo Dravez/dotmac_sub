@@ -52,6 +52,7 @@ LOCATIONS_CACHE_TTL_SECONDS = 30
 _MISSING = object()
 _SUSPENDED_STATUSES = {
     SubscriptionStatus.suspended,
+    SubscriptionStatus.paused,
     SubscriptionStatus.blocked,
     SubscriptionStatus.stopped,
 }
@@ -1459,6 +1460,7 @@ def create_installation_invoice(
     description: str,
     external_ref: str | None = None,
     currency: str = "NGN",
+    tax_rate_id: uuid.UUID | None = None,
     commit: bool = True,
 ) -> Invoice:
     """Create a one-time installation invoice (header + single line) for a
@@ -1507,7 +1509,10 @@ def create_installation_invoice(
         intent,
         [
             InvoiceLineIntent(
-                description=description, quantity=Decimal("1"), unit_price=amount
+                description=description,
+                quantity=Decimal("1"),
+                unit_price=amount,
+                tax_rate_id=tax_rate_id,
             )
         ],
         commit=commit,

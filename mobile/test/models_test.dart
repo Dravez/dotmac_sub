@@ -324,8 +324,8 @@ void main() {
     test(
       'prefers server is_expired/expires_at when the backend provides them',
       () {
-        // Server says: active, no date expiry (prepaid lapses on balance, not
-        // next_billing_at). Client must trust it over local date math.
+        // Server says the prepaid paid-through anchor is the service expiry.
+        // Client must trust the backend projection over local date math.
         final s = Subscription.fromJson({
           'id': 's9',
           'account_id': 'a1',
@@ -333,11 +333,11 @@ void main() {
           'status': 'active',
           'billing_mode': 'prepaid',
           'next_billing_at': '2020-01-01T00:00:00Z',
-          'expires_at': null,
+          'expires_at': '2020-01-01T00:00:00Z',
           'is_expired': false,
         });
         expect(s.hasServerExpiry, isTrue);
-        expect(s.expiresAt, isNull);
+        expect(s.expiresAt, isNotNull);
         expect(s.isExpired, isFalse);
       },
     );
@@ -443,6 +443,53 @@ void main() {
       expect(ticket.statusPresentation.label, 'Future State');
       expect(ticket.statusPresentation.tone.name, 'neutral');
       expect(ticket.statusPresentation.icon, 'info');
+    });
+
+    test('parses the closed ticket-comment author vocabulary', () {
+      TicketComment comment(String authorType) => TicketComment.fromJson({
+            'id': 'comment-$authorType',
+            'ticket_id': 'ticket-1',
+            'author_type': authorType,
+            'body': 'Reply',
+            'is_internal': false,
+          });
+
+      expect(comment('customer').authorType, TicketCommentAuthorType.customer);
+      expect(comment('staff').authorType, TicketCommentAuthorType.staff);
+      expect(comment('system').authorType, TicketCommentAuthorType.system);
+    });
+
+    test('keeps an unavailable comment author visibly unknown', () {
+      final missing = TicketComment.fromJson({
+        'id': 'comment-missing',
+        'ticket_id': 'ticket-1',
+        'body': 'Older response',
+      });
+      final future = TicketComment.fromJson({
+        'id': 'comment-future',
+        'ticket_id': 'ticket-1',
+        'author_type': 'partner',
+        'body': 'Newer response',
+      });
+
+      expect(missing.authorType, TicketCommentAuthorType.unknown);
+      expect(future.authorType, TicketCommentAuthorType.unknown);
+    });
+  });
+
+  group('PlanChangeOptions', () {
+    test('preserves unknown balances while funding is under review', () {
+      final options = PlanChangeOptions.fromJson({
+        'prepaid_funding': null,
+        'postpaid_receivables': null,
+        'collection_blocking_balance': null,
+        'financial_position_unavailable': true,
+      });
+
+      expect(options.prepaidFunding, isNull);
+      expect(options.postpaidReceivables, isNull);
+      expect(options.collectionBlockingBalance, isNull);
+      expect(options.financialPositionUnavailable, isTrue);
     });
   });
 
@@ -588,6 +635,38 @@ void main() {
   });
 
   group('Topup', () {
+    test('TopupPage keeps direct transfer out of online gateway options', () {
+      final page = TopupPage.fromJson({
+        'provider_type': 'paystack',
+        'currency': 'NGN',
+        'min_amount': 1000,
+        'max_amount': 500000,
+        'payment_options': [
+          {'provider_type': 'paystack', 'label': 'Pay with Paystack'},
+          {
+            'provider_type': 'direct_bank_transfer',
+            'label': 'Direct bank transfer',
+          },
+        ],
+        'direct_bank_transfer': {
+          'enabled': true,
+          'accounts': [
+            {
+              'id': 'collection-account-1',
+              'bank_name': 'Example Bank',
+              'account_name': 'Dotmac',
+              'account_number': '0123456789',
+            },
+          ],
+        },
+      });
+
+      expect(page.providers, hasLength(1));
+      expect(
+          page.providers.single.providerType, OnlinePaymentProvider.paystack);
+      expect(page.bankTransfer.accounts.single.id, 'collection-account-1');
+    });
+
     test(
       'TopupPage keeps payable-invoice visibility while deposit stays allowed',
       () {
@@ -599,7 +678,7 @@ void main() {
           'deposit_allowed': true,
           'eligible_unpaid_total': '18000.00',
           'eligible_unpaid_invoices': [
-            {'invoice_id': 'inv-1', 'invoice_number': 'INV-1'}
+            {'invoice_id': 'inv-1', 'invoice_number': 'INV-1'},
           ],
         });
         expect(page.depositAllowed, isTrue);
@@ -607,6 +686,84 @@ void main() {
         expect(page.eligibleUnpaidInvoices.single['invoice_number'], 'INV-1');
       },
     );
+
+    test('TopupPage parses the active deposit projection', () {
+      final page = TopupPage.fromJson({
+        'provider_type': 'paystack',
+        'currency': 'NGN',
+        'min_amount': 1000,
+        'max_amount': 500000,
+        'deposit_allowed': false,
+        'active_deposit_request': {
+          'intent_id': 'intent-1',
+          'phase': 'under_review',
+          'next_action': 'wait_for_review',
+          'provider_type': 'direct_bank_transfer',
+          'reference': 'TRF-PENDING',
+          'amount': '20000.00',
+          'currency': 'NGN',
+          'created_at': '2026-09-22T10:00:00Z',
+          'observed_at': '2026-09-22T11:00:00Z',
+          'message': 'Your transfer receipt is under review.',
+          'can_cancel': false,
+        },
+      });
+
+      expect(page.depositAllowed, isFalse);
+      expect(page.activeDepositRequest?.phase, TopupRequestPhase.underReview);
+      expect(
+        page.activeDepositRequest?.nextAction,
+        TopupRequestAction.waitForReview,
+      );
+      expect(page.activeDepositRequest?.amount, 20000.0);
+      expect(page.activeDepositRequest?.reference, 'TRF-PENDING');
+    });
+
+    test('TopupPage parses an active pending bank-transfer deposit', () {
+      final page = TopupPage.fromJson({
+        'provider_type': 'paystack',
+        'currency': 'NGN',
+        'min_amount': 1000,
+        'max_amount': 500000,
+        'direct_bank_transfer': {
+          'enabled': true,
+          'accounts': [
+            {
+              'id': 'zenith-main',
+              'bank_name': 'ZENITH BANK',
+              'account_name': 'Dotmac',
+              'account_number': '1234567890',
+              'sort_code': '057',
+            }
+          ],
+        },
+        'deposit_allowed': false,
+        'active_deposit_request': {
+          'intent_id': 'intent-1',
+          'phase': 'awaiting_receipt',
+          'next_action': 'upload_receipt',
+          'provider_type': 'direct_bank_transfer',
+          'reference': 'TRF-123',
+          'amount': '1000.00',
+          'currency': 'NGN',
+          'created_at': '2026-09-23T10:16:20Z',
+          'expires_at': '2026-09-30T10:16:20Z',
+          'observed_at': '2026-09-23T11:20:00Z',
+          'message': 'Upload your receipt to continue.',
+          'can_cancel': true,
+        },
+      });
+
+      final deposit = page.activeDepositRequest!;
+      expect(page.depositAllowed, isFalse);
+      expect(deposit.intentId, 'intent-1');
+      expect(deposit.reference, 'TRF-123');
+      expect(deposit.amount, 1000.0);
+      expect(deposit.isAwaitingReceipt, isTrue);
+      expect(deposit.canCancel, isTrue);
+      expect(page.bankTransfer.accounts.single.id, 'zenith-main');
+      expect(page.bankTransfer.accounts.single.sortCode, '057');
+    });
 
     test(
       'TopupPreview parses invoice application breakdown and fingerprint',
@@ -624,7 +781,7 @@ void main() {
               'currency': 'NGN',
               'amount_applied': '10000.00',
               'outstanding_after_application': '8000.00',
-            }
+            },
           ],
           'total_applied_to_invoices': '10000.00',
           'total_outstanding_after_application': '8000.00',

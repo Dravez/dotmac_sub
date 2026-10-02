@@ -1,6 +1,7 @@
 """Admin reporting web routes."""
 
 import csv
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -45,6 +46,7 @@ from app.services.auth_dependencies import (
     require_any_permission,
     require_permission,
 )
+from app.services.billing import reporting as billing_reporting
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.sales import reports as sales_reports_service
@@ -1104,6 +1106,36 @@ def reports_technician_export(
     )
 
 
+def _ticket_sla_drilldown_url(
+    *,
+    key: str,
+    field: Literal["service_team_id", "region"],
+    date_from: str | None,
+    date_to: str | None,
+) -> str:
+    is_unassigned = key.startswith("unassigned_")
+    conditions: list[tuple[str, str, str, str | None]] = [
+        (
+            "Ticket",
+            field,
+            "is" if is_unassigned else "=",
+            None if is_unassigned else key,
+        )
+    ]
+    if date_from:
+        conditions.append(("Ticket", "created_at", ">=", f"{date_from}T00:00:00+00:00"))
+    if date_to:
+        conditions.append(
+            ("Ticket", "created_at", "<=", f"{date_to}T23:59:59.999999+00:00")
+        )
+    return "/admin/support/tickets?" + urlencode(
+        {
+            "status": "not_closed",
+            "filters": json.dumps({"and": conditions}, separators=(",", ":")),
+        }
+    )
+
+
 @router.get(
     "/ticket-sla",
     response_class=HTMLResponse,
@@ -1121,6 +1153,31 @@ def reports_ticket_sla(
 
     start_at = _parse_date_start(date_from)
     end_at = _parse_date_end(date_to)
+    report_summary = ticket_sla_reports_service.summary(
+        db=db,
+        query=ticket_sla_reports_service.TicketSlaSummaryQuery(
+            start_at=start_at,
+            end_at=end_at,
+        ),
+    )
+    team_drilldown_urls = {
+        item.key: _ticket_sla_drilldown_url(
+            key=item.key,
+            field="service_team_id",
+            date_from=date_from,
+            date_to=date_to,
+        )
+        for item in report_summary.by_service_team
+    }
+    region_drilldown_urls = {
+        item.key: _ticket_sla_drilldown_url(
+            key=item.key,
+            field="region",
+            date_from=date_from,
+            date_to=date_to,
+        )
+        for item in report_summary.by_region
+    }
     violation_page = ticket_sla_reports_service.violation_page(
         db,
         query=ticket_sla_reports_service.TicketSlaViolationPageQuery(
@@ -1140,7 +1197,9 @@ def reports_ticket_sla(
         "date_from": date_from or "",
         "date_to": date_to or "",
         "open_only": open_only,
-        "summary": ticket_sla_reports_service.summary(db, start_at, end_at),
+        "summary": report_summary,
+        "team_drilldown_urls": team_drilldown_urls,
+        "region_drilldown_urls": region_drilldown_urls,
         "trend": ticket_sla_reports_service.trend_daily(db, start_at, end_at),
         "violations": violation_page.rows,
         "violation_page": violation_page,
@@ -2005,6 +2064,24 @@ _EXTENDED_EXPORT_PERMISSIONS = {
 }
 
 
+def _upcoming_charges_period(
+    month: str | None, year: str | None
+) -> billing_reporting.UpcomingChargePeriod | None:
+    month_value = month.strip() if month else ""
+    year_value = year.strip() if year else ""
+    if not month_value and not year_value:
+        return None
+    try:
+        return billing_reporting.UpcomingChargePeriod(
+            year=int(year_value) if year_value else None,
+            month=int(month_value) if month_value else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail="Select a valid month or year."
+        ) from exc
+
+
 @router.get(
     "/extended-export/{report_kind}",
     dependencies=[
@@ -2017,7 +2094,8 @@ def reports_extended_export(
     date_from: str | None = None,
     date_to: str | None = None,
     status: str | None = None,
-    year: int | None = None,
+    year: str | None = None,
+    month: str | None = None,
     days: int = Query(default=30, ge=1, le=3660),
     mode: str = "postpaid",
     state: str = "all",
@@ -2027,6 +2105,10 @@ def reports_extended_export(
 ):
     if not can(request, _EXTENDED_EXPORT_PERMISSIONS[report_kind]):
         raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        export_year = int(year) if year else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Select a valid year.") from exc
     export = web_reports_ext_service.build_extended_report_export(
         db=db,
         query=web_reports_ext_service.ExtendedReportExportQuery(
@@ -2034,12 +2116,18 @@ def reports_extended_export(
             date_from=date_from,
             date_to=date_to,
             status=status,
-            year=year,
+            year=export_year,
             days=days,
             mode=mode,
             state=state,
             band=band,
             include_funded=include_funded,
+            period=(
+                _upcoming_charges_period(month, year)
+                if report_kind
+                is web_reports_ext_service.ExtendedReportExportKind.upcoming_charges
+                else None
+            ),
         ),
     )
     return Response(
@@ -2100,6 +2188,8 @@ def reports_upcoming_charges(
     state: str = "all",
     band: str | None = None,
     include_funded: bool | None = None,
+    month: str | None = None,
+    year: str | None = None,
     page: int = 1,
     per_page: int = 25,
     db: Session = Depends(get_db),
@@ -2110,8 +2200,10 @@ def reports_upcoming_charges(
         state=state,
         band=band,
         include_funded=include_funded,
+        period=_upcoming_charges_period(month, year),
         page=page,
         per_page=per_page,
+        include_summary=True,
     )
     ctx = _base_context(
         request,
@@ -3428,14 +3520,20 @@ _REPORT_ADVISORS: dict[str, str] = {
 
 def _fetch_report_for_advisor(
     db: Session, advisor_key: str, date_from: str | None, date_to: str | None
-) -> tuple[dict, str, str | None]:
+) -> tuple[dict[str, object], str, str | None]:
     """Fetch the owned projection an advisor reads. Returns
     (report, entity_type, entity_id)."""
     if advisor_key == "ticket_sla_advisor":
         start_at = _parse_date_start(date_from)
         end_at = _parse_date_end(date_to)
-        report = ticket_sla_reports_service.summary(db, start_at, end_at)
-        return report, "report:ticket_sla", None
+        report = ticket_sla_reports_service.summary(
+            db=db,
+            query=ticket_sla_reports_service.TicketSlaSummaryQuery(
+                start_at=start_at,
+                end_at=end_at,
+            ),
+        )
+        return report.as_serializable(), "report:ticket_sla", None
     raise KeyError(advisor_key)
 
 

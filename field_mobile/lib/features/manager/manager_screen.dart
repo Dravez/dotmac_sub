@@ -421,17 +421,27 @@ class _ManagerTeamMapScreenState extends ConsumerState<ManagerTeamMapScreen>
     }
     if (!mounted) return;
     if (position != null) _focusPosition(position);
+    final activeWorkOrderId = technician?.activeWorkOrderId?.trim();
+    final activePersonId = technician?.personId.trim();
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => _TechnicianLocationSheet(
         technician: technician,
         position: position,
-        onOpenDispatch: technician?.activeWorkOrderTitle == null
+        onOpenDispatch:
+            activeWorkOrderId == null ||
+                activeWorkOrderId.isEmpty ||
+                activePersonId == null ||
+                activePersonId.isEmpty
             ? null
             : () {
                 Navigator.of(sheetContext).pop();
-                context.go('/schedule');
+                context.push(
+                  '/manager/dispatch/'
+                  '${Uri.encodeComponent(activeWorkOrderId)}'
+                  '?personId=${Uri.encodeComponent(activePersonId)}',
+                );
               },
       ),
     );
@@ -522,8 +532,40 @@ class ManagerDispatchScreen extends ConsumerWidget {
   }
 }
 
+enum ManagerExpenseReviewFilter {
+  pendingApprovals(
+    statuses: {'submitted'},
+    sectionTitle: 'Pending approvals',
+    emptyMessage: 'No pending approvals',
+  ),
+  history(
+    statuses: {'approved', 'rejected', 'paid', 'canceled'},
+    sectionTitle: 'History',
+    emptyMessage: 'No expense history',
+  );
+
+  const ManagerExpenseReviewFilter({
+    required this.statuses,
+    required this.sectionTitle,
+    required this.emptyMessage,
+  });
+
+  final Set<String> statuses;
+  final String sectionTitle;
+  final String emptyMessage;
+
+  bool includes(ExpenseRequest request) => statuses.contains(request.status);
+}
+
 class ManagerExpenseReviewScreen extends ConsumerStatefulWidget {
-  const ManagerExpenseReviewScreen({super.key});
+  const ManagerExpenseReviewScreen({
+    super.key,
+    required this.filter,
+    this.embedded = false,
+  });
+
+  final ManagerExpenseReviewFilter filter;
+  final bool embedded;
 
   @override
   ConsumerState<ManagerExpenseReviewScreen> createState() =>
@@ -549,8 +591,9 @@ class _ManagerExpenseReviewScreenState
       setState(() {
         _lastLoadedExpenses = items;
         _resolvedExpenseIds.removeWhere(
-          (id) =>
-              items.any((item) => item.id == id && item.status != 'submitted'),
+          (id) => items.any(
+            (item) => item.id == id && !widget.filter.includes(item),
+          ),
         );
       });
     });
@@ -572,101 +615,310 @@ class _ManagerExpenseReviewScreenState
     final expenses = ref.watch(managerExpensesProvider);
     final latestItems = expenses.valueOrNull ?? _lastLoadedExpenses;
     final visibleItems = latestItems
-        ?.where((item) => !_resolvedExpenseIds.contains(item.id))
+        ?.where(
+          (item) =>
+              widget.filter.includes(item) &&
+              !_resolvedExpenseIds.contains(item.id),
+        )
         .toList();
     final canPayExpenses =
         ref.watch(managerProfileProvider).valueOrNull?.canPayExpenses == true;
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Expenses')),
-      body: RefreshIndicator(
-        onRefresh: () async => ref.invalidate(managerExpensesProvider),
-        child: switch (visibleItems) {
-          final items? => ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.all(16),
-            children: [
-              if (expenses.hasError) ...[
-                _ApprovalRefreshError(
-                  onRetry: () => ref.invalidate(managerExpensesProvider),
-                ),
-                const SizedBox(height: 12),
-              ],
-              if (items.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 48),
-                  child: Center(child: Text('No team expenses')),
-                )
-              else ...[
-                _ExpenseSectionTitle(
-                  title: 'Pending approval',
-                  count: items
-                      .where((item) => item.status == 'submitted')
-                      .length,
-                ),
-                for (final request in items.where(
-                  (item) => item.status == 'submitted',
-                ))
-                  _ExpenseApprovalCard(
-                    request: request,
-                    canPay: canPayExpenses,
-                    onResolved: _markResolved,
-                  ),
-                const SizedBox(height: 12),
-                _ExpenseSectionTitle(
-                  title: 'Approved for payment',
-                  count: items
-                      .where((item) => item.status == 'approved')
-                      .length,
-                ),
-                for (final request in items.where(
-                  (item) => item.status == 'approved',
-                ))
-                  _ExpenseApprovalCard(
-                    request: request,
-                    canPay: canPayExpenses,
-                    onResolved: _markResolved,
-                  ),
-                const SizedBox(height: 12),
-                _ExpenseSectionTitle(
-                  title: 'History',
-                  count: items
-                      .where(
-                        (item) =>
-                            item.status != 'submitted' &&
-                            item.status != 'approved',
-                      )
-                      .length,
-                ),
-                for (final request in items.where(
-                  (item) =>
-                      item.status != 'submitted' && item.status != 'approved',
-                ))
-                  _ExpenseApprovalCard(
-                    request: request,
-                    canPay: canPayExpenses,
-                    onResolved: _markResolved,
-                  ),
-              ],
-            ],
-          ),
-          null when expenses.isLoading => const Center(
-            child: CircularProgressIndicator(),
-          ),
-          null => ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.all(16),
-            children: [
+    final body = RefreshIndicator(
+      onRefresh: () async => ref.invalidate(managerExpensesProvider),
+      child: switch (visibleItems) {
+        final items? => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [
+            if (expenses.hasError) ...[
               _ApprovalRefreshError(
-                initialLoad: true,
                 onRetry: () => ref.invalidate(managerExpensesProvider),
               ),
+              const SizedBox(height: 12),
+            ],
+            if (items.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 48),
+                child: Center(child: Text(widget.filter.emptyMessage)),
+              )
+            else ...[
+              _ExpenseSectionTitle(
+                title: widget.filter.sectionTitle,
+                count: items.length,
+              ),
+              for (final request in items)
+                _ExpenseApprovalCard(
+                  request: request,
+                  canPay: canPayExpenses,
+                  onResolved: _markResolved,
+                  onOpen: () => context.push(
+                    '/manager/expenses/${Uri.encodeComponent(request.id)}',
+                  ),
+                ),
+            ],
+          ],
+        ),
+        null when expenses.isLoading => const Center(
+          child: CircularProgressIndicator(),
+        ),
+        null => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [
+            _ApprovalRefreshError(
+              initialLoad: true,
+              onRetry: () => ref.invalidate(managerExpensesProvider),
+            ),
+          ],
+        ),
+      },
+    );
+    if (widget.embedded) return body;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Expenses')),
+      body: body,
+    );
+  }
+}
+
+class ManagerExpenseDetailScreen extends ConsumerWidget {
+  const ManagerExpenseDetailScreen({super.key, required this.expenseRequestId});
+
+  final String expenseRequestId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final expenses = ref.watch(managerExpensesProvider);
+    final request = _managerExpenseById(expenses.valueOrNull, expenseRequestId);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Expense details')),
+      body: switch (request) {
+        final item? => RefreshIndicator(
+          onRefresh: () async => ref.invalidate(managerExpensesProvider),
+          child: _ManagerExpenseDetail(request: item),
+        ),
+        null when expenses.isLoading => const Center(
+          child: CircularProgressIndicator(),
+        ),
+        null when expenses.hasError => _ManagerExpenseDetailUnavailable(
+          message: 'Could not load this expense.',
+          onRetry: () => ref.invalidate(managerExpensesProvider),
+        ),
+        null => _ManagerExpenseDetailUnavailable(
+          message: 'This expense is no longer available.',
+          onRetry: () => ref.invalidate(managerExpensesProvider),
+        ),
+      },
+    );
+  }
+}
+
+class _ManagerExpenseDetail extends StatelessWidget {
+  const _ManagerExpenseDetail({required this.request});
+
+  final ExpenseRequest request;
+
+  @override
+  Widget build(BuildContext context) {
+    final details = <(String, String?)>[
+      ('Reference', request.displayNumber),
+      ('Raised by', request.requestedByName ?? 'Unavailable'),
+      ('Approver', request.selectedApproverName),
+      ('Work order', request.workOrderId),
+      ('Expense date', request.expenseDate),
+      (
+        'Requested total',
+        _money(request.currency, request.requestedTotalAmount),
+      ),
+      if (request.approvedTotal != null)
+        ('Approved total', _money(request.currency, request.approvedTotal!)),
+      ('Submitted', _expenseTimestamp(request.submittedAt)),
+      ('Approved', _expenseTimestamp(request.approvedAt)),
+      ('Rejected', _expenseTimestamp(request.rejectedAt)),
+      ('Paid', _expenseTimestamp(request.paidAt)),
+    ];
+    final paymentDetails = <(String, String?)>[
+      ('Payment status', _displayStatus(request.paymentStatus)),
+      ('Beneficiary', request.verifiedBeneficiaryName),
+      ('Bank', request.recipientBankName),
+      ('Account', request.maskedAccountNumber),
+    ];
+    final erpDetails = <(String, String?)>[
+      ('ERP claim', request.erpClaimNumber),
+      ('ERP claim status', _displayStatus(request.erpClaimStatus)),
+      ('ERP sync status', _displayStatus(request.erpSyncStatus)),
+    ];
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text(
+          request.purpose ?? request.displayNumber,
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Chip(label: Text(request.statusLabel)),
+            Text(
+              _money(request.currency, request.totalAmount),
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _ExpenseDetailSection(title: 'Request', values: details),
+        if (request.notes != null ||
+            request.approvalAdjustmentReason != null ||
+            request.rejectionReason != null) ...[
+          const SizedBox(height: 12),
+          _ExpenseDetailSection(
+            title: 'Decision notes',
+            values: [
+              ('Notes', request.notes),
+              ('Adjustment reason', request.approvalAdjustmentReason),
+              ('Rejection reason', request.rejectionReason),
             ],
           ),
-        },
+        ],
+        if (paymentDetails.any((entry) => entry.$2 != null) ||
+            request.paymentError != null) ...[
+          const SizedBox(height: 12),
+          _ExpenseDetailSection(
+            title: 'Payment',
+            values: [
+              ...paymentDetails,
+              ('Payment issue', request.paymentError),
+            ],
+          ),
+        ],
+        if (erpDetails.any((entry) => entry.$2 != null) ||
+            request.erpSyncError != null) ...[
+          const SizedBox(height: 12),
+          _ExpenseDetailSection(
+            title: 'ERP delivery',
+            values: [...erpDetails, ('ERP issue', request.erpSyncError)],
+          ),
+        ],
+        const SizedBox(height: 12),
+        Text(
+          'Items (${request.items.length})',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        if (request.items.isEmpty)
+          const Card(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('No line items are available.'),
+            ),
+          )
+        else
+          for (final item in request.items)
+            Card(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: ListTile(
+                title: Text(item.description ?? item.categoryLabel),
+                subtitle: Text(
+                  [
+                        item.categoryLabel,
+                        item.expenseDate,
+                        item.vendorName,
+                        item.notes,
+                      ]
+                      .whereType<String>()
+                      .where((value) => value.isNotEmpty)
+                      .join(' · '),
+                ),
+                trailing: Text(
+                  item.approvedAmount != null &&
+                          item.approvedAmount != item.amount
+                      ? '${_money(request.currency, item.amount)} → ${_money(request.currency, item.approvedAmount!)}'
+                      : _money(request.currency, item.amount),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+      ],
+    );
+  }
+}
+
+class _ExpenseDetailSection extends StatelessWidget {
+  const _ExpenseDetailSection({required this.title, required this.values});
+
+  final String title;
+  final List<(String, String?)> values;
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleValues = values.where((entry) => entry.$2 != null).toList();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 12),
+            for (var index = 0; index < visibleValues.length; index++) ...[
+              if (index > 0) const Divider(height: 20),
+              Text(
+                visibleValues[index].$1,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.subdued(context),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(visibleValues[index].$2!),
+            ],
+          ],
+        ),
       ),
     );
   }
+}
+
+class _ManagerExpenseDetailUnavailable extends StatelessWidget {
+  const _ManagerExpenseDetailUnavailable({
+    required this.message,
+    required this.onRetry,
+  });
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(message, textAlign: TextAlign.center),
+          const SizedBox(height: 12),
+          OutlinedButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    ),
+  );
 }
 
 class _ApprovalRefreshError extends StatelessWidget {
@@ -1338,73 +1590,86 @@ class _DispatchJobCard extends ConsumerWidget {
         : DateFormat('d MMM, HH:mm').format(job.scheduledStart!.toLocal());
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                StatusPill(job.statusPresentation),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    time,
-                    textAlign: TextAlign.right,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        key: Key('dispatch-job-${job.id}'),
+        onTap: () =>
+            context.push('/manager/dispatch/${Uri.encodeComponent(job.id)}'),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  StatusPill(job.statusPresentation),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      time,
+                      textAlign: TextAlign.right,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              job.title,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              [job.workType, job.priority, job.subscriberLabel, job.addressText]
-                  .whereType<String>()
-                  .where((value) => value.isNotEmpty)
-                  .join(' · '),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: AppColors.subdued(context),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right),
+                ],
               ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    job.assignedToLabel == null
-                        ? 'Unassigned'
-                        : 'Assigned to ${job.assignedToLabel}',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
+              const SizedBox(height: 10),
+              Text(
+                job.title,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                [
+                      job.workType,
+                      job.priority,
+                      job.subscriberLabel,
+                      job.addressText,
+                    ]
+                    .whereType<String>()
+                    .where((value) => value.isNotEmpty)
+                    .join(' · '),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.subdued(context),
                 ),
-                const SizedBox(width: 8),
-                OutlinedButton.icon(
-                  onPressed: canUnassign
-                      ? () => _unassign(context, ref, job)
-                      : technicians.isEmpty
-                      ? null
-                      : () => _assign(context, ref, job, technicians),
-                  icon: Icon(
-                    canUnassign
-                        ? Icons.person_remove_outlined
-                        : Icons.assignment_ind_outlined,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      job.assignedToLabel == null
+                          ? 'Unassigned'
+                          : 'Assigned to ${job.assignedToLabel}',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                   ),
-                  label: Text(canUnassign ? 'Unassign' : 'Assign'),
-                ),
-              ],
-            ),
-          ],
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: canUnassign
+                        ? () => _unassign(context, ref, job)
+                        : technicians.isEmpty
+                        ? null
+                        : () => _assign(context, ref, job, technicians),
+                    icon: Icon(
+                      canUnassign
+                          ? Icons.person_remove_outlined
+                          : Icons.assignment_ind_outlined,
+                    ),
+                    label: Text(canUnassign ? 'Unassign' : 'Assign'),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1416,11 +1681,13 @@ class _ExpenseApprovalCard extends ConsumerStatefulWidget {
     required this.request,
     required this.canPay,
     required this.onResolved,
+    required this.onOpen,
   });
 
   final ExpenseRequest request;
   final bool canPay;
   final ValueChanged<String> onResolved;
+  final VoidCallback onOpen;
 
   @override
   ConsumerState<_ExpenseApprovalCard> createState() =>
@@ -1435,12 +1702,33 @@ class _ExpenseApprovalCardState extends ConsumerState<_ExpenseApprovalCard> {
       () async {
         final result = await ref
             .read(managerRepositoryProvider)
-            .approveExpense(widget.request.id);
+            .approveExpense(
+              widget.request.id,
+              expectedRevision: widget.request.revision,
+            );
         return expenseApprovalMessage(result);
       },
       failureMessage:
           'Expense was not approved; ERP sync is unavailable. Please retry.',
     );
+  }
+
+  Future<void> _adjustAndApprove() async {
+    final selection = await _adjustExpenseAmounts(context, widget.request);
+    if (selection == null) return;
+    await _run(() async {
+      final result = await ref
+          .read(managerRepositoryProvider)
+          .approveExpense(
+            widget.request.id,
+            approvedAmounts: selection.amounts,
+            adjustmentReason: selection.reason,
+            expectedRevision: widget.request.revision,
+          );
+      return result.amountsAdjusted
+          ? 'Expense adjusted and approved'
+          : expenseApprovalMessage(result);
+    }, failureMessage: 'Could not adjust and approve this expense.');
   }
 
   Future<void> _reject() async {
@@ -1477,25 +1765,30 @@ class _ExpenseApprovalCardState extends ConsumerState<_ExpenseApprovalCard> {
       ),
     );
     if (confirmed != true) return;
-    await _run(() async {
-      final result = await ref
-          .read(managerRepositoryProvider)
-          .payExpense(widget.request.id);
-      return result.paymentStatus == 'queued'
-          ? 'Payment queued securely in ERP'
-          : 'Payment status: ${result.paymentStatus}';
-    }, failureMessage: 'Could not initiate payment. No retry was assumed.');
+    await _run(
+      () async {
+        final result = await ref
+            .read(managerRepositoryProvider)
+            .payExpense(widget.request.id);
+        return result.paymentStatus == 'queued'
+            ? 'Payment queued; waiting for ERP'
+            : 'Payment status: ${result.paymentStatus}';
+      },
+      failureMessage: 'Could not initiate payment. No retry was assumed.',
+      hideResolvedItem: false,
+    );
   }
 
   Future<void> _run(
     Future<String> Function() action, {
     required String failureMessage,
+    bool hideResolvedItem = true,
   }) async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
       final message = await action();
-      widget.onResolved(widget.request.id);
+      if (hideResolvedItem) widget.onResolved(widget.request.id);
       ref
         ..invalidate(managerExpensesProvider)
         ..invalidate(managerSummaryProvider);
@@ -1525,92 +1818,124 @@ class _ExpenseApprovalCardState extends ConsumerState<_ExpenseApprovalCard> {
       'indeterminate',
     }.contains(request.paymentStatus);
     return Card(
+      clipBehavior: Clip.antiAlias,
       margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.receipt_long_outlined, color: AppColors.primary),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    request.purpose ?? request.displayNumber,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-                Text(
-                  _money(request.currency, request.totalAmount),
-                  style: const TextStyle(fontWeight: FontWeight.w800),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              [
-                request.displayNumber,
-                request.workOrderId == null
-                    ? null
-                    : 'WO ${request.workOrderId}',
-                '${request.items.length} item${request.items.length == 1 ? '' : 's'}',
-              ].whereType<String>().join(' · '),
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: AppColors.subdued(context),
-              ),
-            ),
-            const SizedBox(height: 12),
-            if (request.paymentStatus != null) ...[
-              Text(
-                'Payment: ${request.paymentStatus!.replaceAll('_', ' ')}',
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              if (request.paymentError != null)
-                Text(
-                  request.paymentError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              const SizedBox(height: 10),
-            ],
-            if (request.status == 'submitted')
+      child: InkWell(
+        onTap: widget.onOpen,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _busy ? null : _reject,
-                      icon: const Icon(Icons.close),
-                      label: const Text('Reject'),
-                    ),
-                  ),
+                  Icon(Icons.receipt_long_outlined, color: AppColors.primary),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: FilledButton.icon(
-                      onPressed: _busy ? null : _approve,
-                      icon: const Icon(Icons.check),
-                      label: const Text('Approve'),
+                    child: Text(
+                      request.purpose ?? request.displayNumber,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
+                  Text(
+                    _money(request.currency, request.totalAmount),
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
                 ],
-              )
-            else if (request.status == 'approved' && widget.canPay)
-              FilledButton.icon(
-                onPressed: _busy || paymentActive ? null : _pay,
-                icon: Icon(
-                  paymentActive ? Icons.hourglass_top : Icons.payments_outlined,
-                ),
-                label: Text(
-                  paymentActive ? 'Payment in progress' : 'Pay expense',
-                ),
-              )
-            else
-              Text(
-                request.status.replaceAll('_', ' '),
-                style: const TextStyle(fontWeight: FontWeight.w700),
               ),
-          ],
+              const SizedBox(height: 8),
+              Text(
+                [
+                  request.displayNumber,
+                  request.workOrderId == null
+                      ? null
+                      : 'WO ${request.workOrderId}',
+                  '${request.items.length} item${request.items.length == 1 ? '' : 's'}',
+                ].whereType<String>().join(' · '),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.subdued(context),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                request.requestedByName == null
+                    ? 'Raised by unavailable'
+                    : 'Raised by ${request.requestedByName}',
+                key: Key('expense-requester-${request.id}'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.subdued(context),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (request.paymentStatus != null) ...[
+                Text(
+                  'Payment: ${request.paymentStatus!.replaceAll('_', ' ')}',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                if (request.paymentError != null)
+                  Text(
+                    request.paymentError!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                const SizedBox(height: 10),
+              ],
+              if (request.status == 'submitted')
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _busy ? null : _reject,
+                            icon: const Icon(Icons.close),
+                            label: const Text('Reject'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: FilledButton.icon(
+                            key: Key('approve-expense-${request.id}'),
+                            onPressed: _busy ? null : _approve,
+                            icon: const Icon(Icons.check),
+                            label: const Text('Approve'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    TextButton.icon(
+                      key: Key('adjust-expense-${request.id}'),
+                      onPressed: _busy ? null : _adjustAndApprove,
+                      icon: const Icon(Icons.edit_outlined),
+                      label: const Text('Adjust amount'),
+                    ),
+                  ],
+                )
+              else if (request.status == 'approved' && widget.canPay)
+                FilledButton.icon(
+                  onPressed: _busy || paymentActive ? null : _pay,
+                  icon: Icon(
+                    paymentActive
+                        ? Icons.hourglass_top
+                        : Icons.payments_outlined,
+                  ),
+                  label: Text(
+                    paymentActive ? 'Payment in progress' : 'Pay expense',
+                  ),
+                )
+              else
+                Text(
+                  request.status.replaceAll('_', ' '),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1645,6 +1970,26 @@ String expenseApprovalMessage(ExpenseApprovalResult result) {
     'not_queued' => 'Expense approved; ERP sync needs attention',
     _ => 'Expense approved; waiting for ERP',
   };
+}
+
+String? _displayStatus(String? value) {
+  if (value == null || value.isEmpty) return null;
+  final normalized = value.replaceAll('_', ' ');
+  return '${normalized[0].toUpperCase()}${normalized.substring(1)}';
+}
+
+String? _expenseTimestamp(DateTime? value) =>
+    value == null ? null : DateFormat('d MMM y, HH:mm').format(value.toLocal());
+
+ExpenseRequest? _managerExpenseById(
+  List<ExpenseRequest>? expenses,
+  String expenseRequestId,
+) {
+  if (expenses == null) return null;
+  for (final expense in expenses) {
+    if (expense.id == expenseRequestId) return expense;
+  }
+  return null;
 }
 
 class _StatusPill extends StatelessWidget {
@@ -1814,6 +2159,151 @@ Future<String?> _rejectReason(BuildContext context) async {
     context: context,
     builder: (_) => const _RejectExpenseDialog(),
   );
+}
+
+class _ExpenseAdjustmentSelection {
+  const _ExpenseAdjustmentSelection({required this.amounts, this.reason});
+
+  final Map<String, double> amounts;
+  final String? reason;
+}
+
+Future<_ExpenseAdjustmentSelection?> _adjustExpenseAmounts(
+  BuildContext context,
+  ExpenseRequest request,
+) async {
+  return showDialog<_ExpenseAdjustmentSelection>(
+    context: context,
+    builder: (_) => _AdjustExpenseDialog(request: request),
+  );
+}
+
+class _AdjustExpenseDialog extends StatefulWidget {
+  const _AdjustExpenseDialog({required this.request});
+
+  final ExpenseRequest request;
+
+  @override
+  State<_AdjustExpenseDialog> createState() => _AdjustExpenseDialogState();
+}
+
+class _AdjustExpenseDialogState extends State<_AdjustExpenseDialog> {
+  late final Map<String, TextEditingController> _amounts;
+  final _reason = TextEditingController();
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _amounts = {
+      for (final item in widget.request.items)
+        item.id: TextEditingController(text: item.amount.toStringAsFixed(2)),
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final controller in _amounts.values) {
+      controller.dispose();
+    }
+    _reason.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final parsed = <String, double>{};
+    for (final item in widget.request.items) {
+      final amount = double.tryParse(_amounts[item.id]!.text.trim());
+      if (amount == null || amount <= 0) {
+        setState(
+          () => _error = 'Every approved amount must be greater than zero.',
+        );
+        return;
+      }
+      parsed[item.id] = amount;
+    }
+    final adjusted = widget.request.items.any(
+      (item) => (parsed[item.id]! - item.amount).abs() >= 0.005,
+    );
+    final reason = _reason.text.trim();
+    if (adjusted && reason.length < 2) {
+      setState(() => _error = 'Enter a reason for changing the amount.');
+      return;
+    }
+    Navigator.of(context).pop(
+      _ExpenseAdjustmentSelection(
+        amounts: parsed,
+        reason: adjusted ? reason : null,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Adjust and approve'),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Requested total: ${_money(widget.request.currency, widget.request.requestedTotalAmount)}',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 12),
+              for (final item in widget.request.items) ...[
+                Text(item.description ?? item.categoryLabel),
+                const SizedBox(height: 4),
+                TextField(
+                  key: Key('approved-amount-${item.id}'),
+                  controller: _amounts[item.id],
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: 'Approved amount',
+                    helperText:
+                        'Requested ${_money(widget.request.currency, item.amount)}',
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              TextField(
+                key: const Key('expense-adjustment-reason'),
+                controller: _reason,
+                maxLength: 500,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Adjustment reason',
+                  helperText: 'Required only when an amount changes',
+                ),
+              ),
+              if (_error != null)
+                Text(
+                  _error!,
+                  key: const Key('expense-adjustment-error'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('approve-adjusted-expense'),
+          onPressed: _submit,
+          child: const Text('Approve adjusted amount'),
+        ),
+      ],
+    );
+  }
 }
 
 class _RejectExpenseDialog extends StatefulWidget {
