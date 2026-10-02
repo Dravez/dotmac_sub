@@ -9,9 +9,11 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
+from xml.etree import (
+    ElementTree as XML,  # nosec B405 - used only for trusted KMZ serialization; uploaded KML is parsed with defusedxml in fiber_topology_staging
+)
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from defusedxml import ElementTree as XML
 from defusedxml.common import DefusedXmlException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError

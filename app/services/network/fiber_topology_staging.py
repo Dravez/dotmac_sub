@@ -878,13 +878,13 @@ def _parse_features(
                 f"network_link_not_expanded:{network_link_name[:160]}",
             )
             styles["resource_warnings"] = "|".join(dict.fromkeys(_resource_warnings))
-        display_name = next(
+        display_name = placemark_name or next(
             (
                 value
                 for key in profile.display_name_keys
                 if (value := _property(properties, key))
             ),
-            placemark_name,
+            None,
         )
         blockers = list(geometry_blockers)
         if asset_type is FiberAssetType.unclassified:
