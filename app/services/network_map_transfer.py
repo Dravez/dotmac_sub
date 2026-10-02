@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
-from xml.etree import ElementTree as XML
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from defusedxml import ElementTree as XML
 from defusedxml.common import DefusedXmlException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -180,6 +180,7 @@ def _imported_geometry(value: dict) -> NetworkMapImportedGeometry:
     except ValueError:
         geometry_type = NetworkMapGeometryType.geometry_collection
     raw_coordinates = value.get("coordinates")
+    source: object
     rings: tuple[tuple[NetworkMapCoordinate, ...], ...] = ()
     components: tuple[NetworkMapImportedGeometry, ...] = ()
     if geometry_type is NetworkMapGeometryType.geometry_collection:
@@ -354,12 +355,12 @@ def _effective_review_plans(
     }
     parsed: list[fiber_topology_staging.ParsedFiberFeature] = []
     for row in rows:
-        review = latest_reviews.get(row.id)
+        latest_review = latest_reviews.get(row.id)
         asset_type = fiber_topology_staging.FiberAssetType(
-            review.asset_type if review is not None else row.asset_type
+            latest_review.asset_type if latest_review is not None else row.asset_type
         )
         blocker_codes = list(row.blocker_codes)
-        if review is not None:
+        if latest_review is not None:
             blocker_codes = [
                 code for code in blocker_codes if code not in classification_blockers
             ]

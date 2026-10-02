@@ -229,7 +229,7 @@ class FiberTopologyFeatureClassificationReview(Base):
         ),
         CheckConstraint(
             "length(command_fingerprint_sha256) = 64",
-            name="ck_fiber_topology_feature_classification_command_fingerprint_sha256",
+            name="ck_fiber_topology_classification_fingerprint_sha256",
         ),
         Index(
             "ix_fiber_topology_feature_classification_feature_revision",

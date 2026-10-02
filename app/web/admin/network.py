@@ -613,6 +613,7 @@ def review_network_map_kmz_classifications(
 
 @router.get(
     "/map/export.kmz",
+    response_model=None,
     dependencies=[Depends(require_permission(network_map_transfer.EXPORT_PERMISSION))],
 )
 def export_network_map_kmz(

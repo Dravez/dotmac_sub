@@ -47,7 +47,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "length(command_fingerprint_sha256) = 64",
-            name="ck_fiber_topology_feature_classification_command_fingerprint_sha256",
+            name="ck_fiber_topology_classification_fingerprint_sha256",
         ),
         sa.ForeignKeyConstraint(
             ["batch_id"],

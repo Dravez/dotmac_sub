@@ -614,6 +614,7 @@ def _geometry(placemark: ET.Element) -> tuple[str, dict, tuple[str, ...]]:
     for geometry_type in ("Point", "LineString", "Polygon"):
         for element in placemark.findall(f".//kml:{geometry_type}", KML_NS):
             blockers: list[str] = []
+            geojson: dict[str, object]
             if geometry_type == "Polygon":
                 rings = element.findall(".//kml:LinearRing/kml:coordinates", KML_NS)
                 if not rings:
