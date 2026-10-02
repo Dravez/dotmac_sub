@@ -1344,6 +1344,7 @@ def _verify_proof(
         direct_transfer_metadata.get("withholding_tax") or {}
     )
     wht_record_id: UUID | None = None
+    auto_allocate = True
     if deposit_intent is not None:
         from app.services.account_credit_deposits import (
             AccountCreditDeposits,
@@ -1386,7 +1387,6 @@ def _verify_proof(
     else:
         payment_amount = value
         allocations = None
-        auto_allocate = True
         if invoice_id_raw:
             try:
                 invoice_uuid = coerce_uuid(invoice_id_raw)

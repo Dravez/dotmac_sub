@@ -844,6 +844,29 @@ def test_invoice_created_during_checkout_consumes_confirmed_credit(
 
 def test_eligible_invoice_statuses_consume_credit_in_fifo_order(db_session, subscriber):
     provider = _provider(db_session)
+    middle = Invoice(
+        account_id=subscriber.id,
+        invoice_number="INV-MIDDLE",
+        status=InvoiceStatus.issued,
+        currency="NGN",
+        total=Decimal("5000.00"),
+        balance_due=Decimal("5000.00"),
+        due_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    db_session.add(middle)
+    db_session.commit()
+    create_test_settled_payment_credit(
+        db_session,
+        subscriber.id,
+        Decimal("1000.00"),
+        paid_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    AccountCreditApplications.apply(db_session, str(subscriber.id))
+    db_session.commit()
+    db_session.refresh(middle)
+    assert middle.status is InvoiceStatus.partially_paid
+    assert middle.balance_due == Decimal("4000.00")
+
     intent = _intent(db_session, subscriber, provider, amount="9000.00")
     older = Invoice(
         account_id=subscriber.id,
@@ -854,15 +877,6 @@ def test_eligible_invoice_statuses_consume_credit_in_fifo_order(db_session, subs
         balance_due=Decimal("4000.00"),
         due_at=datetime.now(UTC),
     )
-    middle = Invoice(
-        account_id=subscriber.id,
-        invoice_number="INV-MIDDLE",
-        status=InvoiceStatus.partially_paid,
-        currency="NGN",
-        total=Decimal("5000.00"),
-        balance_due=Decimal("4000.00"),
-        due_at=datetime.now(UTC) + timedelta(days=1),
-    )
     newer = Invoice(
         account_id=subscriber.id,
         invoice_number="INV-NEWER",
@@ -872,7 +886,7 @@ def test_eligible_invoice_statuses_consume_credit_in_fifo_order(db_session, subs
         balance_due=Decimal("6000.00"),
         due_at=datetime.now(UTC) + timedelta(days=2),
     )
-    db_session.add_all([older, middle, newer])
+    db_session.add_all([older, newer])
     db_session.commit()
 
     _settle(
