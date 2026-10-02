@@ -90,10 +90,13 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
 #: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
 #: isolated like the writer tests (EnforcementApplication carries no FKs).
+#: +1 from tests/integration/test_module_lineage_rehearsal.py: the disposable
+#: database fixture creates its stand-in schema before Alembic and disposes
+#: that bootstrap engine in a finally block.
 #: +3 from tests/integration/test_notification_template_seed_concurrency.py:
 #: one migrated PostgreSQL engine plus two independently committing sessions
 #: prove concurrent startup seeders safely converge on one template per key.
-TEST_FIXTURE_BASELINE_TOTAL = 149
+TEST_FIXTURE_BASELINE_TOTAL = 150
 
 
 def _baseline() -> dict[str, int]:
