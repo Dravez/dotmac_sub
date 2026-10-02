@@ -1176,6 +1176,18 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             permission="support:ticket:create",
         ),
         _action("transfer-network-map", "Import or export a Network Map file", 4),
+        _action(
+            "review-network-map-import",
+            "Review staged map features",
+            5,
+            permission="network:fiber:import",
+        ),
+        _action(
+            "submit-network-map-import",
+            "Submit eligible point proposals",
+            6,
+            permission="network:fiber:import",
+        ),
     ),
     "olt-operational-health": (
         _action("compare-olts", "Compare OLT health", 0),
