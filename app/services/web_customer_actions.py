@@ -44,6 +44,7 @@ from app.schemas.subscriber import (
     AddressCreate,
     AddressUpdate,
     SubscriberCreate,
+    SubscriberNotificationPreferencesUpdate,
     SubscriberUpdate,
 )
 from app.services import account_status_commands, customer_portal
@@ -81,7 +82,6 @@ from app.services.customer_notification_policy import (
     CustomerNotificationPolicyCohortQuery,
     evaluate_bulk_customer_notification_policy,
     quiet_hours_send_at,
-    resolve_notification_category,
 )
 from app.services.db_session_adapter import db_session_adapter
 from app.services.integrations import whatsapp_capability
@@ -1468,6 +1468,7 @@ def _bulk_message_impact_token(
         "template": {
             "id": str(template.id),
             "updated_at": str(template.updated_at or ""),
+            "purpose": template.purpose.value,
             "subject": template.subject or "",
             "body": template.body or "",
             "conditions": template.conditions or {},
@@ -1598,7 +1599,7 @@ def queue_bulk_message_from_payload(
     queued_count = 0
     suppressed_count = 0
     skipped_count = len(resolved.missing_ids)
-    category = resolve_notification_category("service_bulk_message")
+    category = template.purpose.value
     quiet_send_at = quiet_hours_send_at(db)
     addressed_customers: list[tuple[Subscriber, str]] = []
     for subscriber in customers:
@@ -3380,15 +3381,6 @@ def update_customer_profile(
     subscriber = db.get(Subscriber, subscriber_id)
     if not subscriber:
         return None
-    metadata = dict(subscriber.metadata_ or {})
-    metadata["billing_notifications"] = bool(billing_notifications)
-    metadata["sms_updates"] = bool(sms_updates)
-    metadata["push_notifications"] = bool(push_notifications)
-    metadata["service_notifications"] = bool(service_notifications)
-    metadata["account_notifications"] = bool(account_notifications)
-    metadata["usage_notifications"] = bool(usage_notifications)
-    metadata["general_notifications"] = bool(general_notifications)
-
     new_email = email.strip()
     # A changed email address must be re-verified: reset the flag and dispatch a
     # fresh verification link so the verified state can never lag the address.
@@ -3412,7 +3404,15 @@ def update_customer_profile(
         "email": new_email,
         "phone": phone.strip() if phone else None,
         "locale": (locale or "").strip() or None,
-        "metadata_": metadata,
+        "notification_preferences": SubscriberNotificationPreferencesUpdate(
+            billing_notifications=billing_notifications,
+            sms_updates=sms_updates,
+            push_notifications=push_notifications,
+            service_notifications=service_notifications,
+            account_notifications=account_notifications,
+            usage_notifications=usage_notifications,
+            general_notifications=general_notifications,
+        ),
     }
     if enforce_biodata and subscriber.category == SubscriberCategory.residential:
         if not nin_locked:

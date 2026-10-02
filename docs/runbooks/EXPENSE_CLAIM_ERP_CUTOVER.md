@@ -9,7 +9,7 @@
 - Submission and `expense_submit_v3` commit atomically. The worker creates or
   retrieves a hidden ERP draft, uploads every required receipt, invokes explicit
   submit, and requires ERP status `SUBMITTED` before exposing the claim.
-- Manager approval or rejection and its separate `expense_approve_v3` or
+- Manager approval or rejection and its separate `expense_approve_v4` or
   `expense_reject_v3` event commit atomically. Each decision event waits for
   accepted submission without consuming retry attempts.
 - Sub remains authoritative for the manager decision. ERP remains authoritative
@@ -30,10 +30,14 @@
    `sub:expense:pay` scope only to the Sub integration identity that may request
    a transfer; do not grant broader human or finance-administration permissions.
 5. Confirm the ERP accepts stable Sub claim and line IDs, receipt keys derived
-   from contract version, expense, line, and attachment, and the one-UUID v3
+   from contract version, expense, line, and attachment, and the versioned
    keys: `exp-{request_id}-submitted-v3`,
-   `exp-{request_id}-approved-{decision_id}-v3`, and
+   `exp-{request_id}-approved-{decision_id}-v4`, and
    `exp-{request_id}-rejected-{decision_id}-v3`.
+   The v4 approval must atomically apply every `source_line_id` and
+   `approved_amount` before approving the claim, and must retain the optional
+   adjustment reason. Keep v3 approval delivery available only for already
+   queued historical events.
    For every new token-bearing canary, confirm the destination-verification
    `source_claim_id`, submitted `client_ref`, `FieldExpenseRequest.id`, draft and
    receipt `source_claim_id`, approval `source_claim_id`, and status-poll key are
@@ -62,6 +66,14 @@
 4. Submit one newly created canary expense and verify exactly one submission
    event is accepted, all required receipts are attached, and ERP reports
    `SUBMITTED`. Confirm no ERP `DRAFT` is visible to normal ERP users.
+   If submission returns
+   `operations.expense_requests.erp_staging_failed` or
+   `operations.expense_requests.erp_delivery_not_configured`, treat HTTP 503 as
+   a temporary staging/configuration outage. Correlate the server log by the
+   non-secret expense request and command IDs, correct the outbox or capability
+   problem, and retry the original submission with the same client reference
+   and unchanged input. Do not call `retry-delivery`: no request or durable
+   outbox event committed, so that endpoint correctly has nothing to requeue.
 5. With the selected approver, who must be different from the requester, approve
    the canary in the Field app and verify the separate approval event is
    accepted and the same ERP claim becomes `APPROVED`, not `PENDING_APPROVAL`.

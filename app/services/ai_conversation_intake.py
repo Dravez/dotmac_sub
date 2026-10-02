@@ -15,9 +15,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.ai_intake import (
@@ -27,6 +28,7 @@ from app.models.ai_intake import (
     AiIntakePolicyVersion,
     AiIntakeSession,
 )
+from app.models.event_store import EventStore
 from app.models.service_team import ServiceTeam
 from app.models.team_inbox import (
     InboxChannelType,
@@ -64,6 +66,13 @@ from app.schemas.ai_operations import (
     AiIntakeDepartmentMapping,
 )
 from app.schemas.chat import NATIVE_WIDGET_SURFACE_VALUES
+from app.schemas.lead_intake import (
+    AiLeadCandidateClassifiedEvent,
+    AiLeadIntakeClassification,
+    LeadCandidateAttribution,
+    LeadIntakeIntent,
+    LeadIntakePartyType,
+)
 from app.services import (
     ai_intake,
     ai_intake_conversation_engine,
@@ -74,6 +83,8 @@ from app.services import (
     team_inbox_status,
 )
 from app.services.ai_intake_text import human_impersonation_violations
+from app.services.events import emit_event
+from app.services.events.types import EventType
 from app.services.integrations import (
     installations,
     meta_social_capability,
@@ -87,6 +98,7 @@ from app.services.integrations.connectors.whatsapp_runtime import WHATSAPP_PROVI
 from app.services.integrations.meta_social_installation import (
     get_meta_social_installation_projection,
 )
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -189,6 +201,80 @@ _AI_POLICY_DRAFT_COMMAND = OwnerCommandDefinition(
     concern="AI conversational intake configuration lifecycle",
     name="create_ai_intake_draft_policy",
 )
+
+
+def _lead_candidate_attribution(
+    metadata: Mapping[str, object],
+) -> LeadCandidateAttribution:
+    raw = metadata.get("meta_referral_observation")
+    values = dict(raw) if isinstance(raw, Mapping) else {}
+    return LeadCandidateAttribution.model_validate(values)
+
+
+def _native_campaign_attributed(metadata: Mapping[str, object]) -> bool:
+    """Keep native campaign suppression separate from Meta acquisition evidence."""
+
+    return any(
+        metadata.get(key) not in (None, "", False, [], {})
+        for key in (
+            "campaign_id",
+            "campaign_attributed",
+            "campaign_attribution",
+            "campaign_ref",
+            "referral_campaign_id",
+        )
+    )
+
+
+def _stage_lead_candidate_classified(
+    db: Session,
+    *,
+    inbound: InboxMessage,
+    conversation: InboxConversation,
+    outcome: AiIntakeOutcome,
+    metadata: dict[str, object],
+) -> None:
+    """Stage the durable, idempotent Sales handoff for a final sales result."""
+
+    classification = outcome.classification
+    if (
+        conversation.channel_type
+        not in {
+            InboxChannelType.whatsapp.value,
+            InboxChannelType.facebook_messenger.value,
+            InboxChannelType.instagram_dm.value,
+        }
+        or outcome.status is not AiIntakeStatus.classified
+        or classification is None
+        or classification.requires_follow_up
+        or classification.intent.value not in LEAD_IDENTITY_REQUIRED_INTENTS
+        or classification.party_type.value == LeadIntakePartyType.unknown.value
+    ):
+        return
+    event_id = uuid5(inbound.id, "ai-intake-lead-candidate-classified-v1")
+    payload = AiLeadCandidateClassifiedEvent(
+        tenant_id=OPERATOR_TENANT_ID,
+        conversation_id=conversation.id,
+        message_id=inbound.id,
+        classification=AiLeadIntakeClassification(
+            intent=LeadIntakeIntent(classification.intent.value),
+            intent_confidence=classification.confidence,
+            party_type=LeadIntakePartyType(classification.party_type.value),
+            party_type_confidence=classification.party_type_confidence,
+        ),
+        provider_label=outcome.provider,
+        model_label=outcome.model,
+        attribution=_lead_candidate_attribution(metadata),
+    )
+    if db.scalar(select(EventStore.id).where(EventStore.event_id == event_id)) is None:
+        emit_event(
+            db,
+            EventType.ai_intake_lead_candidate_classified,
+            payload.model_dump(mode="json"),
+            event_id=event_id,
+            actor="ai.intake",
+        )
+    metadata["ai_lead_candidate_event_id"] = str(event_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3096,6 +3182,12 @@ def process_ready_sessions(
                     processed += 1
                 else:
                     skipped += 1
+            except SQLAlchemyError:
+                # Database failures invalidate the owner transaction. They cannot
+                # be converted into a per-session AI failure because the public
+                # command boundary must own rollback and the task adapter must
+                # retain the original retry classification.
+                raise
             except Exception:
                 session.state = "failed"
                 session.completed_at = datetime.now(UTC)
@@ -3418,7 +3510,7 @@ def _process_one_session(
         policy_version_id=session.policy_version_id,
         persisted_inbound_message_id=inbound.id,
         recent_messages=recent,
-        campaign_attributed=False,
+        campaign_attributed=_native_campaign_attributed(metadata),
         routing_allows_ai=True,
         created_conversation=True,
         active_ai_session=True,
@@ -3437,6 +3529,13 @@ def _process_one_session(
         )
     )
     metadata.update(ai_intake.route_metadata(outcome))
+    _stage_lead_candidate_classified(
+        db,
+        inbound=inbound,
+        conversation=conversation,
+        outcome=outcome,
+        metadata=metadata,
+    )
     if legacy_classifier_clarification:
         metadata.setdefault("ai_intake_engine_action", "legacy_clarification")
         metadata.setdefault(

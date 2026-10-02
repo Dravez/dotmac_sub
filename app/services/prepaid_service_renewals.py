@@ -19,6 +19,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, NoReturn
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -62,6 +63,8 @@ from app.models.catalog import (
     Subscription,
     SubscriptionAddOn,
     SubscriptionStatus,
+    UsageAllowance,
+    UsageAllowanceResetBasis,
 )
 from app.models.idempotency import IdempotencyKey
 from app.models.prepaid_funding import PrepaidOpeningFundingConsumption
@@ -104,6 +107,7 @@ from app.services.billing.invoices import (
 )
 from app.services.billing_tax_resolution import resolve_subscription_taxes
 from app.services.common import coerce_uuid, round_money
+from app.services.customer_financial_position import get_customer_financial_position
 from app.services.domain_errors import DomainError
 from app.services.locking import lock_for_update
 from app.services.owner_commands import (
@@ -111,6 +115,10 @@ from app.services.owner_commands import (
     OwnerCommandDefinition,
     execute_owner_command,
     execute_owner_savepoint,
+)
+from app.services.prepaid_calendar_contracts import (
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidServicePeriodQuery,
 )
 from app.services.service_entitlements import prepaid_entitlement_coverage_end
 from app.timezone import APP_TIMEZONE, APP_TIMEZONE_NAME
@@ -152,6 +160,13 @@ _LEGACY_TAX_CORRECTION_COMMAND = OwnerCommandDefinition(
 _LEGACY_TAX_CORRECTION_SCOPE = "prepaid:legacy-renewal-tax-invoice-correction"
 _LEGACY_TAX_CORRECTION_AUTH_SCOPE = "billing:ledger:write"
 _LEGACY_TAX_CORRECTION_METADATA_KEY = "legacy_renewal_tax_invoice_correction"
+_UNUSED_RENEWAL_CORRECTION_CONCERN = "reviewed unused prepaid renewal correction"
+_UNUSED_RENEWAL_CORRECTION_COMMAND = OwnerCommandDefinition(
+    owner=_OWNER,
+    concern=_UNUSED_RENEWAL_CORRECTION_CONCERN,
+    name="correct_unused_prepaid_service_renewal",
+)
+_UNUSED_RENEWAL_CORRECTION_SCOPE = "prepaid:unused-renewal-correction"
 PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES = frozenset(
     {
         SubscriptionStatus.active,
@@ -346,6 +361,26 @@ class PrepaidSettlementPeriod:
     timezone_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class PrepaidSubscriptionSettlementPeriodQuery:
+    """Resolve a paid period from exact current coverage or settlement day."""
+
+    subscription_id: UUID
+    account_id: UUID
+    effective_at: datetime
+    billing_cycle: BillingCycle
+    timezone_name: str = APP_TIMEZONE_NAME
+    exclude_source_invoice_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PrepaidSubscriptionSettlementPeriod:
+    """Selected paid period with the exact coverage boundary that selected it."""
+
+    period: PrepaidSettlementPeriod
+    covered_through: datetime | None
+
+
 _SETTLEMENT_CYCLE_INTERVAL: dict[BillingCycle, tuple[IntervalUnit, int]] = {
     BillingCycle.daily: (IntervalUnit.day, 1),
     BillingCycle.weekly: (IntervalUnit.week, 1),
@@ -373,6 +408,40 @@ def _adjustment_error(exc: AccountAdjustmentError) -> NoReturn:
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _renewal_cycle_allowance(subscription: Subscription) -> UsageAllowance | None:
+    allowance = None
+    if subscription.offer_version and subscription.offer_version.usage_allowance_id:
+        allowance = subscription.offer_version.usage_allowance
+    elif subscription.offer and subscription.offer.usage_allowance_id:
+        allowance = subscription.offer.usage_allowance
+    if (
+        allowance is not None
+        and allowance.reset_basis is UsageAllowanceResetBasis.renewal_cycle
+    ):
+        return allowance
+    return None
+
+
+def _resolve_validity_period(
+    *,
+    effective_at: datetime,
+    validity_days: int,
+    timezone_name: str,
+) -> PrepaidSettlementPeriod:
+    zone = ZoneInfo(timezone_name)
+    starts_at = _utc(effective_at)
+    ends_at = starts_at + timedelta(days=validity_days)
+    local_start = starts_at.astimezone(zone)
+    local_end = ends_at.astimezone(zone)
+    return PrepaidSettlementPeriod(
+        starts_at=starts_at,
+        ends_at=ends_at,
+        starts_on=local_start.date(),
+        ends_on=local_end.date(),
+        timezone_name=timezone_name,
+    )
 
 
 def resolve_prepaid_settlement_period(
@@ -422,6 +491,220 @@ def resolve_prepaid_settlement_period(
         starts_on=interval.starts_at.astimezone(zone).date(),
         ends_on=interval.ends_at.astimezone(zone).date(),
         timezone_name=query.timezone_name,
+    )
+
+
+def resolve_reviewed_prepaid_service_period(
+    query: ReviewedPrepaidServicePeriodQuery,
+) -> PrepaidSettlementPeriod:
+    """Resolve reviewed Lagos dates without silently rewriting an anniversary.
+
+    Date-only evidence defaults to local midnight. Historical continuation may
+    explicitly preserve the clock of an exact recorded interval instead. The
+    caller must verify that record's account/subscription/document identity;
+    this pure reader accepts no arbitrary clock or timezone override.
+    """
+
+    zone = ZoneInfo(APP_TIMEZONE_NAME)
+    clock = time.min
+    if query.basis is ReviewedPrepaidCalendarBasis.documented_anniversary:
+        reference = query.documented_period
+        if (
+            reference is None
+            or reference.starts_at.tzinfo is None
+            or reference.ends_at.tzinfo is None
+            or reference.starts_at.utcoffset() is None
+            or reference.ends_at.utcoffset() is None
+            or reference.ends_at <= reference.starts_at
+        ):
+            _error(
+                "invalid_period",
+                "Exact aware documentary calendar evidence is required.",
+            )
+        local_start = reference.starts_at.astimezone(zone)
+        local_end = reference.ends_at.astimezone(zone)
+        if local_start.time() != local_end.time():
+            _error("invalid_period", "Documentary anniversary clock times disagree.")
+        clock = local_start.time()
+    elif (
+        query.basis is not ReviewedPrepaidCalendarBasis.business_midnight
+        or query.documented_period is not None
+    ):
+        _error("invalid_period", "Reviewed calendar basis and evidence disagree.")
+    starts_at = datetime.combine(query.starts_on, clock, zone).astimezone(UTC)
+    ends_at = datetime.combine(query.ends_on, clock, zone).astimezone(UTC)
+    if ends_at <= starts_at:
+        _error(
+            "invalid_period", "Reviewed service dates must form a positive interval."
+        )
+    return PrepaidSettlementPeriod(
+        starts_at=starts_at,
+        ends_at=ends_at,
+        starts_on=query.starts_on,
+        ends_on=query.ends_on,
+        timezone_name=APP_TIMEZONE_NAME,
+    )
+
+
+def _contiguous_prepaid_coverage_end(
+    db: Session,
+    *,
+    subscription_id: UUID,
+    account_id: UUID,
+    as_of: datetime,
+    exclude_source_invoice_id: UUID | None,
+) -> datetime | None:
+    """Resolve uninterrupted exact coverage containing ``as_of``."""
+
+    observed_at = _utc(as_of)
+    entitlement_query = select(
+        ServiceEntitlement.id,
+        ServiceEntitlement.starts_at,
+        ServiceEntitlement.ends_at,
+    ).where(
+        ServiceEntitlement.subscription_id == subscription_id,
+        ServiceEntitlement.account_id == account_id,
+        ServiceEntitlement.status == ServiceEntitlementStatus.active,
+        ServiceEntitlement.ends_at > observed_at,
+    )
+    if exclude_source_invoice_id is not None:
+        entitlement_query = entitlement_query.where(
+            (ServiceEntitlement.source_invoice_id.is_(None))
+            | (ServiceEntitlement.source_invoice_id != exclude_source_invoice_id)
+        )
+    intervals: list[tuple[datetime, datetime, UUID]] = [
+        (_utc(row.starts_at), _utc(row.ends_at), row.id)
+        for row in db.execute(entitlement_query).all()
+    ]
+    extension_rows = db.execute(
+        select(
+            ServiceExtensionEntry.id,
+            ServiceExtensionEntry.grant_starts_at,
+            ServiceExtensionEntry.grant_ends_at,
+        )
+        .join(
+            ServiceExtension,
+            ServiceExtension.id == ServiceExtensionEntry.extension_id,
+        )
+        .where(
+            ServiceExtensionEntry.subscription_id == subscription_id,
+            ServiceExtensionEntry.subscriber_id == account_id,
+            ServiceExtension.status == ServiceExtensionStatus.applied,
+            ServiceExtensionEntry.grant_starts_at.isnot(None),
+            ServiceExtensionEntry.grant_ends_at.isnot(None),
+            ServiceExtensionEntry.grant_ends_at > observed_at,
+        )
+    ).all()
+    for row in extension_rows:
+        assert row.grant_starts_at is not None
+        assert row.grant_ends_at is not None
+        intervals.append((_utc(row.grant_starts_at), _utc(row.grant_ends_at), row.id))
+
+    cursor = observed_at
+    found = False
+    for starts_at, ends_at, _source_id in sorted(
+        intervals,
+        key=lambda item: (item[0], item[1], item[2]),
+    ):
+        if ends_at <= cursor:
+            continue
+        if starts_at > cursor:
+            break
+        found = True
+        cursor = max(cursor, ends_at)
+    return cursor if found else None
+
+
+def resolve_prepaid_subscription_settlement_period(
+    db: Session,
+    query: PrepaidSubscriptionSettlementPeriodQuery,
+) -> PrepaidSubscriptionSettlementPeriod:
+    """Start a paid period after exact live coverage, otherwise on payment day.
+
+    This deliberately ignores ``Subscription.next_billing_at``. That mutable
+    projection cannot prove service coverage and previously caused an inferred
+    extension delta to be added twice. Only active entitlement intervals and
+    applied, non-reversed extension grants can defer the new paid period.
+    """
+
+    covered_through = _contiguous_prepaid_coverage_end(
+        db,
+        subscription_id=query.subscription_id,
+        account_id=query.account_id,
+        as_of=query.effective_at,
+        exclude_source_invoice_id=query.exclude_source_invoice_id,
+    )
+    subscription = db.get(Subscription, query.subscription_id)
+    allowance = (
+        _renewal_cycle_allowance(subscription) if subscription is not None else None
+    )
+    if allowance is not None:
+        if allowance.validity_days is None:
+            _error(
+                "invalid_usage_allowance_policy",
+                "Renewal-cycle usage allowance is missing validity days.",
+                usage_allowance_id=str(allowance.id),
+            )
+        return PrepaidSubscriptionSettlementPeriod(
+            period=_resolve_validity_period(
+                effective_at=query.effective_at,
+                validity_days=int(allowance.validity_days),
+                timezone_name=query.timezone_name,
+            ),
+            covered_through=covered_through,
+        )
+
+    if covered_through is None:
+        period = resolve_prepaid_settlement_period(
+            PrepaidSettlementPeriodQuery(
+                effective_at=query.effective_at,
+                billing_cycle=query.billing_cycle,
+                timezone_name=query.timezone_name,
+            )
+        )
+        return PrepaidSubscriptionSettlementPeriod(
+            period=period,
+            covered_through=None,
+        )
+
+    interval_spec = _SETTLEMENT_CYCLE_INTERVAL.get(query.billing_cycle)
+    if interval_spec is None:
+        _error(
+            "unsupported_cadence",
+            "The prepaid settlement billing cadence is unsupported.",
+            billing_cycle=str(query.billing_cycle),
+        )
+    interval_unit, interval_count = interval_spec
+    cadence = BillingCadence(
+        rate_basis=RateBasis.fixed_per_service_period,
+        rate_unit=interval_unit,
+        rate_quantity=Decimal("1"),
+        service_interval_unit=interval_unit,
+        service_interval_count=interval_count,
+        invoice_interval_unit=interval_unit,
+        invoice_interval_count=interval_count,
+        collection_timing=CollectionTiming.advance,
+        alignment=CadenceAlignment.contract_anniversary,
+        timezone_name=query.timezone_name,
+        end_of_month_rule=EndOfMonthRule.clamp_to_month_end,
+        proration_policy=ProrationPolicy.none,
+    )
+    interval = service_period(
+        cadence=cadence,
+        contract_start=covered_through,
+    )
+    zone = cadence.zone()
+    starts_at = interval.starts_at.astimezone(UTC)
+    ends_at = interval.ends_at.astimezone(UTC)
+    return PrepaidSubscriptionSettlementPeriod(
+        period=PrepaidSettlementPeriod(
+            starts_at=starts_at,
+            ends_at=ends_at,
+            starts_on=starts_at.astimezone(zone).date(),
+            ends_on=ends_at.astimezone(zone).date(),
+            timezone_name=query.timezone_name,
+        ),
+        covered_through=covered_through,
     )
 
 
@@ -527,6 +810,300 @@ class LegacyRenewalTaxInvoiceCorrectionResult:
     remaining_credit: Decimal
     preview_fingerprint: str
     replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class UnusedPrepaidRenewalCorrectionQuery:
+    """Exact adjustment and entitlement pair selected for reviewed correction."""
+
+    account_id: UUID
+    subscription_id: UUID
+    adjustment_id: UUID
+    entitlement_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class UnusedPrepaidRenewalCorrectionPreview:
+    """Fingerprint-bound proof that one unused direct renewal may be reversed."""
+
+    account_id: UUID
+    subscription_id: UUID
+    adjustment_id: UUID
+    entitlement_id: UUID
+    period_start: datetime | None
+    period_end: datetime | None
+    amount: Decimal
+    currency: str
+    funding_before: Decimal
+    funding_after: Decimal
+    reversal_preview_fingerprint: str | None
+    actionable: bool
+    reason: str
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectUnusedPrepaidRenewalCommand:
+    """Atomically reverse one reviewed unused renewal debit and entitlement."""
+
+    context: CommandContext
+    query: UnusedPrepaidRenewalCorrectionQuery
+    expected_preview_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnusedPrepaidRenewalCorrectionResult:
+    """Durable evidence returned after the unused renewal correction."""
+
+    adjustment_id: UUID
+    entitlement_id: UUID
+    reversal_ledger_entry_id: UUID
+    remaining_funding: Decimal
+    preview_fingerprint: str
+    replayed: bool
+
+
+def _unused_renewal_correction_fingerprint(
+    *,
+    query: UnusedPrepaidRenewalCorrectionQuery,
+    period_start: datetime | None,
+    period_end: datetime | None,
+    amount: Decimal,
+    currency: str,
+    funding_before: Decimal,
+    funding_after: Decimal,
+    reversal_preview_fingerprint: str | None,
+    actionable: bool,
+    reason: str,
+) -> str:
+    values = (
+        str(query.account_id),
+        str(query.subscription_id),
+        str(query.adjustment_id),
+        str(query.entitlement_id),
+        period_start.isoformat() if period_start else "",
+        period_end.isoformat() if period_end else "",
+        str(round_money(amount)),
+        currency,
+        str(round_money(funding_before)),
+        str(round_money(funding_after)),
+        reversal_preview_fingerprint or "",
+        str(actionable),
+        reason,
+    )
+    return hashlib.sha256("|".join(values).encode("utf-8")).hexdigest()
+
+
+def preview_unused_prepaid_renewal_correction(
+    db: Session,
+    query: UnusedPrepaidRenewalCorrectionQuery,
+) -> UnusedPrepaidRenewalCorrectionPreview:
+    """Preview reversal of one exact direct renewal with no invoice evidence."""
+
+    adjustment = db.get(AccountAdjustment, query.adjustment_id)
+    entitlement = db.get(ServiceEntitlement, query.entitlement_id)
+    ledger_entry = (
+        db.get(LedgerEntry, adjustment.ledger_entry_id)
+        if adjustment is not None and adjustment.ledger_entry_id is not None
+        else None
+    )
+    reason = "selected records are not one exact unused prepaid renewal chain"
+    actionable = False
+    period_start = period_end = None
+    amount = Decimal("0.00")
+    currency = "NGN"
+    reversal_fingerprint = None
+    funding_before = Decimal("0.00")
+    funding_after = Decimal("0.00")
+
+    if adjustment is not None and entitlement is not None and ledger_entry is not None:
+        period_start = entitlement.starts_at
+        period_end = entitlement.ends_at
+        amount = round_money(adjustment.amount)
+        currency = str(adjustment.currency or "NGN").upper()
+        funding_before = round_money(
+            get_customer_financial_position(
+                db, query.account_id
+            ).prepaid_available_balance
+        )
+        funding_after = round_money(funding_before + amount)
+        exact_chain = (
+            adjustment.account_id == query.account_id
+            and adjustment.origin == _ORIGIN
+            and adjustment.reversed_at is None
+            and adjustment.reversal_ledger_entry_id is None
+            and ledger_entry.is_active
+            and ledger_entry.entry_type is LedgerEntryType.debit
+            and ledger_entry.source is LedgerSource.adjustment
+            and ledger_entry.invoice_id is None
+            and entitlement.account_id == query.account_id
+            and entitlement.subscription_id == query.subscription_id
+            and entitlement.status is ServiceEntitlementStatus.active
+            and entitlement.source_ledger_entry_id == ledger_entry.id
+            and entitlement.source_invoice_id is None
+            and entitlement.source_invoice_line_id is None
+            and entitlement.amount_funded == adjustment.amount
+            and entitlement.currency == currency
+            and period_start is not None
+            and period_end is not None
+            and period_end > period_start
+        )
+        if exact_chain:
+            reversal_preview = preview_account_adjustment_reversal(
+                db,
+                PreviewAccountAdjustmentReversalQuery(
+                    adjustment_id=adjustment.id,
+                    request=AccountAdjustmentReversalPreviewRequest(
+                        reason=(
+                            "Finance-approved correction of unused prepaid service "
+                            "renewal during relocation"
+                        )
+                    ),
+                ),
+            )
+            reversal_fingerprint = reversal_preview.fingerprint
+            actionable = True
+            reason = "exact unused prepaid renewal chain"
+
+    fingerprint = _unused_renewal_correction_fingerprint(
+        query=query,
+        period_start=period_start,
+        period_end=period_end,
+        amount=amount,
+        currency=currency,
+        funding_before=funding_before,
+        funding_after=funding_after,
+        reversal_preview_fingerprint=reversal_fingerprint,
+        actionable=actionable,
+        reason=reason,
+    )
+    return UnusedPrepaidRenewalCorrectionPreview(
+        account_id=query.account_id,
+        subscription_id=query.subscription_id,
+        adjustment_id=query.adjustment_id,
+        entitlement_id=query.entitlement_id,
+        period_start=period_start,
+        period_end=period_end,
+        amount=amount,
+        currency=currency,
+        funding_before=funding_before,
+        funding_after=funding_after,
+        reversal_preview_fingerprint=reversal_fingerprint,
+        actionable=actionable,
+        reason=reason,
+        fingerprint=fingerprint,
+    )
+
+
+def correct_unused_prepaid_service_renewal(
+    db: Session,
+    command: CorrectUnusedPrepaidRenewalCommand,
+) -> UnusedPrepaidRenewalCorrectionResult:
+    """Reverse one unused renewal and its entitlement in one owner transaction."""
+
+    def operation() -> UnusedPrepaidRenewalCorrectionResult:
+        query = command.query
+        idempotency_key = (command.context.idempotency_key or "").strip()
+        if not idempotency_key:
+            _error(
+                "unused_renewal_correction_missing_idempotency_key",
+                "Unused prepaid renewal correction requires an idempotency key.",
+            )
+        lock_account(db, str(query.account_id))
+        subscription = lock_for_update(db, Subscription, query.subscription_id)
+        if subscription is None or subscription.subscriber_id != query.account_id:
+            _error(
+                "unused_renewal_correction_not_found",
+                "Selected subscription evidence was not found.",
+            )
+        existing = lock_for_update(db, AccountAdjustment, query.adjustment_id)
+        if (
+            existing is not None
+            and existing.reversal_ledger_entry_id is not None
+            and existing.reversal_idempotency_key == idempotency_key
+        ):
+            assert existing.reversal_ledger_entry_id is not None
+            remaining = round_money(
+                get_customer_financial_position(
+                    db, query.account_id
+                ).prepaid_available_balance
+            )
+            return UnusedPrepaidRenewalCorrectionResult(
+                adjustment_id=existing.id,
+                entitlement_id=query.entitlement_id,
+                reversal_ledger_entry_id=existing.reversal_ledger_entry_id,
+                remaining_funding=remaining,
+                preview_fingerprint=existing.reversal_preview_fingerprint or "",
+                replayed=True,
+            )
+        current = preview_unused_prepaid_renewal_correction(db, query)
+        if current.fingerprint != command.expected_preview_fingerprint:
+            _error(
+                "stale_preview",
+                "Unused prepaid renewal correction evidence changed; preview again.",
+            )
+        if (
+            not current.actionable
+            or current.reversal_preview_fingerprint is None
+            or current.period_start is None
+            or current.period_end is None
+        ):
+            _error(
+                "unused_renewal_correction_not_actionable",
+                "Selected renewal requires manual review.",
+                reason=current.reason,
+            )
+        adjustment = existing or lock_for_update(
+            db, AccountAdjustment, query.adjustment_id
+        )
+        entitlement = lock_for_update(db, ServiceEntitlement, query.entitlement_id)
+        if adjustment is None or entitlement is None:
+            _error(
+                "unused_renewal_correction_not_found",
+                "Selected renewal evidence was not found.",
+            )
+        reversal = stage_account_adjustment_reversal_for_renewal_owner(
+            db,
+            ReverseAccountAdjustmentCommand(
+                context=command.context,
+                adjustment_id=adjustment.id,
+                confirmation=AccountAdjustmentReversalConfirm(
+                    reason=(
+                        "Finance-approved correction of unused prepaid service "
+                        "renewal during relocation"
+                    ),
+                    preview_fingerprint=current.reversal_preview_fingerprint,
+                    idempotency_key=idempotency_key,
+                ),
+            ),
+        )
+        entitlement.status = ServiceEntitlementStatus.reversed
+        entitlement.metadata_ = {
+            **(entitlement.metadata_ or {}),
+            "revoked_reason": "unused_service_period_during_relocation",
+            "correction_preview_fingerprint": current.fingerprint,
+        }
+        db.flush()
+        remaining = round_money(
+            get_customer_financial_position(
+                db, query.account_id
+            ).prepaid_available_balance
+        )
+        return UnusedPrepaidRenewalCorrectionResult(
+            adjustment_id=adjustment.id,
+            entitlement_id=entitlement.id,
+            reversal_ledger_entry_id=reversal.ledger_entry.id,
+            remaining_funding=remaining,
+            preview_fingerprint=current.fingerprint,
+            replayed=reversal.replayed,
+        )
+
+    return execute_owner_command(
+        db,
+        definition=_UNUSED_RENEWAL_CORRECTION_COMMAND,
+        context=command.context,
+        operation=operation,
+    )
 
 
 def resolve_prepaid_monthly_charge_detail(
@@ -1508,6 +2085,16 @@ def _subscription_for_request(
     return subscription
 
 
+def _initialize_funded_quota_cycle(
+    db: Session,
+    subscription: Subscription,
+    starts_at: datetime,
+) -> None:
+    from app.services.usage import initialize_renewal_quota_cycle
+
+    initialize_renewal_quota_cycle(db, subscription, starts_at)
+
+
 def _existing_period_entitlement(
     db: Session,
     *,
@@ -1516,12 +2103,14 @@ def _existing_period_entitlement(
     ends_at: datetime,
 ) -> ServiceEntitlement | None:
     return db.scalar(
-        select(ServiceEntitlement).where(
+        select(ServiceEntitlement)
+        .where(
             ServiceEntitlement.subscription_id == subscription_id,
             ServiceEntitlement.status == ServiceEntitlementStatus.active,
             ServiceEntitlement.starts_at < ends_at,
             ServiceEntitlement.ends_at > starts_at,
         )
+        .order_by(ServiceEntitlement.starts_at.desc())
     )
 
 
@@ -1535,6 +2124,7 @@ class _InvoiceBackedRenewalEvidence:
     line: InvoiceLine
     entitlement: ServiceEntitlement
     payment_allocation_ids: tuple[UUID, ...]
+    payment_ids: tuple[UUID, ...]
     preview_fingerprint: str
     funding_before: Decimal
     funding_after: Decimal
@@ -1659,6 +2249,7 @@ def _invoice_backed_renewal_evidence(
         line=line,
         entitlement=entitlement,
         payment_allocation_ids=tuple(allocation.id for allocation in allocations),
+        payment_ids=tuple(allocation.payment_id for allocation in allocations),
         preview_fingerprint=fingerprint,
         funding_before=funding_before,
         funding_after=funding_after,
@@ -1720,7 +2311,12 @@ def preview_prepaid_service_renewal(
         starts_at=period_start,
         ends_at=period_end,
     )
-    if overlap is not None:
+    restart_overlap = (
+        overlap is not None
+        and _renewal_cycle_allowance(subscription) is not None
+        and _utc(overlap.starts_at) < period_start
+    )
+    if overlap is not None and not restart_overlap:
         existing_adjustment = db.scalar(
             select(AccountAdjustment).where(
                 AccountAdjustment.origin == _ORIGIN,
@@ -1801,6 +2397,7 @@ def confirm_prepaid_service_renewal(
     *,
     effective_at: datetime,
     evidence_ref: str,
+    selected_payment_id: UUID | None = None,
 ) -> PrepaidServiceRenewalResult:
     """Lock, re-preview, and atomically settle invoice + entitlement + anchor."""
     evidence = evidence_ref.strip()
@@ -1825,11 +2422,15 @@ def confirm_prepaid_service_renewal(
         origin_ref=preview.origin_ref,
     )
     if invoice_evidence is not None:
-        if invoice_evidence.preview_fingerprint != preview.fingerprint:
+        if invoice_evidence.preview_fingerprint != preview.fingerprint or (
+            selected_payment_id is not None
+            and invoice_evidence.payment_ids != (selected_payment_id,)
+        ):
             _error(
                 "idempotency_conflict",
                 "Prepaid renewal idempotency evidence does not match the request.",
             )
+        _initialize_funded_quota_cycle(db, subscription, preview.starts_at)
         return PrepaidServiceRenewalResult(
             preview=preview,
             invoice=invoice_evidence.invoice,
@@ -1863,6 +2464,11 @@ def confirm_prepaid_service_renewal(
         )
     )
     if existing_adjustment is not None:
+        if selected_payment_id is not None:
+            _error(
+                "idempotency_conflict",
+                "Selected-payment renewal cannot replay legacy adjustment evidence.",
+            )
         entitlement = db.scalar(
             select(ServiceEntitlement).where(
                 ServiceEntitlement.source_ledger_entry_id
@@ -1891,6 +2497,7 @@ def confirm_prepaid_service_renewal(
             entitlement=entitlement,
             require_existing=True,
         )
+        _initialize_funded_quota_cycle(db, subscription, preview.starts_at)
         return PrepaidServiceRenewalResult(
             preview=preview,
             invoice=None,
@@ -2010,6 +2617,15 @@ def confirm_prepaid_service_renewal(
             disposition=classification.disposition.value,
             reason=classification.reason,
         )
+    if (
+        selected_payment_id is not None
+        and classification.disposition
+        is not PrepaidDraftDisposition.exact_payment_fundable
+    ):
+        _error(
+            "selected_payment_rejected",
+            "Selected payment is not the exact funding source for this renewal.",
+        )
 
     # Decision made. Mutate now, and only now.
     local_start = current.starts_at.astimezone(APP_TIMEZONE).date()
@@ -2094,6 +2710,7 @@ def confirm_prepaid_service_renewal(
             db,
             invoice=invoice,
             decision_at=decision_at,
+            selected_payment_id=selected_payment_id,
         )
     else:
         opening_funding_consumption_id = _settle_reviewed_opening_fundable_renewal(
@@ -2137,6 +2754,7 @@ def confirm_prepaid_service_renewal(
             details={"invoice_id": str(invoice.id)},
             retryable=False,
         )
+    _initialize_funded_quota_cycle(db, subscription, current.starts_at)
     return PrepaidServiceRenewalResult(
         preview=current,
         invoice=evidence_result.invoice,
@@ -2155,6 +2773,7 @@ def _settle_exact_payment_fundable_renewal(
     *,
     invoice: Invoice,
     decision_at: datetime,
+    selected_payment_id: UUID | None = None,
 ) -> None:
     """Settle a canonical renewal invoice this owner just created, directly.
 
@@ -2191,16 +2810,24 @@ def _settle_exact_payment_fundable_renewal(
         # fingerprint covers — previewing before issuing would bind a
         # fingerprint to a status the invoice no longer has by the time
         # `apply_invoice_fully` re-derives and checks it.
-        funding_preview = preview_payment_funding_for_owner(
-            db,
-            invoice=invoice,
-        )
-        AccountCreditApplications.apply_invoice_fully(
-            db,
-            invoice,
-            preview_fingerprint=funding_preview.fingerprint,
-            funding_position_at=funding_preview.funding_position_at,
-        )
+        if selected_payment_id is not None:
+            AccountCreditApplications.apply_invoice_from_selected_payment_fully(
+                db,
+                invoice,
+                payment_id=selected_payment_id,
+                expected_amount=round_money(invoice.balance_due),
+            )
+        else:
+            funding_preview = preview_payment_funding_for_owner(
+                db,
+                invoice=invoice,
+            )
+            AccountCreditApplications.apply_invoice_fully(
+                db,
+                invoice,
+                preview_fingerprint=funding_preview.fingerprint,
+                funding_position_at=funding_preview.funding_position_at,
+            )
     except (InvoiceOwnerError, AccountCreditApplicationError) as exc:
         # Money may already have partially moved inside this try block (e.g.
         # `issue_draft_for_owner` succeeded, `apply_invoice_fully` then
@@ -3528,9 +4155,8 @@ class BillingAnchorAuthority(enum.StrEnum):
     policies from two finalizers, and both are load-bearing:
 
     * ``_finalize_invoice_payment_effects`` (payment creation, allocation,
-      refund, reversal) re-anchored a lapsed prepaid invoice and deliberately
-      carried its *inferred* extension delta forward, never writing the anchor
-      backwards.
+      refund, reversal) re-anchors a lapsed prepaid invoice after exact current
+      coverage and never writes the anchor backwards.
     * ``finalize_invoice_application_for_owner`` (reviewed prepaid-draft
       reconciliation) additionally projected the anchor unconditionally from
       the exact entitlements, overriding that inferred delta.
@@ -3566,6 +4192,118 @@ class BillingAnchorProjection:
     authority: BillingAnchorAuthority = BillingAnchorAuthority.funding_observation
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewedInvoiceSupersessionAnchorCommand:
+    """Exact anchor retraction after one reviewed invalid invoice is retired."""
+
+    account_id: UUID
+    subscription_id: UUID
+    superseded_invoice_id: UUID
+    expected_previous: datetime
+    reviewed_period_start: datetime
+    evidence_ref: str
+
+
+def project_reviewed_invoice_supersession_anchor_for_owner(
+    db: Session,
+    command: ReviewedInvoiceSupersessionAnchorCommand,
+) -> BillingAnchorProjection:
+    """Retract only to the end of surviving coverage after reviewed supersession."""
+
+    invoice = db.get(Invoice, command.superseded_invoice_id)
+    subscription = db.get(Subscription, command.subscription_id)
+    retired_entitlements = tuple(
+        db.scalars(
+            select(ServiceEntitlement).where(
+                ServiceEntitlement.source_invoice_id == command.superseded_invoice_id,
+                ServiceEntitlement.subscription_id == command.subscription_id,
+            )
+        ).all()
+    )
+    if (
+        invoice is None
+        or subscription is None
+        or invoice.account_id != command.account_id
+        or subscription.subscriber_id != command.account_id
+        or invoice.status is not InvoiceStatus.void
+        or not retired_entitlements
+        or any(
+            item.status is ServiceEntitlementStatus.active
+            for item in retired_entitlements
+        )
+    ):
+        _error(
+            "reviewed_anchor_supersession_rejected",
+            "Superseded invoice and entitlement evidence is incomplete.",
+            invoice_id=str(command.superseded_invoice_id),
+            subscription_id=str(command.subscription_id),
+        )
+
+    surviving_ends = list(
+        db.scalars(
+            select(ServiceEntitlement.ends_at).where(
+                ServiceEntitlement.subscription_id == command.subscription_id,
+                ServiceEntitlement.status == ServiceEntitlementStatus.active,
+            )
+        ).all()
+    )
+    for grant_end in db.scalars(
+        select(ServiceExtensionEntry.grant_ends_at)
+        .join(
+            ServiceExtension,
+            ServiceExtension.id == ServiceExtensionEntry.extension_id,
+        )
+        .where(
+            ServiceExtensionEntry.subscription_id == command.subscription_id,
+            ServiceExtension.status == ServiceExtensionStatus.applied,
+            ServiceExtensionEntry.grant_ends_at.isnot(None),
+        )
+    ).all():
+        if grant_end is not None:
+            surviving_ends.append(grant_end)
+    target = _utc(command.reviewed_period_start)
+    surviving_end = max(
+        (_utc(value) for value in surviving_ends if value is not None),
+        default=None,
+    )
+    current = (
+        _utc(subscription.next_billing_at)
+        if subscription.next_billing_at is not None
+        else None
+    )
+    if (
+        current != _utc(command.expected_previous)
+        or surviving_end != target
+        or not command.evidence_ref.strip()
+    ):
+        _error(
+            "reviewed_anchor_supersession_rejected",
+            "Surviving coverage does not prove the reviewed billing-anchor target.",
+            subscription_id=str(command.subscription_id),
+        )
+    changed = stage_subscription_billing_anchor(
+        db,
+        subscription,
+        BillingAnchorProjectionCommand(
+            subscription_id=subscription.id,
+            expected_previous=subscription.next_billing_at,
+            target=target,
+            source=BillingAnchorProjectionSource.reviewed_reconciliation,
+            evidence_ref=command.evidence_ref,
+        ),
+    )
+    db.flush()
+    return BillingAnchorProjection(
+        subscription_id=subscription.id,
+        previous_next_billing_at=current,
+        next_billing_at=target,
+        coverage_end=surviving_end,
+        changed=changed,
+        retracted=bool(changed and current is not None and target < current),
+        authority=BillingAnchorAuthority.reviewed_reconciliation,
+    )
+
+
 def project_prepaid_billing_anchor_for_invoice(
     db: Session,
     invoice: Invoice,
@@ -3596,11 +4334,12 @@ def project_prepaid_billing_anchor_for_invoice(
     * ``funding_observation`` — no. A payment settling is an observation that
       funding changed; it carries no statement about why the anchor is ahead.
       That lead may be a ``financial.service_extensions`` grant, a
-      ``financial.subscription_billing_grants`` grant, or the extension delta
-      the payment owner deliberately preserved in the same transaction while
-      re-anchoring a lapsed renewal. Overwriting it would silently claw back
-      service another owner granted, so advancement is monotonic while this
-      invoice's own entitlements survive.
+      ``financial.subscription_billing_grants`` grant, or another unresolved
+      projection. Exact extension coverage is already part of the coverage
+      floor; payment re-anchoring never infers a second extension delta.
+      Overwriting the lead would silently claw back service another owner
+      granted, so advancement is monotonic while this invoice's own
+      entitlements survive.
     * ``reviewed_reconciliation`` — yes. A named owner has just rewritten this
       invoice's documentary period from an operator-confirmed, fingerprint-
       bound preview and holds exact entitlement evidence for it. A stale anchor
@@ -5249,6 +5988,7 @@ __all__ = [
     "BillingAnchorAuthority",
     "BillingAnchorProjection",
     "CorrectLegacyRenewalTaxInvoiceCommand",
+    "CorrectUnusedPrepaidRenewalCommand",
     "EvaluatePrepaidServiceAfterSettlementCommand",
     "ExecuteReviewedPrepaidServiceRenewalCommand",
     "FundingChangeEvaluation",
@@ -5259,6 +5999,9 @@ __all__ = [
     "LegacyRenewalTaxInvoiceCorrectionPreview",
     "LegacyRenewalTaxInvoiceCorrectionQuery",
     "LegacyRenewalTaxInvoiceCorrectionResult",
+    "UnusedPrepaidRenewalCorrectionQuery",
+    "UnusedPrepaidRenewalCorrectionPreview",
+    "UnusedPrepaidRenewalCorrectionResult",
     "PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES",
     "PREPAID_RENEWAL_ISOLATABLE_ERRORS",
     "PrepaidFundingSubscriptionDecision",
@@ -5269,6 +6012,8 @@ __all__ = [
     "PrepaidTriggerExecutionConflictError",
     "PrepaidSettlementPeriod",
     "PrepaidSettlementPeriodQuery",
+    "PrepaidSubscriptionSettlementPeriod",
+    "PrepaidSubscriptionSettlementPeriodQuery",
     "PrepaidServiceRenewalPreview",
     "PrepaidServiceRenewalError",
     "PrepaidServiceRenewalResult",
@@ -5276,6 +6021,7 @@ __all__ = [
     "PrepaidServiceRenewedOutcome",
     "RunDuePrepaidServiceRenewalsCommand",
     "ReviewedPrepaidServiceRenewalResult",
+    "ReviewedInvoiceSupersessionAnchorCommand",
     "StaleBillingAnchorCandidate",
     "StaleBillingAnchorRepairPreview",
     "StaleBillingAnchorRepairResult",
@@ -5283,21 +6029,25 @@ __all__ = [
     "apply_stale_prepaid_billing_anchor_repair",
     "confirm_prepaid_service_renewal",
     "correct_legacy_prepaid_renewal_tax_invoice",
+    "correct_unused_prepaid_service_renewal",
     "evaluate_prepaid_service_after_settlement",
     "execute_due_prepaid_service_renewals",
     "execute_reviewed_prepaid_service_renewal",
     "execute_prepaid_service_after_settlement",
     "preview_prepaid_service_renewal",
     "preview_legacy_prepaid_renewal_tax_invoice_correction",
+    "preview_unused_prepaid_renewal_correction",
     "preview_prepaid_recurring_charge",
     "preview_stale_prepaid_billing_anchor_repair",
     "project_prepaid_billing_anchor_for_invoice",
+    "project_reviewed_invoice_supersession_anchor_for_owner",
     "renewal_outcomes_for_payment",
     "retract_prepaid_billing_anchors_after_funding_reversal",
     "resolve_prepaid_monthly_charge",
     "resolve_prepaid_monthly_charge_detail",
     "resolve_prepaid_monthly_charges",
     "resolve_prepaid_settlement_period",
+    "resolve_prepaid_subscription_settlement_period",
     "run_due_prepaid_service_renewals",
     "stage_prepaid_service_renewed_outcome",
 ]

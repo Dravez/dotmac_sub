@@ -1,9 +1,116 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 
 class TestCustomerPortalUsagePage:
+    def test_typed_custom_date_range_is_inclusive(
+        self, db_session, subscriber, subscription
+    ) -> None:
+        from app.services.customer_portal_flow_services import (
+            UsageDateRange,
+            UsagePageQuery,
+            UsagePeriod,
+            query_usage_page,
+        )
+
+        chart_source_records = [
+            SimpleNamespace(
+                recorded_at=datetime(2026, 5, 2, tzinfo=UTC),
+                amount=2.5,
+                usage_amount=2.5,
+                download_amount=1.5,
+                upload_amount=1.0,
+                unit="GB",
+                usage_type="Daily Usage",
+                description="Total usage for 2026-05-02",
+            )
+        ]
+        with (
+            patch(
+                "app.services.customer_portal_flow_services._daily_bandwidth_usage_records",
+                return_value=chart_source_records,
+            ) as daily_records,
+            patch(
+                "app.services.customer_portal_flow_services._usage_summary_stats",
+                return_value={
+                    "average_daily_usage_gb": 2.5,
+                    "average_speed_mbps": 10.0,
+                    "average_download_mbps": 6.0,
+                    "average_upload_mbps": 4.0,
+                },
+            ),
+            patch(
+                "app.services.customer_portal_flow_services._get_fup_status",
+                return_value=None,
+            ),
+        ):
+            result = query_usage_page(
+                db_session,
+                UsagePageQuery(
+                    customer_id=subscriber.id,
+                    period=UsagePeriod.custom,
+                    date_range=UsageDateRange(
+                        start_date=date(2026, 5, 1),
+                        end_date=date(2026, 5, 2),
+                    ),
+                ),
+            )
+
+        assert result.period is UsagePeriod.custom
+        assert result.date_range is not None
+        assert result.date_range.start_date == date(2026, 5, 1)
+        assert result.date_range.end_date == date(2026, 5, 2)
+        assert result.usage_records[0].amount == 2.5
+        call = daily_records.call_args.kwargs
+        assert call["start_at"] == datetime(2026, 5, 1, tzinfo=UTC)
+        assert call["end_at"] == datetime(2026, 5, 2, 23, 59, 59, 999999, tzinfo=UTC)
+
+    def test_custom_date_range_rejects_reversed_dates(self) -> None:
+        import pytest
+
+        from app.services.customer_portal_flow_services import (
+            UsageDateRange,
+            UsageQueryError,
+        )
+
+        with pytest.raises(UsageQueryError) as exc_info:
+            UsageDateRange(
+                start_date=date(2026, 5, 3),
+                end_date=date(2026, 5, 2),
+            )
+
+        assert exc_info.value.code == "usage_date_range_reversed"
+
+    def test_export_queries_the_complete_filtered_result(self, db_session) -> None:
+        from app.services.customer_portal_flow_services import (
+            UsagePageQuery,
+            UsagePeriod,
+            query_usage_export,
+        )
+
+        query = UsagePageQuery(
+            customer_id=UUID("00000000-0000-0000-0000-000000000123"),
+            period=UsagePeriod.current,
+        )
+        count_result = SimpleNamespace(total=12_001)
+        complete_result = SimpleNamespace(total=12_001)
+
+        with patch(
+            "app.services.customer_portal_flow_services.query_usage_page",
+            side_effect=[count_result, complete_result],
+        ) as query_page:
+            result = query_usage_export(db_session, query)
+
+        assert result is complete_result
+        assert query_page.call_count == 2
+        count_query = query_page.call_args_list[0].args[1]
+        export_query = query_page.call_args_list[1].args[1]
+        assert count_query.per_page == 1
+        assert export_query.page == 1
+        assert export_query.per_page == 12_001
+
     def test_get_usage_page_skips_postgres_fallback_when_disabled(
         self, db_session, subscription
     ) -> None:

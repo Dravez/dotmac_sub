@@ -12,6 +12,7 @@ Mounted at /api/v1/me with router-level require_user_auth (see main.py).
 import logging
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -42,6 +43,8 @@ from app.schemas.billing import (
     MyPaymentMethodRead,
     PaymentProviderOption,
     PaymentRead,
+    TopupActiveRequestResponse,
+    TopupCancelResponse,
     TopupInitiateRequest,
     TopupInitiateResponse,
     TopupPageResponse,
@@ -98,6 +101,7 @@ from app.schemas.portal import (
     QuoteRequestCreate,
     ReferAFriendRequest,
     ReferAFriendResponse,
+    RelocationQuotePrepareResponse,
     TechnicianLocation,
     TechnicianRatingRequest,
     TechnicianRatingResponse,
@@ -140,6 +144,7 @@ from app.services import (
     customer_experience_lifecycle,
     customer_field_job_chat,
     customer_work_order_selfcare,
+    payment_intent_management,
     quote_deposits,
     quotes_mirror,
     team_inbox_widget,
@@ -177,12 +182,16 @@ from app.services.file_storage import build_content_disposition
 from app.services.object_storage import ObjectNotFoundError
 from app.services.owner_commands import CommandContext
 from app.services.sales import selfserve as selfserve_service
+from app.services.topup_intents import DirectTransferCancellationSource
 
 router = APIRouter(prefix="/me", tags=["me"])
 logger = logging.getLogger(__name__)
 PAYMENT_CHARGE_ERROR_MESSAGE = (
     "We could not charge that saved card. Please use another payment method or "
     "try again later."
+)
+QUOTE_DEPOSIT_START_ERROR_MESSAGE = (
+    "Online payment is temporarily unavailable. Please try again later."
 )
 CARD_SAVE_SUCCESS_MESSAGE = "Your card was saved for future payments."
 CARD_SAVE_ERROR_MESSAGE = (
@@ -656,6 +665,43 @@ def _offer_summary(offer, summary) -> PlanOfferSummary | None:
 
 
 @router.get(
+    "/subscriptions/{subscription_id}/relocation-plans",
+    response_model=list[PlanOfferSummary],
+)
+def my_relocation_plans(
+    subscription_id: UUID,
+    access_type: Literal["fiber", "fixed_wireless"],
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_user_auth),
+) -> list[PlanOfferSummary]:
+    """Customer-selectable destination plans for one owned active service."""
+    from app.models.catalog import Subscription, SubscriptionStatus
+    from app.services.customer_portal_context import get_available_portal_offers
+    from app.services.customer_portal_flow_changes import get_offer_price_summary
+
+    account_id = require_customer_account_id(db, _customer(db, principal))
+    subscription = db.get(Subscription, subscription_id)
+    if (
+        subscription is None
+        or str(subscription.subscriber_id) != str(account_id)
+        or subscription.status is not SubscriptionStatus.active
+    ):
+        raise HTTPException(status_code=404, detail="Service not found")
+    return [
+        summary
+        for offer in get_available_portal_offers(
+            db,
+            subscription,
+            apply_reseller_availability=False,
+            require_same_plan_family=False,
+        )
+        if offer.access_type.value == access_type
+        if (summary := _offer_summary(offer, get_offer_price_summary(offer)))
+        is not None
+    ]
+
+
+@router.get(
     "/subscriptions/{subscription_id}/service-change",
     response_model=PlanChangePageResponse,
 )
@@ -681,10 +727,9 @@ def my_plan_change_options(
         ),
         available_offers=[o for o in available if o is not None],
         prepaid_funding=ctx.get("prepaid_funding"),
-        postpaid_receivables=ctx.get("postpaid_receivables", Decimal("0.00")),
-        collection_blocking_balance=ctx.get(
-            "collection_blocking_balance", Decimal("0.00")
-        ),
+        postpaid_receivables=ctx.get("postpaid_receivables"),
+        collection_blocking_balance=ctx.get("collection_blocking_balance"),
+        financial_position_unavailable=ctx.get("financial_position_unavailable", False),
         next_billing_date=ctx.get("next_billing_date"),
         billing_message=ctx.get("billing_message"),
         service_addresses=ctx.get("service_addresses", []),
@@ -907,16 +952,19 @@ def my_topup_page(
 ):
     """Deposit Account Credit context, eligibility, limits, and payment options.
 
-    ``payment_options`` mirrors the customer web chooser, including configured
-    direct bank transfer when the collection-account owner enables it.
+    ``payment_options`` contains online gateways only. Direct transfer is a
+    separate typed config because it requires an intent and receipt evidence,
+    not a gateway checkout.
     """
     ctx = customer_payments.get_topup_page(db, _customer(db, principal))
     options = [
         PaymentProviderOption(provider_type=opt["provider_type"], label=opt["label"])
         for opt in ctx.get("payment_options", [])
+        if opt["provider_type"] != "direct_bank_transfer"
     ]
     accounts = [
         BankTransferAccount(
+            id=str(account.get("id") or ""),
             bank_name=str(account.get("bank_name") or ""),
             account_name=str(account.get("account_name") or ""),
             account_number=str(account.get("account_number") or ""),
@@ -938,6 +986,11 @@ def my_topup_page(
         prepaid_balance=ctx.get("prepaid_balance"),
         account_credit=ctx.get("account_credit"),
         deposit_allowed=ctx.get("deposit_allowed", True),
+        active_deposit_request=(
+            TopupActiveRequestResponse.model_validate(ctx["active_deposit_request"])
+            if ctx.get("active_deposit_request") is not None
+            else None
+        ),
         eligible_unpaid_total=ctx.get("eligible_unpaid_total", Decimal("0.00")),
         eligible_unpaid_invoices=ctx.get("eligible_unpaid_invoices", []),
         min_amount=ctx["min_amount"],
@@ -967,6 +1020,7 @@ def my_topup_preview(
 @router.post("/topup/initiate", response_model=TopupInitiateResponse)
 def my_topup_initiate(
     payload: TopupInitiateRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: Session = Depends(get_db),
     principal: dict = Depends(require_user_auth),
 ):
@@ -982,6 +1036,7 @@ def my_topup_initiate(
                 str(payload.payment_method_id) if payload.payment_method_id else None
             ),
             preview_fingerprint=payload.preview_fingerprint,
+            redirect_url=(str(request.url_for("my_topup_verify")) if request else None),
             idempotency_key=payload.idempotency_key,
         )
     except ValueError as exc:
@@ -1004,6 +1059,46 @@ def my_topup_initiate(
         checkout_url=result.get("checkout_url"),
         redirect_url=result.get("redirect_url"),
         preview_fingerprint=result["preview_fingerprint"],
+    )
+
+
+@router.post(
+    "/topup/intents/{intent_id}/cancel",
+    response_model=TopupCancelResponse,
+)
+def my_cancel_topup_intent(
+    intent_id: UUID,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_user_auth),
+) -> TopupCancelResponse:
+    """Cancel the caller's unsubmitted direct-bank-transfer top-up intent."""
+    customer = _customer(db, principal)
+    account_id = require_customer_account_id(db, customer)
+    command_id = uuid4()
+    try:
+        db_session_adapter.release_read_transaction(db)
+        outcome = payment_intent_management.cancel_unsubmitted_direct_transfer(
+            db,
+            payment_intent_management.CancelPaymentIntentCommand(
+                context=CommandContext(
+                    command_id=command_id,
+                    correlation_id=command_id,
+                    actor=f"customer:{account_id}",
+                    scope=payment_intent_management.CUSTOMER_CANCEL_SCOPE,
+                    reason="Customer canceled an unsubmitted bank-transfer request",
+                    idempotency_key=f"customer-cancel-payment-intent:{intent_id}",
+                ),
+                account_id=UUID(str(account_id)),
+                intent_id=intent_id,
+                source=DirectTransferCancellationSource.customer_selfcare,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return TopupCancelResponse(
+        intent_id=outcome.intent_id,
+        status="canceled",
+        changed=outcome.changed,
     )
 
 
@@ -1299,8 +1394,8 @@ def my_quotes(
     db: Session = Depends(get_db),
     principal: dict = Depends(require_user_auth),
 ):
-    """The caller's self-serve installation quotes — feasibility, estimate,
-    deposit, status. Behind the ``quotes_native_read_enabled``
+    """The caller's self-serve service quotes, coverage and review status.
+    Approved quotes also expose the amount due. Behind the ``quotes_native_read_enabled``
     read-flip flag: OFF serves the local CRM mirror (refreshed lazily),
     ON serves sub's native ``quotes`` table — same shape either way."""
     subscriber_id = _subscriber_id(principal)
@@ -1315,8 +1410,8 @@ def my_quote_request(
     db: Session = Depends(get_db),
     principal: dict = Depends(require_user_auth),
 ):
-    """Request a map-pinned installation quote. The dropped pin drives the
-    feasibility check (proximity to fiber) + estimate + deposit. Behind the
+    """Request a map-pinned installation or relocation quote. The destination
+    pin drives the relevant coverage check; staff approve pricing. Behind the
     ``quotes_native_write_enabled`` write-flip flag: OFF delegates to the
     retired mirror owner and refuses without contacting CRM; ON creates the
     quote in sub's native ``quotes`` table (no CRM link required, so
@@ -1331,8 +1426,22 @@ def my_quote_request(
             address=payload.address,
             region=payload.region,
             note=payload.note,
+            service_option=payload.service_option,
+            subscription_id=payload.subscription_id,
+            destination_offer_id=payload.destination_offer_id,
         )
-        return selfserve_service.build_portal_quote_payload(db, quote)
+        return selfserve_service.build_portal_quote_payload(
+            db, quote, customer_view=True
+        )
+    if (
+        payload.service_option.value != "fiber_installation"
+        or payload.subscription_id is not None
+        or payload.destination_offer_id is not None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Service requests are temporarily unavailable",
+        )
     return quotes_mirror.request_quote(
         db,
         subscriber_id,
@@ -1345,11 +1454,57 @@ def my_quote_request(
 
 
 @router.post(
+    "/quotes/{quote_id}/relocation/prepare",
+    response_model=RelocationQuotePrepareResponse,
+)
+def my_relocation_quote_prepare(
+    quote_id: UUID,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_user_auth),
+) -> RelocationQuotePrepareResponse:
+    """Prepare one approved full-charge invoice under the relocation owner."""
+    from app.services.owner_commands import CommandContext
+    from app.services.subscription_change_execution import (
+        PrepareRelocationQuoteCommand,
+        RelocationQuotePreparationError,
+        prepare_approved_relocation_quote,
+    )
+
+    subscriber_id = UUID(_subscriber_id(principal))
+    db_session_adapter.release_read_transaction(db)
+    try:
+        result = prepare_approved_relocation_quote(
+            db,
+            PrepareRelocationQuoteCommand(
+                context=CommandContext.system(
+                    actor=f"subscriber:{subscriber_id}",
+                    scope="service-intent:approved-relocation-quote",
+                    reason="Customer opened approved relocation booking",
+                    command_id=quote_id,
+                    idempotency_key=f"customer-relocation-quote:{quote_id}",
+                ),
+                quote_id=quote_id,
+                subscriber_id=subscriber_id,
+            ),
+        )
+    except RelocationQuotePreparationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    return RelocationQuotePrepareResponse(
+        request_id=result.request_id,
+        invoice_id=result.invoice_id,
+        amount=str(result.amount),
+        currency=result.currency,
+        replayed=result.replayed,
+    )
+
+
+@router.post(
     "/quotes/{quote_id}/deposit/initiate", response_model=QuoteDepositInitiateResponse
 )
 def my_quote_deposit_initiate(
     quote_id: UUID,
     payload: QuoteDepositInitiateRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: Session = Depends(get_db),
     principal: dict = Depends(require_user_auth),
 ):
@@ -1363,11 +1518,32 @@ def my_quote_deposit_initiate(
             quote_deposits.InitiateQuoteDepositCommand(
                 quote_id=quote_id,
                 idempotency_key=payload.idempotency_key,
-                redirect_url=payload.redirect_url or "dotmac://success",
+                redirect_url=(
+                    str(
+                        request.url_for(
+                            "my_quote_deposit_verify", quote_id=str(quote_id)
+                        )
+                    )
+                    if request
+                    else payload.redirect_url or "dotmac://success"
+                ),
             ),
         )
     except quote_deposits.QuoteDepositError as exc:
         raise HTTPException(status_code=409, detail=exc.message) from exc
+    except (DomainError, ValueError) as exc:
+        logger.warning(
+            "quote_deposit_initiation_unavailable",
+            extra={
+                "quote_id": str(quote_id),
+                "error_code": getattr(exc, "code", type(exc).__name__),
+            },
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=QUOTE_DEPOSIT_START_ERROR_MESSAGE,
+        ) from exc
     return outcome.to_response()
 
 

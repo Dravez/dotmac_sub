@@ -14,7 +14,7 @@ env 1 app/services/core_router_metrics.py
 env 1 app/services/credential_rotation_schedule.py
 env 1 app/services/crm_client.py
 env 1 app/services/email.py
-env 11 app/services/file_upload.py
+env 8 app/services/file_upload.py
 env 2 app/services/genieacs_client.py
 env 8 app/services/infrastructure_health.py
 env 1 app/services/ip_consistency_audit.py

@@ -128,6 +128,26 @@ def test_billing_kpis_exclude_non_billed_and_other_currency_rows(db_session):
     }
 
 
+def test_default_invoice_history_excludes_void_but_void_filter_retains_it(
+    db_session,
+):
+    sub = _subscriber(db_session)
+    visible = _invoice(db_session, sub, status=InvoiceStatus.issued)
+    voided = _invoice(db_session, sub, status=InvoiceStatus.void)
+
+    current_history = customer_portal_flow_billing.get_billing_page(
+        db_session, {"account_id": str(sub.id)}
+    )
+    voided_history = customer_portal_flow_billing.get_billing_page(
+        db_session, {"account_id": str(sub.id)}, status="void"
+    )
+
+    assert [invoice.id for invoice in current_history["invoices"]] == [visible.id]
+    assert current_history["total"] == 1
+    assert [invoice.id for invoice in voided_history["invoices"]] == [voided.id]
+    assert voided_history["total"] == 1
+
+
 def test_billing_kpis_marked_unavailable_when_owner_fails(db_session, monkeypatch):
     sub = _subscriber(db_session)
     _invoice(db_session, sub)

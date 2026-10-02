@@ -16,7 +16,10 @@ from app.services.sot_manifest import (
     SOTService,
     TransactionContract,
     TransactionMode,
+    owner_command_boundary_error_codes,
 )
+
+VENDOR_AUTOMATION_OWNER = "operations.vendor_project_automation"
 
 SERVICES: tuple[SOTService, ...] = (
     SOTService(
@@ -498,7 +501,8 @@ SERVICES: tuple[SOTService, ...] = (
         owns=(
             "vendor start/complete and staff verify/rework "
             "installation-project transitions",
-            "staff bidding publication and direct vendor assignment",
+            "staff bidding publication, direct vendor assignment, and "
+            "pre-field-work vendor unassignment or award cancellation",
             "durable vendor lifecycle actor/time/reason/event evidence",
             "typed vendor project lifecycle outbox events",
         ),
@@ -532,7 +536,10 @@ SERVICES: tuple[SOTService, ...] = (
                     canonical_writer="operations.vendor_project_lifecycle",
                 ),
                 ConcernContract(
-                    name=("staff bidding publication and direct vendor assignment"),
+                    name=(
+                        "staff bidding publication, direct vendor assignment, "
+                        "and pre-field-work vendor unassignment or award cancellation"
+                    ),
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "canonical installation-project lifecycle state",
@@ -594,8 +601,9 @@ SERVICES: tuple[SOTService, ...] = (
                     kind=AuthorityKind.CONTROL_INPUT,
                     source=(
                         "approved-to-in-progress start, in-progress-to-completed "
-                        "completion, completed-to-verified acceptance, and "
-                        "completed-to-in-progress rework transitions"
+                        "completion, completed-to-verified acceptance, "
+                        "completed-to-in-progress rework, and "
+                        "assigned-to-draft unassignment and approved-to-draft award-cancellation transitions"
                     ),
                 ),
             ),
@@ -646,6 +654,7 @@ SERVICES: tuple[SOTService, ...] = (
                 event_types=(
                     "vendor_project.started",
                     "vendor_project.completed",
+                    "vendor_project.unassigned",
                     "vendor_project.verified",
                     "vendor_project.rework_requested",
                 ),
@@ -691,6 +700,81 @@ SERVICES: tuple[SOTService, ...] = (
                 "tests/test_vendor_submission_proposals.py",
                 "tests/architecture/test_vendor_project_lifecycle_boundary.py",
             ),
+        ),
+    ),
+    SOTService(
+        name="operations.vendor_project_automation",
+        module="app.services.vendor_project_automation",
+        owns=("automation-driven vendor project transitions",),
+        depends_on=(
+            "operations.vendor_project_lifecycle",
+            "events.dispatcher",
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="automation-driven vendor project transitions",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "canonical installation-project lifecycle state",
+                        "typed automation transition command",
+                    ),
+                    canonical_writer="operations.vendor_project_automation",
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical installation-project lifecycle state",
+                    owner="operations.vendor_project_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="locked active InstallationProject status and vendor assignment",
+                ),
+                AuthorityInput(
+                    name="typed automation transition command",
+                    owner="operations.vendor_project_automation",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source="declared target status and Automation Center CommandContext provenance",
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.COORDINATOR_MANAGED,
+                boundary="The coordinator owns one transaction and invokes the vendor lifecycle participant flush-only.",
+                locking="The InstallationProject and participant transition eligibility are rechecked under FOR UPDATE.",
+                idempotency="The Automation Center event/rule/step identity is carried by CommandContext and the lifecycle evidence.",
+                retries="Retry the complete coordinator command after rollback; ambiguous external delivery is not retried by this owner.",
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    f"{VENDOR_AUTOMATION_OWNER}.not_found",
+                    f"{VENDOR_AUTOMATION_OWNER}.vendor_assignment_required",
+                    *owner_command_boundary_error_codes(VENDOR_AUTOMATION_OWNER),
+                ),
+                mapping_owner="automation action adapters",
+                fail_closed_on=("missing project", "missing vendor assignment"),
+            ),
+            events=EventContract(
+                event_types=(
+                    "vendor_project.started",
+                    "vendor_project.completed",
+                ),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility="The participant preserves the existing vendor lifecycle event envelope.",
+                replay="InstallationProject lifecycle evidence and event identity reconstruct the transition.",
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="operations.vendor_project_automation",
+                verification="Automation action adapter and vendor participant boundary tests.",
+                cutover_gate="Native vendor status rules call this coordinator and never call the participant directly.",
+                fallback_retirement="No direct automation call to the participant is admitted.",
+            ),
+            steward="vendor operations",
+            design_refs=(
+                "docs/SOT_RELATIONSHIP_MAP.md",
+                "docs/adr/0002-owner-command-transaction-boundary.md",
+            ),
+            test_refs=("tests/architecture/test_vendor_project_lifecycle_boundary.py",),
         ),
     ),
     SOTService(

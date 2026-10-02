@@ -2,6 +2,178 @@
 
 All notable changes to DotMac Sub are tracked here.
 
+## 9.9.0 - 2026-10-01
+
+- Version bump.
+
+## 9.8.2 - 2026-10-01
+
+- Version bump.
+
+## 9.8.1 - 2026-10-01
+
+- Version bump.
+
+## 9.8.0 - 2026-09-30
+
+- Version bump.
+
+## 9.6.0 - 2026-09-29
+
+- Version bump.
+
+## 9.5.4 - 2026-09-29
+
+- Version bump.
+
+## 9.5.3 - 2026-09-29
+
+- Version bump.
+
+## 9.5.2 - 2026-09-29
+
+- Version bump.
+
+## 9.5.1 - 2026-09-29
+
+- Version bump.
+
+## 9.5.0 - 2026-09-28
+
+- Version bump.
+
+## 9.2.0 - 2026-09-28
+
+- Version bump.
+
+## 9.0.0 - 2026-09-27
+
+- Version bump.
+
+## 8.64.11 - 2026-09-27
+
+- Version bump.
+
+## 8.64.9 - 2026-09-27
+
+- Version bump.
+
+## 8.64.8 - 2026-09-27
+
+- Version bump.
+
+## 8.64.6 - 2026-09-27
+
+- Version bump.
+
+## 8.64.2 - 2026-09-26
+
+- Version bump.
+
+## 8.64.1 - 2026-09-26
+
+- Version bump.
+
+## 8.63.0 - 2026-09-26
+
+- Version bump.
+
+## 8.62.9 - 2026-09-26
+
+- Version bump.
+
+## 8.62.7 - 2026-09-25
+
+- Version bump.
+
+## 8.62.4 - 2026-09-25
+
+- Version bump.
+
+## 8.62.3 - 2026-09-25
+
+- Version bump.
+
+## 8.62.0 - 2026-09-25
+
+- Version bump.
+
+## 8.61.2 - 2026-09-25
+
+- Version bump.
+
+## 8.60.1 - 2026-09-24
+
+- Version bump.
+
+## 8.59.0 - 2026-09-24
+
+- Version bump.
+
+## 8.58.4 - 2026-09-23
+
+- Version bump.
+
+## 8.58.3 - 2026-09-23
+
+- Version bump.
+
+## 8.58.2 - 2026-09-22
+
+- Version bump.
+
+## 8.57.1 - 2026-09-22
+
+- Version bump.
+
+## 8.57.0 - 2026-09-21
+
+- Version bump.
+
+## 8.56.5 - 2026-09-21
+
+- Version bump.
+
+## 8.56.2 - 2026-09-20
+
+- Version bump.
+
+## 8.56.1 - 2026-09-20
+
+- Version bump.
+
+## 8.56.0 - 2026-09-19
+
+- Version bump.
+
+## 8.55.1 - 2026-09-19
+
+- Version bump.
+
+## 8.55.0 - 2026-09-18
+
+- Version bump.
+
+## 8.53.1 - 2026-09-18
+
+- Version bump.
+
+## 8.53.0 - 2026-09-18
+
+- Version bump.
+
+## 8.52.0 - 2026-09-17
+
+- Version bump.
+
+## 8.51.1 - 2026-09-16
+
+- Version bump.
+
+## 8.50.0 - 2026-09-15
+
+- Version bump.
+
 ## 8.49.0 - 2026-09-15
 
 - Version bump.

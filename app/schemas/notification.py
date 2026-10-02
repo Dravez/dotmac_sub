@@ -12,6 +12,7 @@ from app.models.notification import (
     DeliveryStatus,
     NotificationChannel,
     NotificationStatus,
+    NotificationTemplatePurpose,
     SuppressionReason,
     SuppressionScope,
 )
@@ -27,6 +28,7 @@ class NotificationTemplateBase(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     code: str = Field(min_length=1, max_length=120)
     channel: NotificationChannel
+    purpose: NotificationTemplatePurpose = NotificationTemplatePurpose.general
     subject: str | None = Field(default=None, max_length=200)
     body: str = Field(min_length=1)
     conditions: dict[str, Any] = Field(default_factory=dict)
@@ -41,6 +43,7 @@ class NotificationTemplateUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     code: str | None = Field(default=None, min_length=1, max_length=120)
     channel: NotificationChannel | None = None
+    purpose: NotificationTemplatePurpose | None = None
     subject: str | None = Field(default=None, max_length=200)
     body: str | None = Field(default=None, min_length=1)
     conditions: dict[str, Any] | None = None

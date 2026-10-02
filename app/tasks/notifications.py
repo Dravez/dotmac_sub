@@ -502,6 +502,7 @@ def _eligible_notification_query(
 def _empty_delivery_stats(*, expired: int = 0) -> dict[str, int]:
     return {
         "delivered": 0,
+        "submitted": 0,
         "retried": 0,
         "failed": 0,
         "expired": expired,
@@ -547,6 +548,7 @@ def _deliver_notification_queue_stats(
     )
     stats = _empty_delivery_stats(expired=expired)
     delivered = stats["delivered"]
+    submitted = stats["submitted"]
     retried = stats["retried"]
     failed = stats["failed"]
     reclaimed = stats["reclaimed"]
@@ -1439,10 +1441,16 @@ def _deliver_notification_queue_stats(
                 notification.last_error = str(exc)
 
         if success:
-            notification.status = NotificationStatus.delivered
-            notification.sent_at = datetime.now(UTC)
-            notification.last_error = None
-            delivered += 1
+            if (
+                notification.channel == NotificationChannel.email
+                and notification.status == NotificationStatus.submitted
+            ):
+                submitted += 1
+            else:
+                notification.status = NotificationStatus.delivered
+                notification.sent_at = datetime.now(UTC)
+                notification.last_error = None
+                delivered += 1
         else:
             notification.retry_count = (notification.retry_count or 0) + 1
             if notification.retry_count >= max_retries:
@@ -1501,6 +1509,7 @@ def _deliver_notification_queue_stats(
         )
     delivery_stats: dict[str, int] = {
         "delivered": delivered,
+        "submitted": submitted,
         "retried": retried,
         "failed": failed,
         "expired": expired,
@@ -1578,6 +1587,36 @@ def _record_notification_task_result(
     session.commit()
 
 
+def _notification_queue_operational_event(
+    result: dict[str, int],
+) -> OperationalLogEvent:
+    failed = result["failed"] + result.get("talk_failed", 0)
+    retried = result["retried"] + result.get("talk_retried", 0)
+    if failed > 0:
+        outcome = OperationalOutcome.COMPLETED_WITH_FAILURES
+    elif retried > 0:
+        outcome = OperationalOutcome.COMPLETED_WITH_RETRIES
+    else:
+        outcome = OperationalOutcome.COMPLETED
+    return OperationalLogEvent(
+        name=OperationalEventName.NOTIFICATION_QUEUE_PROCESSED,
+        outcome=outcome,
+        component="notifications",
+        counters={
+            "delivered": result["delivered"],
+            "retried": result["retried"],
+            "failed": result["failed"],
+            "expired": result["expired"],
+            "rate_limited": result["rate_limited"],
+            "talk_claimed": result.get("talk_claimed", 0),
+            "talk_delivered": result.get("talk_delivered", 0),
+            "talk_retried": result.get("talk_retried", 0),
+            "talk_failed": result.get("talk_failed", 0),
+            "talk_reconciled": result.get("talk_reconciled", 0),
+        },
+    )
+
+
 @celery_app.task(name="app.tasks.notifications.deliver_notification_queue")
 def deliver_notification_queue() -> dict[str, int]:
     """Process queued notifications and retry failed ones."""
@@ -1613,22 +1652,7 @@ def deliver_notification_queue() -> dict[str, int]:
         )
         log_operational_event(
             logger,
-            OperationalLogEvent(
-                name=OperationalEventName.NOTIFICATION_QUEUE_PROCESSED,
-                outcome=(
-                    OperationalOutcome.COMPLETED_WITH_RETRIES
-                    if result["retried"] > 0
-                    else OperationalOutcome.COMPLETED
-                ),
-                component="notifications",
-                counters={
-                    "delivered": result["delivered"],
-                    "retried": result["retried"],
-                    "failed": result["failed"],
-                    "expired": result["expired"],
-                    "rate_limited": result["rate_limited"],
-                },
-            ),
+            _notification_queue_operational_event(result),
         )
         return result
 

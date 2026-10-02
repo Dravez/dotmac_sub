@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationActionCapability,
+    AutomationActionInput,
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationConditionField,
+    AutomationDomainCapabilities,
+    AutomationOperator,
+    AutomationScriptTargetCapability,
+    AutomationTriggerCapability,
+    AutomationValueType,
+    LegacyAutomationSurface,
+)
+from app.services.custom_field_contracts import (
+    CustomFieldDomainCapabilities,
+    CustomFieldTargetCapability,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -19,6 +36,61 @@ from app.services.sot_manifest import (
     owner_command_boundary_error_codes,
 )
 from app.services.sot_registry.model import DomainSOT
+
+_SUPPORT_WORKFLOW_FIELDS = (
+    AutomationConditionField(
+        key="status",
+        label="Ticket status",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=(
+            "new",
+            "open",
+            "pending",
+            "waiting_on_customer",
+            "lastmile_rerun",
+            "site_under_construction",
+            "on_hold",
+            "pending_confirmation",
+            "closed",
+            "canceled",
+        ),
+    ),
+    AutomationConditionField(
+        key="priority",
+        label="Priority",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=("lower", "low", "medium", "normal", "high", "urgent"),
+    ),
+    AutomationConditionField(
+        key="channel",
+        label="Channel",
+        value_type=AutomationValueType.enum,
+        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+        enum_values=("web", "email", "phone", "chat", "api"),
+    ),
+    AutomationConditionField(
+        key="customer_id",
+        label="Customer",
+        value_type=AutomationValueType.uuid,
+        operators=(AutomationOperator.equals, AutomationOperator.in_values),
+    ),
+)
+
+_SUPPORT_ASSIGNMENT_FIELDS = (
+    *_SUPPORT_WORKFLOW_FIELDS,
+    AutomationConditionField(
+        key="service_team_id",
+        label="Service team",
+        value_type=AutomationValueType.uuid,
+        operators=(
+            AutomationOperator.equals,
+            AutomationOperator.is_empty,
+            AutomationOperator.is_not_empty,
+        ),
+    ),
+)
 
 DOMAIN = DomainSOT(
     domain="support_operations",
@@ -87,7 +159,7 @@ DOMAIN = DomainSOT(
                 ),
                 events=EventContract(
                     event_types=("ticket.assignment_rule_changed",),
-                    schema_version=1,
+                    schema_version=2,
                     delivery_owner="observability.audit_log",
                     compatibility="Version 1 records rule identity and change type only.",
                     replay="TicketAssignmentRule rows plus audit evidence reconstruct changes.",
@@ -547,6 +619,7 @@ DOMAIN = DomainSOT(
                         kind=AuthorityKind.CONTROL_INPUT,
                         source=(
                             "typed TicketCreate, TicketUpdate, TicketMentionTarget, "
+                            "AssignTicketServiceTeamFromAutomationCommand, "
                             "comment, merge, link, resolution, typed "
                             "AttachmentMeta with private StoredFile UUID, bounded comment "
                             "attachment-reference repair, and bulk command inputs "
@@ -711,6 +784,8 @@ DOMAIN = DomainSOT(
                         "ticket_comment_mention_invalid",
                         "ticket_comment_mention_target_unavailable",
                         "ticket_comment_attachment_repair_scope_invalid",
+                        "automation_assignment_team_unavailable",
+                        "automation_priority_invalid",
                         *owner_command_boundary_error_codes("support.ticket_lifecycle"),
                     ),
                     mapping_owner=(
@@ -727,20 +802,27 @@ DOMAIN = DomainSOT(
                 events=EventContract(
                     event_types=(
                         "ticket.created",
+                        "support.ticket.created",
                         "ticket.assigned",
+                        "ticket.status_changed",
+                        "ticket.priority_changed",
                         "ticket.resolution_requested",
                         "ticket.resolution_confirmed",
                         "ticket.resolution_disputed",
                         "support.resolution_confirmation_due",
                         "support.ticket_sla_breach_due",
                     ),
-                    schema_version=1,
+                    schema_version=2,
                     delivery_owner="events.dispatcher",
                     compatibility=(
                         "Version 1 carries stable Ticket/account identifiers and bounded "
                         "change evidence, including the explicit creation consequence mode; "
-                        "private comment bodies and attachments are not placed in transport "
-                        "events."
+                        "support.ticket.created schema 4 carries tenant and Ticket identity, "
+                        "priority, ticket type, channel, region, and canonical customer "
+                        "identity for the declared Automation Center conditions. The "
+                        "status, priority, and assignment change events carry the same "
+                        "bounded ticket identity and current routing fields. Private "
+                        "comment bodies and attachments are not placed in transport events."
                     ),
                     replay=(
                         "Canonical Ticket rows, official comments, links/merges, access "
@@ -1139,12 +1221,18 @@ DOMAIN = DomainSOT(
                     fail_closed_on=("invalid ticket identifier",),
                 ),
                 events=EventContract(
-                    event_types=("ticket.sla_breached",),
+                    event_types=(
+                        "ticket.sla_breached",
+                        "support.ticket.sla_breached",
+                    ),
                     schema_version=1,
                     delivery_owner="operations.sla_escalation",
                     compatibility=(
-                        "Version 1 carries ticket identity, configured due time, "
-                        "priority, title, target URL, and support category metadata."
+                        "Operational escalation version 1 carries ticket identity, "
+                        "configured due time, priority, title, target URL, and support "
+                        "category metadata. Automation version 1 carries operator "
+                        "tenant, Ticket and clock identity, breach time, priority, "
+                        "and ticket type."
                     ),
                     replay=(
                         "Ticket, SlaClock, SlaBreach, and configured operational "
@@ -1181,6 +1269,216 @@ DOMAIN = DomainSOT(
                     "tests/test_sla_assignment.py",
                     "tests/test_operational_sla_policy_ui.py",
                     "tests/architecture/test_operational_sla_policy_ownership.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="support.ticket_sla_service_consequence",
+            module="app.services.ticket_sla_service_automation",
+            owns=(
+                "ticket SLA-breach service suspension consequence",
+                "ticket resolution SLA-breach service pause consequence",
+                "ticket pause resume eligibility preview",
+            ),
+            depends_on=(
+                "support.ticket_lifecycle",
+                "access.subscription_lifecycle",
+                "automation.execution",
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="ticket SLA-breach service suspension consequence",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "canonical support ticket customer link",
+                            "canonical subscription lifecycle state",
+                            "durable automation action identity",
+                        ),
+                    ),
+                    ConcernContract(
+                        name="ticket resolution SLA-breach service pause consequence",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "canonical support ticket customer link",
+                            "canonical subscription lifecycle state",
+                            "durable automation action identity",
+                        ),
+                    ),
+                    ConcernContract(
+                        name="ticket pause resume eligibility preview",
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "canonical ticket lifecycle state",
+                            "active ticket service pause evidence",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="canonical ticket lifecycle state",
+                        owner="support.ticket_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "current Ticket status, customer link, and resolution state"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical support ticket customer link",
+                        owner="support.ticket_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Locked Ticket customer_account_id with the admitted "
+                            "subscriber_id compatibility fallback"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical subscription lifecycle state",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Locked Subscription rows and active EnforcementLock "
+                            "rows for the linked customer account"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="active ticket service pause evidence",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "active SubscriptionPauseCause and SubscriptionPauseEpisode "
+                            "rows for the requested subscription"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="durable automation action identity",
+                        owner="automation.execution",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Event, rule, immutable rule version, ordered step, and "
+                            "stable runtime command identity"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.COORDINATOR_MANAGED,
+                    boundary=(
+                        "One owner command locks the Ticket and candidate services, "
+                        "then delegates suspension or pause episode, lifecycle, and "
+                        "billing-anchor writes to access.subscription_lifecycle as "
+                        "flush-only participants."
+                    ),
+                    locking=(
+                        "The Ticket, exact prior automation lock, and active service "
+                        "candidates are selected with row locks."
+                    ),
+                    idempotency=(
+                        "The event, rule version, and step derive one stable lock "
+                        "source; an exact active source is returned as replay."
+                    ),
+                    retries=(
+                        "Retry the complete owner command; exact prior success replays "
+                        "and zero or multiple active services fail closed."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "support.ticket_sla_service_consequence.ticket_not_found",
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "ticket_already_resolved"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "customer_account_missing"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "active_service_not_found"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "active_service_ambiguous"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "sla_breach_not_authoritative"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_cause_not_found"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_evidence_incomplete"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "pause_subscription_mismatch"
+                        ),
+                        (
+                            "support.ticket_sla_service_consequence."
+                            "resume_reason_required"
+                        ),
+                        ("support.ticket_sla_service_consequence.stale_resume_preview"),
+                        ("support.ticket_sla_service_consequence.resume_ineligible"),
+                        ("support.ticket_sla_service_consequence.idempotency_conflict"),
+                        *owner_command_boundary_error_codes(
+                            "support.ticket_sla_service_consequence"
+                        ),
+                    ),
+                    mapping_owner="automation action adapter",
+                    fail_closed_on=(
+                        "missing Ticket or customer account link",
+                        "zero or multiple active linked services",
+                        "conflicting replay evidence",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=(
+                        "subscription.paused",
+                        "subscription.pause_resumed",
+                        "subscription.suspended",
+                        "enforcement_lock.created",
+                    ),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The established access lifecycle event schemas are unchanged; "
+                        "automation provenance is retained in source and command evidence."
+                    ),
+                    replay=(
+                        "Automation run/step evidence and the exact enforcement-lock "
+                        "source reconstruct the consequence."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="support.ticket_sla_service_consequence",
+                    verification=(
+                        "focused owner, capability, runtime, event, and UI tests"
+                    ),
+                    cutover_gate=(
+                        "the SLA-breach trigger, typed action adapter, and fail-closed "
+                        "coordinator are admitted together"
+                    ),
+                    fallback_retirement=(
+                        "no legacy SLA rule is created or reinterpreted"
+                    ),
+                ),
+                steward="support and access operations",
+                design_refs=(
+                    "docs/designs/AUTOMATION_CENTER_SOT.md",
+                    "docs/designs/SUPPORT_TICKET_LIFECYCLE_SOT.md",
+                    "docs/designs/SUBSCRIPTION_PAUSE_LIFECYCLE.md",
+                    "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_ticket_sla_service_automation.py",
+                    "tests/test_sla_assignment.py",
+                    "tests/test_automation_ticket_assignment_drafts.py",
+                    "tests/architecture/test_automation_runtime_boundary.py",
                 ),
             ),
         ),
@@ -1708,4 +2006,422 @@ DOMAIN = DomainSOT(
     rule="Support adapters request ticket mutations through the ticket service. "
     "The lifecycle owner validates raw statuses; settings may expose a "
     "subset but cannot add states or define their semantic presentation.",
+    automation=AutomationDomainCapabilities(
+        target_types=("support.ticket",),
+        script_targets=(
+            AutomationScriptTargetCapability(
+                key="support.ticket",
+                label="Support ticket",
+                entity_type="support.ticket",
+                client_events=("form.load", "field.change", "form.validate"),
+                server_events=(
+                    "support.ticket.created",
+                    "ticket.assigned",
+                    "ticket.status_changed",
+                    "ticket.priority_changed",
+                    "ticket.resolution_requested",
+                    "ticket.resolution_confirmed",
+                    "ticket.resolution_disputed",
+                ),
+                read_permission="support:ticket:read",
+                write_permission="support:ticket:update",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+            ),
+        ),
+        catalog_items=(
+            AutomationCatalogItem(
+                key="support.ticket.assignment_rules",
+                label="Ticket assignment rules",
+                group="Support",
+                state=AutomationCatalogState.managed_elsewhere,
+                explanation="Existing assignment rules remain on their current page until they are separately moved.",
+                management_path="/admin/support/assignment-rules",
+            ),
+            AutomationCatalogItem(
+                key="support.ticket.legacy_automation",
+                label="Legacy ticket automation rules",
+                group="Support",
+                state=AutomationCatalogState.managed_elsewhere,
+                explanation="Existing ticket rules remain on their current page and are checked for conflicts.",
+                management_path="/admin/support/automation",
+            ),
+            AutomationCatalogItem(
+                key="support.ticket.center_rules",
+                label="Automation Center ticket rules",
+                group="Support",
+                state=AutomationCatalogState.available,
+                explanation="Create a draft from a ticket creation, assignment, status, priority, or resolution trigger and its typed actions, then activate it.",
+                trigger_keys=(
+                    "support.ticket.created",
+                    "support.ticket.assigned",
+                    "support.ticket.status_changed",
+                    "support.ticket.priority_changed",
+                    "support.ticket.resolution_requested",
+                    "support.ticket.resolution_confirmed",
+                    "support.ticket.resolution_disputed",
+                ),
+                action_keys=(
+                    "support.ticket.assign_service_team",
+                    "support.ticket.set_priority",
+                ),
+            ),
+            AutomationCatalogItem(
+                key="support.ticket.identity_review_stop",
+                label="Identity-review safety stop",
+                group="Support",
+                state=AutomationCatalogState.unavailable,
+                explanation="This is a fixed safety check today; it has no configurable Automation Center action.",
+            ),
+            AutomationCatalogItem(
+                key="support.work_order.result_projection",
+                label="Work-order result projection",
+                group="Support",
+                state=AutomationCatalogState.unavailable,
+                explanation="This fixed result update is not yet available as a configurable trigger and action.",
+            ),
+            AutomationCatalogItem(
+                key="support.resolution_confirmation",
+                label="Resolution confirmation",
+                group="Support",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing timer and confirmation flow are not yet connected to the rule builder.",
+            ),
+            AutomationCatalogItem(
+                key="support.survey_invitation",
+                label="Survey invitation",
+                group="Support",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing survey trigger is not yet available as a configurable rule action.",
+            ),
+            AutomationCatalogItem(
+                key="support.ticket.sla",
+                label="Ticket SLA warning and breach",
+                group="Service levels",
+                state=AutomationCatalogState.managed_elsewhere,
+                explanation="Existing ticket SLA policies remain in their current settings and policy pages.",
+                management_path="/admin/system/ticket-settings",
+            ),
+            AutomationCatalogItem(
+                key="projects.sla",
+                label="Project and task SLA warning and breach",
+                group="Service levels",
+                state=AutomationCatalogState.unavailable,
+                explanation="Project SLA timers are not yet available as configurable Automation Center rules.",
+            ),
+            AutomationCatalogItem(
+                key="service_levels.retired_sla_polling",
+                label="Old SLA polling task",
+                group="Service levels",
+                state=AutomationCatalogState.retired,
+                explanation="The task only consumes retired messages and does no business work; developers must restore and review it before use.",
+            ),
+        ),
+        triggers=(
+            AutomationTriggerCapability(
+                key="support.ticket.created",
+                label="New support ticket created",
+                event_type="support.ticket.created",
+                event_schema_version=4,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(
+                    AutomationConditionField(
+                        key="priority",
+                        label="Priority",
+                        value_type=AutomationValueType.enum,
+                        operators=(AutomationOperator.equals,),
+                        enum_values=(
+                            "lower",
+                            "low",
+                            "medium",
+                            "normal",
+                            "high",
+                            "urgent",
+                        ),
+                    ),
+                    AutomationConditionField(
+                        key="customer_id",
+                        label="Customer",
+                        value_type=AutomationValueType.uuid,
+                        operators=(AutomationOperator.in_values,),
+                    ),
+                    AutomationConditionField(
+                        key="ticket_type",
+                        label="Ticket type",
+                        value_type=AutomationValueType.string,
+                        operators=(
+                            AutomationOperator.equals,
+                            AutomationOperator.not_equals,
+                            AutomationOperator.contains,
+                            AutomationOperator.is_empty,
+                            AutomationOperator.is_not_empty,
+                        ),
+                    ),
+                    AutomationConditionField(
+                        key="channel",
+                        label="Channel",
+                        value_type=AutomationValueType.enum,
+                        operators=(
+                            AutomationOperator.equals,
+                            AutomationOperator.not_equals,
+                        ),
+                        enum_values=("web", "email", "phone", "chat", "api"),
+                    ),
+                    AutomationConditionField(
+                        key="region",
+                        label="Region",
+                        value_type=AutomationValueType.string,
+                        operators=(
+                            AutomationOperator.equals,
+                            AutomationOperator.not_equals,
+                            AutomationOperator.contains,
+                            AutomationOperator.is_empty,
+                            AutomationOperator.is_not_empty,
+                        ),
+                    ),
+                ),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+                compatible_event_schema_versions=(3,),
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.assigned",
+                label="Support ticket assigned",
+                event_type="ticket.assigned",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_ASSIGNMENT_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.status_changed",
+                label="Support ticket status changed",
+                event_type="ticket.status_changed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_WORKFLOW_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.priority_changed",
+                label="Support ticket priority changed",
+                event_type="ticket.priority_changed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=_SUPPORT_WORKFLOW_FIELDS,
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_requested",
+                label="Ticket resolution requested",
+                event_type="ticket.resolution_requested",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_confirmed",
+                label="Ticket resolution confirmed",
+                event_type="ticket.resolution_confirmed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.resolution_disputed",
+                label="Ticket resolution disputed",
+                event_type="ticket.resolution_disputed",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="support.ticket.sla_breached",
+                label="Support ticket SLA breached",
+                event_type="support.ticket.sla_breached",
+                event_schema_version=1,
+                entity_type="support.ticket",
+                tenant_id_field="tenant_id",
+                entity_id_field="ticket_id",
+                fields=(
+                    AutomationConditionField(
+                        key="priority",
+                        label="Priority",
+                        value_type=AutomationValueType.enum,
+                        operators=(AutomationOperator.equals,),
+                        enum_values=(
+                            "lower",
+                            "low",
+                            "medium",
+                            "normal",
+                            "high",
+                            "urgent",
+                        ),
+                    ),
+                    AutomationConditionField(
+                        key="ticket_type",
+                        label="Ticket type",
+                        value_type=AutomationValueType.string,
+                        operators=(AutomationOperator.equals,),
+                    ),
+                ),
+                author_permission="support:ticket:read",
+                runtime_enabled=True,
+            ),
+        ),
+        actions=(
+            AutomationActionCapability(
+                key="support.ticket.assign_service_team",
+                label="Assign service team",
+                entity_type="support.ticket",
+                command_owner="support.ticket_lifecycle",
+                command_name="assign_ticket_service_team_from_automation",
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="service_team_id",
+                        label="Service team",
+                        value_type=AutomationValueType.uuid,
+                    ),
+                ),
+                author_permission="support:ticket:update",
+                runtime_scope="support:ticket:update",
+                idempotency="event, rule version, and step",
+                runtime_enabled=True,
+            ),
+            AutomationActionCapability(
+                key="support.ticket.set_priority",
+                label="Set ticket priority",
+                entity_type="support.ticket",
+                command_owner="support.ticket_lifecycle",
+                command_name="set_ticket_priority_from_automation",
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="priority",
+                        label="Priority",
+                        value_type=AutomationValueType.enum,
+                        enum_values=(
+                            "lower",
+                            "low",
+                            "medium",
+                            "normal",
+                            "high",
+                            "urgent",
+                        ),
+                    ),
+                ),
+                author_permission="support:ticket:update",
+                runtime_scope="support:ticket:update",
+                idempotency="event, rule version, and step",
+                runtime_enabled=True,
+            ),
+            AutomationActionCapability(
+                key="support.ticket.pause_unique_active_service",
+                label=(
+                    "Pause the linked customer's active service and preserve "
+                    "unused service time"
+                ),
+                entity_type="support.ticket",
+                command_owner="support.ticket_sla_service_consequence",
+                command_name=("pause_unique_active_service_for_ticket_sla_breach"),
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="service_selection_policy",
+                        label="Service selection policy",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("unique_active_subscription",),
+                    ),
+                    AutomationActionInput(
+                        key="resume_policy",
+                        label="Resume policy",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("manual_after_ticket_resolution",),
+                    ),
+                    AutomationActionInput(
+                        key="billing_policy",
+                        label="Billing treatment",
+                        value_type=AutomationValueType.enum,
+                        enum_values=("extend_by_effective_pause_duration",),
+                    ),
+                ),
+                author_permission="subscription:pause",
+                runtime_scope="subscription:pause",
+                idempotency="event, rule version, step, and pause-cause source",
+                conflict_scope="support.ticket.sla_service_access_consequence",
+                runtime_enabled=True,
+            ),
+            AutomationActionCapability(
+                key="support.ticket.suspend_unique_active_service",
+                label=(
+                    "Suspend the linked customer's only active service "
+                    "(billing unchanged; ambiguous links fail closed)"
+                ),
+                entity_type="support.ticket",
+                command_owner="support.ticket_sla_service_consequence",
+                command_name=("suspend_unique_active_service_for_ticket_sla_breach"),
+                input_schema_version=1,
+                inputs=(),
+                author_permission="subscription:suspend",
+                runtime_scope="subscription:suspend",
+                idempotency="event, rule version, step, and enforcement-lock source",
+                conflict_scope="support.ticket.sla_service_access_consequence",
+                runtime_enabled=True,
+            ),
+        ),
+        legacy_surfaces=(
+            LegacyAutomationSurface(
+                key="support.ticket_assignment_rules",
+                label="Ticket assignment rules",
+                owner_service="support.ticket_assignment_evaluation",
+                management_path="/admin/support/assignment-rules",
+                conflict_scopes=(),
+            ),
+            LegacyAutomationSurface(
+                key="support.ticket_creation_automation",
+                label="Ticket creation automation",
+                owner_service="support.ticket_automation_rule_configuration",
+                management_path="/admin/support/automation",
+                conflict_scopes=(),
+            ),
+        ),
+    ),
+    custom_fields=CustomFieldDomainCapabilities(
+        targets=(
+            CustomFieldTargetCapability(
+                key="support_ticket",
+                label="Support tickets",
+                entity_id_type="uuid",
+                read_permission="support:ticket:read",
+                write_permission="support:ticket:update",
+                create_permission="support:ticket:create",
+                detail_path_template="/admin/support/tickets/{target_id}",
+                maximum_active_fields=50,
+            ),
+        ),
+    ),
 )

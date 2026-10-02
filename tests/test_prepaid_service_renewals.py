@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -26,6 +26,8 @@ from app.models.catalog import (
     BillingMode,
     Subscription,
     SubscriptionStatus,
+    UsageAllowance,
+    UsageAllowanceResetBasis,
 )
 from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.event_store import EventStore
@@ -37,6 +39,11 @@ from app.services.domain_errors import DomainError
 from app.services.events.handlers.prepaid_renewal import PrepaidRenewalHandler
 from app.services.events.types import Event, EventType
 from app.services.owner_commands import CommandContext
+from app.services.prepaid_calendar_contracts import (
+    DocumentedPrepaidServicePeriod,
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidServicePeriodQuery,
+)
 from app.services.prepaid_service_renewals import (
     CorrectLegacyRenewalTaxInvoiceCommand,
     ExecuteReviewedPrepaidServiceRenewalCommand,
@@ -45,6 +52,7 @@ from app.services.prepaid_service_renewals import (
     LegacyRenewalTaxInvoiceCorrectionQuery,
     PrepaidServiceRenewalError,
     PrepaidSettlementPeriodQuery,
+    PrepaidSubscriptionSettlementPeriodQuery,
     RunDuePrepaidServiceRenewalsCommand,
     apply_due_prepaid_service_after_funding_change,
     confirm_prepaid_service_renewal,
@@ -54,6 +62,8 @@ from app.services.prepaid_service_renewals import (
     preview_legacy_prepaid_renewal_tax_invoice_correction,
     preview_prepaid_service_renewal,
     resolve_prepaid_settlement_period,
+    resolve_prepaid_subscription_settlement_period,
+    resolve_reviewed_prepaid_service_period,
     run_due_prepaid_service_renewals,
 )
 from tests.prepaid_funding_helpers import (
@@ -91,6 +101,119 @@ def test_settlement_period_preserves_declared_month_end_clamp():
     assert period.ends_on.isoformat() == "2026-03-01"
     assert period.starts_at == datetime(2026, 1, 31, 23, tzinfo=UTC)
     assert period.ends_at == datetime(2026, 2, 28, 23, tzinfo=UTC)
+
+
+def test_reviewed_dates_default_to_lagos_midnight():
+    period = resolve_reviewed_prepaid_service_period(
+        ReviewedPrepaidServicePeriodQuery(date(2026, 6, 29), date(2026, 7, 29))
+    )
+    assert period.starts_at == datetime(2026, 6, 28, 23, tzinfo=UTC)
+    assert period.ends_at == datetime(2026, 7, 28, 23, tzinfo=UTC)
+    assert period.timezone_name == "Africa/Lagos"
+
+
+def test_reviewed_documentary_continuation_preserves_utc_instants():
+    period = resolve_reviewed_prepaid_service_period(
+        ReviewedPrepaidServicePeriodQuery(
+            starts_on=date(2026, 7, 29),
+            ends_on=date(2026, 8, 28),
+            basis=ReviewedPrepaidCalendarBasis.documented_anniversary,
+            documented_period=DocumentedPrepaidServicePeriod(
+                datetime(2026, 6, 29, tzinfo=UTC),
+                datetime(2026, 7, 29, tzinfo=UTC),
+            ),
+        )
+    )
+    assert period.starts_at == datetime(2026, 7, 29, tzinfo=UTC)
+    assert period.ends_at == datetime(2026, 8, 28, tzinfo=UTC)
+    assert period.starts_on == date(2026, 7, 29)
+    assert period.ends_on == date(2026, 8, 28)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        None,
+        DocumentedPrepaidServicePeriod(datetime(2026, 6, 29), datetime(2026, 7, 29)),
+        DocumentedPrepaidServicePeriod(
+            datetime(2026, 6, 29, tzinfo=UTC), datetime(2026, 7, 29, 1, tzinfo=UTC)
+        ),
+        DocumentedPrepaidServicePeriod(
+            datetime(2026, 7, 29, tzinfo=UTC), datetime(2026, 6, 29, tzinfo=UTC)
+        ),
+    ],
+)
+def test_reviewed_documentary_calendar_requires_exact_reference(
+    reference: DocumentedPrepaidServicePeriod | None,
+):
+    with pytest.raises(PrepaidServiceRenewalError) as exc:
+        resolve_reviewed_prepaid_service_period(
+            ReviewedPrepaidServicePeriodQuery(
+                date(2026, 7, 29),
+                date(2026, 8, 28),
+                ReviewedPrepaidCalendarBasis.documented_anniversary,
+                reference,
+            )
+        )
+    assert exc.value.code == "financial.prepaid_service_renewals.invalid_period"
+
+
+def test_business_midnight_cannot_silently_accept_documentary_override():
+    with pytest.raises(PrepaidServiceRenewalError):
+        resolve_reviewed_prepaid_service_period(
+            ReviewedPrepaidServicePeriodQuery(
+                date(2026, 7, 29),
+                date(2026, 8, 28),
+                documented_period=DocumentedPrepaidServicePeriod(
+                    datetime(2026, 6, 29, tzinfo=UTC), datetime(2026, 7, 29, tzinfo=UTC)
+                ),
+            )
+        )
+
+
+def test_capped_renewal_restarts_validity_even_with_live_coverage(
+    db_session, subscriber, subscription
+):
+    allowance = UsageAllowance(
+        name="Capped 100GB / 30 days",
+        included_gb=100,
+        reset_basis=UsageAllowanceResetBasis.renewal_cycle,
+        validity_days=30,
+        is_active=True,
+    )
+    db_session.add(allowance)
+    db_session.flush()
+    subscription.offer.usage_allowance_id = allowance.id
+    subscription.billing_mode = BillingMode.prepaid
+    subscription.status = SubscriptionStatus.active
+    effective_at = datetime(2026, 9, 14, 12, tzinfo=UTC)
+    existing_end = datetime(2026, 9, 25, 23, tzinfo=UTC)
+    db_session.add(
+        ServiceEntitlement(
+            account_id=subscriber.id,
+            subscription_id=subscription.id,
+            starts_at=datetime(2026, 8, 25, 23, tzinfo=UTC),
+            ends_at=existing_end,
+            amount_funded=Decimal("1.00"),
+            currency="NGN",
+            status=ServiceEntitlementStatus.active,
+        )
+    )
+    db_session.flush()
+
+    decision = resolve_prepaid_subscription_settlement_period(
+        db_session,
+        PrepaidSubscriptionSettlementPeriodQuery(
+            subscription_id=subscription.id,
+            account_id=subscriber.id,
+            effective_at=effective_at,
+            billing_cycle=BillingCycle.monthly,
+        ),
+    )
+
+    assert decision.covered_through == existing_end
+    assert decision.period.starts_at == effective_at
+    assert decision.period.ends_at == datetime(2026, 10, 14, 12, tzinfo=UTC)
 
 
 def _legacy_tax_correction_fixture(db_session, subscriber, subscription):

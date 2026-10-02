@@ -16,6 +16,7 @@ from app.models.notification import (
     NotificationTemplate,
 )
 from app.schemas.notification import NotificationCreate
+from app.services.branding_config import get_brand
 from app.services.communication_intents import (
     CommunicationAttachment,
     CommunicationAttachmentKind,
@@ -33,6 +34,7 @@ from app.services.notification_template_conditions import (
     NotificationTemplateConditionError,
     conditions_match,
 )
+from app.services.notification_template_renderer import render_template_text
 
 logger = logging.getLogger(__name__)
 _LOGGED_MISSING_TEMPLATE_CODES: set[str] = set()
@@ -167,6 +169,16 @@ EVENT_NOTIFICATION_SPECS: dict[EventType, EventNotificationSpec] = {
             "Please make payment or contact support to restore service."
         ),
     ),
+    EventType.subscription_paused: EventNotificationSpec(
+        template_code="subscription_paused",
+        category="service",
+        subject="Your service has been paused",
+        body=(
+            "Dear {subscriber_name},\n\n"
+            "Your {offer_name} subscription has been paused while support resolves "
+            "the linked issue. Billing is paused for the same interval."
+        ),
+    ),
     EventType.subscription_resumed: EventNotificationSpec(
         template_code="subscription_resumed",
         category="service",
@@ -174,6 +186,16 @@ EVENT_NOTIFICATION_SPECS: dict[EventType, EventNotificationSpec] = {
         body=(
             "Dear {subscriber_name},\n\n"
             "Your {offer_name} subscription has been resumed successfully."
+        ),
+    ),
+    EventType.subscription_pause_resumed: EventNotificationSpec(
+        template_code="subscription_pause_resumed",
+        category="service",
+        subject="Your paused service has resumed",
+        body=(
+            "Dear {subscriber_name},\n\n"
+            "Your {offer_name} subscription has resumed and the paused service "
+            "period has been added to your billing date."
         ),
     ),
     EventType.subscription_canceled: EventNotificationSpec(
@@ -1015,7 +1037,6 @@ class NotificationHandler:
                         payment_receipt_path,
                         payment_receipt_reference,
                     )
-                    from app.services.branding_config import get_brand
                     from app.services.common import coerce_uuid
 
                     payment = db.get(Payment, coerce_uuid(payment_id))
@@ -1071,8 +1092,6 @@ class NotificationHandler:
                 )
 
         if event.invoice_id:
-            from app.services.branding_config import get_brand
-
             app_url = str(get_brand().get("app_url") or "").rstrip("/")
             context.setdefault(
                 "invoice_url", f"{app_url}/portal/billing/invoices/{event.invoice_id}"
@@ -1126,7 +1145,8 @@ class NotificationHandler:
 
         context.setdefault("device_serial", context.get("serial_number", ""))
         context.setdefault("location", context.get("olt_name", ""))
-        context.setdefault("portal_url", "/portal")
+        app_url = str(get_brand().get("app_url") or "").rstrip("/")
+        context.setdefault("portal_url", f"{app_url}/portal")
         context.setdefault("subscriber_name", "Valued Customer")
         context.setdefault("offer_name", context.get("plan_name", "your service"))
         context.setdefault("old_offer_name", "your current plan")
@@ -1135,10 +1155,7 @@ class NotificationHandler:
         return context
 
     def _render_text(self, text: str, context: dict[str, str]) -> str:
-        rendered = text
-        for key, value in context.items():
-            rendered = rendered.replace(f"{{{key}}}", value)
-        return rendered
+        return render_template_text(text, context)
 
     def _render_subject(
         self,

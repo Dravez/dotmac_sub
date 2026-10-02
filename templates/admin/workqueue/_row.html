@@ -1,11 +1,11 @@
 {% from "components/ui/macros.html" import status_badge %}
 {% from "components/forms/action_form.html" import action_form with context %}
-<article class="workqueue-record relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-2.5 shadow-sm transition-shadow hover:shadow-md dark:border-slate-700 dark:from-slate-800 dark:to-slate-900"
+<article class="workqueue-record relative flex h-full min-w-0 flex-col rounded-xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-2.5 shadow-sm transition-shadow hover:shadow-md dark:border-slate-700 dark:from-slate-800 dark:to-slate-900"
          data-workqueue-record data-search="{{ row.title }} {{ row.subtitle or '' }} {{ row.item_id }} {{ row.reason_label }} {{ row.status_label }}"
          data-title="{{ row.title }}" data-subtitle="{{ row.subtitle or '' }}" data-kind="{{ row.kind_label }}"
          data-urgency="{{ row.urgency_label }}" data-reason="{{ row.reason_label }}" data-status="{{ row.status_label }}"
          data-activity="{{ row.happened_at_label }}" data-due="{{ row.due_at_label }}" data-score="{{ row.score }}" data-url="{{ row.url or '' }}">
-    <span aria-hidden="true" class="status-tone-dot status-tone-dot-{{ row.urgency_tone }} absolute inset-y-0 left-0 w-1"></span>
+    <span aria-hidden="true" class="status-tone-dot status-tone-dot-{{ row.urgency_tone }} absolute inset-y-0 left-0 w-1 rounded-l-lg"></span>
     <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-1.5">
             {{ status_badge(row.kind_label, variant="default", size="sm") }}

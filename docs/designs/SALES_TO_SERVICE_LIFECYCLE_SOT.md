@@ -125,6 +125,41 @@ fails closed until the revised snapshot is approved. Approval changes the
 customer projection to `Approved — Payment required`; it does not create an
 Invoice, SalesOrder, or Project. Those remain consequences of verified payment.
 
+Mobile service requests first select a typed installation or relocation choice.
+The destination pin and the choice are stored on the Lead and Quote. Relocation
+inherits the exact source Subscription already selected on the mobile Service
+tab instead of asking the customer to select it again. Only relocation choices
+compatible with that Subscription's access technology are offered, and the
+server rechecks that the source is owned and active. A technology change uses
+the customer's selected destination plan; moves that keep
+the same technology retain the current plan. The selected plan must be an
+active, priced, customer-visible offer compatible with the source service.
+Fiber destinations use the native fiber proximity check. Airfiber destinations require a site check and
+must not borrow the fiber feasibility result. No self-service installation or
+relocation request receives a system-generated preliminary price. Every choice
+begins without priced lines, so Sales must author the commercial amount before approval. Customer
+Quote projections omit all price, deposit, and line amounts while review is
+pending or stale; approval requires a priced line, positive total, and deposit
+policy. The existing subscription is not changed by request intake.
+Relocation approval requires the payment percentage to be 100%; its approved
+customer projection labels the payable amount as the full relocation charge.
+Relocation quotes cannot enter the installation Quote-deposit conversion path:
+that path creates a new installation scope and does not settle the canonical
+subscription-change relocation charge. On customer booking, the typed
+`service_intent.subscription_change_execution` handoff locks the approved Quote,
+rechecks the source Subscription and destination offer, records the pinned
+Address and qualification, and issues exactly one Invoice for the full
+staff-approved Quote total. The approved Quote snapshot is the one-time fee
+authority for this path. Quote edits and payment re-review are refused after
+handoff so that the billed amount remains the approved snapshot. A retry
+returns the same Invoice. The existing invoice
+payment owner collects it; only canonical full settlement releases the
+relocation ServiceOrder and WorkOrder. The verified field completion changes
+the existing Subscription to the selected destination offer and address.
+The full quoted relocation charge covers this service change, so finalization
+does not create a second plan-proration charge. The configured wireless
+relocation fee remains the authority for the separate plan-change preview path.
+
 ## Named owners
 
 | Decision or fact | Owner |
@@ -207,6 +242,29 @@ depend on HTTP request/response or exception types.
   history, import/export, bulk Lead commands, aging analytics, or parallel
   Lead persistence is introduced by these screens.
 
+### Lead creation-date filters
+
+At `/admin/sales/leads`, All time preserves the existing active-Lead scope.
+Last 7 days and Last 30 days include today's UTC calendar date plus the
+preceding 6 or 29 dates. Custom range requires ISO start and end dates and
+includes both endpoints, using `created_at >= start midnight` and
+`created_at < midnight after end`. Filtering is by Lead creation, not update,
+expected close, Quote, or conversion date.
+
+The typed `sales.service` query owns normalization and combines this condition
+with all existing filters using AND. The same predicates drive paginated rows,
+exact count, matching open/won totals, and matching pipeline value. Relative
+URLs store only the preset, so bookmarks remain relative; custom URLs retain
+both dates. Sorting and page-size navigation retain the scope, Filter resets
+to page one, and Reset clears all filters. Database-failure retry retains the
+date scope without database reads. Legacy callers default to All time.
+
+Unknown presets, malformed, incomplete, reversed, and unsupported custom dates
+canonicalize to All time. An end date of 9999-12-31 is unsupported because its
+exclusive next-day bound cannot be represented. Native browser controls guide
+valid input, but the backend owns validation even without JavaScript. Existing
+permissions and empty/error states remain unchanged. No schema change is needed.
+
 ## Selfcare CRM Quotes list page contract
 
 - Screen identifier and route: `sales-quotes-list` at
@@ -231,11 +289,19 @@ depend on HTTP request/response or exception types.
   to the Quote's `json` metadata column. The exact same predicate tuple drives
   count and rows before stable created/updated ordering, Quote-ID tie-breaking,
   and pagination.
-- Filters and state: status and Lead filters work independently and combine
+- Filters and state: status, Lead, and Quote-created date filters work
+  independently and combine
   with search using AND semantics. Unknown status, malformed/stale Lead,
-  sort, direction, page, and page-size values canonicalize to the owner-defined
-  safe URL. Search/filter/sort/page-size state remains URL-addressable; changing
-  the form resets page to one and Reset clears the complete scope.
+  date preset, incomplete or reversed custom range, sort, direction, page, and
+  page-size values canonicalize to the owner-defined safe URL. Date presets cover
+  the current UTC calendar day plus the preceding 6 or 29 days; a custom start and
+  end are inclusive. Search/filter/sort/page-size state remains URL-addressable;
+  changing the form resets page to one and Reset clears the complete scope.
+  `normalize_quote_date_range` is the public date-policy owner used by both
+  successful reads and unavailable retry views. Custom dates must be canonical
+  ISO dates; an end date of 9999-12-31 becomes All time before constructing its
+  unrepresentable exclusive next-day bound. Relative bookmarks carry only the
+  preset. Appended optional fields preserve legacy typed query constructors.
 - States and recovery: empty and database-failure states are distinct. A failed
   read reports that Quotes could not be loaded and no CRM data was changed,
   offers a retry using safe normalized list state, emits a structured diagnostic
@@ -307,14 +373,22 @@ depend on HTTP request/response or exception types.
   rows stack on narrow screens; each Line Item becomes a touch-friendly card;
   keyboard focus, accessible labels, and light/dark variants use shared admin
   design tokens.
+- Quote-detail line controls: a staff member with `crm:quote:write` may edit
+  or remove a Draft or Sent Line Item when the Quote has no active discount and
+  is not a booked relocation. The visible Remove control submits the canonical
+  line-removal command after a browser confirmation; Edit opens the adjacent
+  typed line editor. Both nested actions bind the Line Item to the displayed
+  Quote before the owner mutates it.
 
-## Selfcare mobile installation quote page contract
+## Selfcare mobile service quote page contract
 
 - Screen identifiers and routes: the quote list at `/quotes` and the
   map-pinned request form at `/quotes/request`.
-- Audience and job: an authenticated subscriber reviews installation quotes
-  and, only when eligible, requests an estimate for a precisely pinned service
-  location.
+- Audience and job: an authenticated subscriber reviews installation and
+  relocation quotes and, only when eligible, requests an estimate for a
+  precisely pinned service location. Relocation uses the exact Subscription
+  selected on the Service tab, does not expose a second service picker, and
+  offers only relocation types compatible with that service's access type.
 - Authoritative owners: the selected quote read owner supplies
   `source_state`, `actions_available`, and an optional customer-safe
   `actions_unavailable_message`. The mobile adapter renders those values and

@@ -164,7 +164,9 @@ Invoice and payment list periods use explicit optional `start_date` and
 `end_date` filters against each document's UTC `created_at`. Both calendar dates
 are inclusive; owners translate the end date to the exclusive start of the next
 UTC day. List totals, pagination, status summaries, deep links, and CSV exports
-consume the same normalized range.
+consume the same normalized range. The invoice UI labels this basis as Created
+From/To (UTC), renders a sortable Created (UTC) column, and preserves the
+human-readable label for an active typed customer selection after HTMX refreshes.
 
 The support-ticket queue is the next list adoption. `app.services.support.Tickets`
 owns the canonical filtered domain query, while
@@ -723,19 +725,23 @@ Dashboard implementation notes:
     "search": str | None,
     "customer_type": str | None,        # filter: "person" | "organization" | None
     "billing_mode": str | None,         # "prepaid" | "postpaid" | "non_billable"
+    # Each row also carries a typed chargeability label, detail, and badge tone.
     "active_page": "customers",
 }
 ```
 
 The Billing filter is owned by `ui.customer_list_projection`. Prepaid and
 postpaid consume `financial.billing_profile`, including its collectible-service
-precedence and mixed-mode fail-closed behavior. Non-billable means every
-collectible service is currently charge-suppressed by an effective
-complimentary/sponsored treatment or is a genuinely zero-priced recurring
-catalog product. Missing price evidence, `Subscriber.billing_enabled`, and plan
-name text (including names containing "Non Billing") do not classify the
-customer. An account with both paid and free services remains in its canonical
-prepaid/postpaid cohort.
+precedence and mixed-mode fail-closed behavior. **Non-billable / review** is an
+operational section containing two visibly distinct results from
+`financial.customer_chargeability`: confirmed non-billable customers and
+customers whose catalog pricing requires staff review. Missing price evidence
+appears as **Review required** and is never assumed free. Classification covers
+pending, active, blocked, suspended, stopped, and disabled services, so account
+status (including delinquent) does not hide a matching customer. Plan-name text
+and `Subscriber.billing_enabled` are not chargeability evidence. An account
+with coherent paid service remains billable; any missing or contradictory price
+keeps the whole account in review until staff resolves it.
 
 #### `GET /admin/customers/{type}/{id}` (Person Detail)
 **Template:** `admin/customers/detail.html`
@@ -1005,6 +1011,14 @@ The filtered invoice CSV at `GET /admin/billing/invoices/export.csv` uses the
 same uncapped filter and stable-sort scope as the list. Its customer identity
 column is `customer_name`, populated from the same customer display-name
 contract used by the invoice table; internal account UUIDs are not exported.
+Invoice filters intersect when combined. The selected customer label remains
+visible after partial refreshes, and **Clear filters** removes user-selected
+criteria while preserving an `account_id` entry-point scope. The date controls
+are labelled **Created From** and **Created To** because they bound UTC
+`created_at`, with the ending calendar date included. The synthetic **Unpaid**
+status remains visibly selected and uses the dashboard receivables scope:
+issued, partially paid, or overdue collectible non-proforma invoices with a
+positive balance due. Draft invoices are not unpaid receivables.
 
 #### `GET /admin/billing`
 **Template:** `admin/billing/index.html`
@@ -1037,6 +1051,10 @@ contract used by the invoice table; internal account UUIDs are not exported.
     "proforma_only": bool,
     "proforma_summary": {"count": int},
     "customer_ref": str | None,
+    "customer_filter": InvoiceCustomerFilterSelection | None,  # typed reference + human label
+    "customer_label": str | None,                 # flattened compatibility label
+    "has_active_filters": bool,
+    "clear_filters_url": str,
     "search": str | None,
     "start_date": str | None,                  # inclusive YYYY-MM-DD, UTC
     "end_date": str | None,                    # inclusive YYYY-MM-DD, UTC

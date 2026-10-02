@@ -105,6 +105,7 @@ _EXPENSE_ACTION_ENDPOINTS = {
     "release_approved_v2": "typed:expense-release-v2",
     "expense_submit_v3": "typed:expense-submit-v3",
     "expense_approve_v3": "typed:expense-approve-v3",
+    "expense_approve_v4": "typed:expense-approve-v4",
     "expense_reject_v3": "typed:expense-reject-v3",
 }
 
@@ -243,11 +244,17 @@ def deliver_pending(
     try:
         for row in rows:
             if _is_retired_preapproval_expense_event(row):
+                # This envelope belongs to a retired protocol and can never
+                # become deliverable by retrying. Keep its payload/idempotency
+                # evidence, but remove it from the pending candidate set.
                 result.skipped_preapproval += 1
-                logger.warning(
-                    "field_erp_sync: refusing retired pre-approval expense event %s",
-                    row.id,
+                result.processed += 1
+                result.dead += 1
+                _mark_dead(
+                    row,
+                    "retired_preapproval_expense_event: delivery permanently refused",
                 )
+                db.commit()
                 continue
             owned = owned_cache.get(row.flow)
             if owned is None:
@@ -380,6 +387,7 @@ def _is_typed_expense_event(row: FieldErpSyncEvent) -> bool:
         "release_approved_v2",
         "expense_submit_v3",
         "expense_approve_v3",
+        "expense_approve_v4",
         "expense_reject_v3",
         "initiate_payment",
     }
@@ -399,7 +407,7 @@ def _required_expense_client_methods(row: FieldErpSyncEvent) -> tuple[str, ...]:
             "upload_expense_receipt",
             "submit_expense_claim",
         )
-    if action == "expense_approve_v3":
+    if action in {"expense_approve_v3", "expense_approve_v4"}:
         return ("approve_expense_claim",)
     if action == "initiate_payment":
         return ("initiate_expense_payment",)
@@ -417,7 +425,7 @@ def _deliver_typed_expense_event(
         return _deliver_approved_expense_release(db, row, client=client)
     if action == "expense_submit_v3":
         return _deliver_expense_submission(db, row, client=client)
-    if action == "expense_approve_v3":
+    if action in {"expense_approve_v3", "expense_approve_v4"}:
         command = ErpExpenseApprovalCommand.model_validate(_transport_payload(row))
         outcome = client.approve_expense_claim(
             command, idempotency_key=row.idempotency_key
@@ -729,18 +737,31 @@ def _dispatch_flow_writeback(db: Session, row: FieldErpSyncEvent) -> None:
         return
 
     if row.flow == FieldErpSyncFlow.expense_claim.value:
-        try:
-            from app.services.dotmac_erp.expense_sync import (
-                apply_erp_response as apply_expense_response,
-            )
-
-            apply_expense_response(db, row)
-        except Exception:  # noqa: BLE001 — write-back must not fail delivery
-            logger.exception(
-                "field_erp_sync: write-back failed for %s event %s",
+        # OWNERSHIP GUARD: this dispatch also runs later, from a poll
+        # (`record_polled_outcome`), not just right after the original send —
+        # ownership can move back to CRM in between. Skip the projection
+        # rather than raise, matching this branch's existing
+        # write-back-must-not-fail-delivery contract.
+        if not flow_owned_by_sub(db, FieldErpSyncFlow.expense_claim):
+            logger.info(
+                "field_erp_sync: skipping write-back for %s event %s — sub does "
+                "not own flow 'expense_claim' (sync_flow_ownership)",
                 row.flow,
                 row.id,
             )
+        else:
+            try:
+                from app.services.dotmac_erp.expense_sync import (
+                    apply_erp_response as apply_expense_response,
+                )
+
+                apply_expense_response(db, row)
+            except Exception:  # noqa: BLE001 — write-back must not fail delivery
+                logger.exception(
+                    "field_erp_sync: write-back failed for %s event %s",
+                    row.flow,
+                    row.id,
+                )
     elif row.flow == FieldErpSyncFlow.material_request.value:
         from app.services.dotmac_erp.material_sync import (
             apply_erp_response as apply_material_response,

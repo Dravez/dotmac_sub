@@ -40,7 +40,9 @@ class ONTsPage(BasePage):
 
     def click_new_ont(self) -> None:
         """Click new ONT button."""
-        self.page.get_by_role("link", name="Add ONT").click()
+        self.page.locator(
+            'a[href="/admin/network/onts/new"]', has_text="Add ONT"
+        ).first.click()
 
     def click_ont_row(self, serial: str) -> None:
         """Click on an ONT row by serial number."""

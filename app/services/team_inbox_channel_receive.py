@@ -1925,6 +1925,14 @@ def receive_inbound_channel_batch_committed(
                     media_url=str(metadata["media_url"])
                     if metadata.get("media_url")
                     else None,
+                    meta_referral_observation=(
+                        {str(key): str(value) for key, value in referral.items()}
+                        if isinstance(
+                            referral := metadata.get("meta_referral_observation"),
+                            dict,
+                        )
+                        else None
+                    ),
                     contact_profile=(
                         {
                             "display_name": (

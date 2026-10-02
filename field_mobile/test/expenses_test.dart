@@ -99,6 +99,23 @@ void main() {
       tokenStore: store,
       dio: dio,
     );
+    adapter.on(
+      'POST',
+      '/api/v1/field/expense-requests/payment-destination/verify',
+      (_) => (
+        200,
+        {
+          'destination_token': 'enc:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+          'mode': 'erp_profile',
+          'bank_code': '058',
+          'bank_name': 'Test Bank',
+          'masked_account_number': '******6789',
+          'verified_beneficiary_name': 'Field Technician',
+          'verified_at': '2099-09-10T10:00:00Z',
+          'expires_at': '2099-09-10T10:30:00Z',
+        },
+      ),
+    );
     container = ProviderContainer(
       overrides: [apiClientProvider.overrideWithValue(client)],
     );
@@ -333,6 +350,31 @@ void main() {
     expect(request.status, 'canceled');
   });
 
+  test('retrySubmission requeues the existing ERP delivery', () async {
+    adapter.on(
+      'POST',
+      '/api/v1/field/expense-requests/exp-1/retry-delivery',
+      (_) => (
+        200,
+        {
+          'id': 'exp-1',
+          'erp_sync_status': 'pending',
+          'erp_sync_event_id': 'event-1',
+          'replayed': false,
+        },
+      ),
+    );
+
+    final result = await container
+        .read(expensesRepositoryProvider)
+        .retrySubmission('exp-1');
+
+    expect(result.id, 'exp-1');
+    expect(result.erpSyncStatus, 'pending');
+    expect(result.eventId, 'event-1');
+    expect(result.replayed, isFalse);
+  });
+
   test('fetchCategories reads a bare category list', () async {
     adapter.on('GET', '/api/v1/field/expense-requests/categories', (_) {
       return (
@@ -416,7 +458,6 @@ void main() {
             'mode': 'expense_override',
             'bank_code': '058',
             'account_number': '0123456789',
-            'beneficiary_name': 'Field Technician',
           });
           return (
             200,
@@ -441,7 +482,6 @@ void main() {
             mode: ExpensePaymentMode.expenseOverride,
             bankCode: '058',
             accountNumber: '0123456789',
-            beneficiaryName: 'Field Technician',
           );
 
       expect(destination.mode, ExpensePaymentMode.expenseOverride);
@@ -475,7 +515,7 @@ void main() {
     'uploadReceipt posts multipart receipt and returns its typed result',
     () async {
       final dir = await io.Directory.systemTemp.createTemp('receipt-test');
-      final file = io.File('${dir.path}/receipt.jpg');
+      final file = io.File('${dir.path}/receipt.png');
       await file.writeAsBytes([0xff, 0xd8, 0xff, 0xd9]);
       addTearDown(() => dir.delete(recursive: true));
 
@@ -494,10 +534,13 @@ void main() {
           isTrue,
         );
         expect(form.files.single.key, 'file');
+        expect(form.files.single.value.filename, 'receipt.jpg');
+        expect(form.files.single.value.contentType.toString(), 'image/jpeg');
         return (
           201,
           {
             'id': 'attachment-1',
+            'file_name': 'receipt.jpg',
             'download_path': '/api/v1/field/attachments/attachment-1/content',
           },
         );
@@ -508,7 +551,7 @@ void main() {
           .uploadReceipt(
             workOrderId: 'wo-1',
             filePath: file.path,
-            fileName: 'receipt.jpg',
+            fileName: 'receipt.png',
             clientRef: 'ref-1',
           );
 
@@ -517,6 +560,7 @@ void main() {
         result.downloadPath,
         '/api/v1/field/attachments/attachment-1/content',
       );
+      expect(result.fileName, 'receipt.jpg');
     },
   );
 
@@ -657,6 +701,30 @@ void main() {
 
     expect(request.displayNumber, 'abcdef12');
     expect(request.totalAmount, 15.0);
+  });
+
+  test('ExpenseRequest shows ERP delivery state for submitted requests', () {
+    final pending = ExpenseRequest.fromJson({
+      'id': 'exp-pending',
+      'status': 'submitted',
+      'erp_sync_status': 'pending',
+    });
+    final failed = ExpenseRequest.fromJson({
+      'id': 'exp-failed',
+      'status': 'submitted',
+      'erp_sync_status': 'dead',
+    });
+    final accepted = ExpenseRequest.fromJson({
+      'id': 'exp-accepted',
+      'status': 'submitted',
+      'erp_sync_status': 'accepted',
+    });
+
+    expect(pending.displayStatus, 'submitting to ERP');
+    expect(pending.isErpSubmissionPending, isTrue);
+    expect(failed.displayStatus, 'submission failed');
+    expect(failed.hasErpSubmissionFailed, isTrue);
+    expect(accepted.displayStatus, 'submitted');
   });
 
   testWidgets('expenses screen lists submitted and rejected requests', (
@@ -816,6 +884,21 @@ void main() {
       '/api/v1/field/expense-requests',
       (_) => (200, {'items': <Object>[]}),
     );
+    adapter.on(
+      'GET',
+      '/api/v1/field/expense-requests/exp-9',
+      (_) => (
+        200,
+        {
+          'id': 'exp-9',
+          'number': 'EXP-0009',
+          'status': 'submitted',
+          'purpose': 'Site logistics',
+          'total_amount': '2500.00',
+          'erp_sync_status': 'accepted',
+        },
+      ),
+    );
 
     final router = GoRouter(
       initialLocation: '/expenses/new',
@@ -883,14 +966,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('expense-bank')), findsOneWidget);
     expect(find.byKey(const Key('expense-account-number')), findsOneWidget);
-    expect(find.byKey(const Key('expense-beneficiary-name')), findsOneWidget);
+    expect(find.byKey(const Key('expense-account-name')), findsOneWidget);
     expect(find.text('Account name'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('expense-account-name')))
+          .readOnly,
+      isTrue,
+    );
 
     await tester.tap(find.byKey(const Key('expense-payment-erp')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('expense-bank')), findsNothing);
 
     // Pick a category and describe the line, but leave the amount empty.
+    await tester.ensureVisible(find.byKey(const Key('expense-category')));
     await tester.tap(find.byKey(const Key('expense-category')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Transport').last);
@@ -983,6 +1073,95 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('custom account resolves and displays the bank returned name', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    Map<String, dynamic>? verificationPayload;
+    adapter.on(
+      'POST',
+      '/api/v1/field/expense-requests/payment-destination/verify',
+      (options) {
+        verificationPayload = (options.data as Map).cast<String, dynamic>();
+        return (
+          200,
+          {
+            'destination_token': 'enc:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+            'mode': 'expense_override',
+            'bank_code': '058',
+            'bank_name': 'Test Bank',
+            'masked_account_number': '******6789',
+            'verified_beneficiary_name': 'AKANDE SANMI BAMIDELE',
+            'verified_at': '2099-09-10T10:00:00Z',
+            'expires_at': '2099-09-10T10:30:00Z',
+          },
+        );
+      },
+    );
+    final customOnlyContext = ExpenseFormContext(
+      approvers: _testFormContext.approvers,
+      banks: _testFormContext.banks,
+      profileDestination: ExpenseProfileDestination(available: false),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(client),
+          expenseCategoriesProvider.overrideWith(
+            (ref) async => const [
+              ExpenseCategory(categoryCode: 'FUEL', categoryName: 'Fuel'),
+            ],
+          ),
+          expenseFormContextProvider.overrideWith(
+            (ref) async => customOnlyContext,
+          ),
+        ],
+        child: const MaterialApp(
+          home: NewExpenseRequestScreen(
+            initialWorkOrderId: 'wo-1',
+            initialWorkOrderLabel: 'WO-1',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('expense-bank')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Test Bank').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('expense-account-number')),
+      '0123456789',
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(verificationPayload, isNull);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    expect(verificationPayload, {
+      'source_claim_id': isA<String>(),
+      'mode': 'expense_override',
+      'bank_code': '058',
+      'account_number': '0123456789',
+    });
+    expect(verificationPayload!.containsKey('beneficiary_name'), isFalse);
+    expect(find.text('AKANDE SANMI BAMIDELE'), findsOneWidget);
+    expect(
+      find.text('Confirm this is the intended recipient.'),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('expense-account-name')))
+          .readOnly,
+      isTrue,
+    );
+  });
+
   testWidgets('new expense request displays a structured safe server message', (
     tester,
   ) async {
@@ -1036,38 +1215,19 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.enterText(
-      find.byKey(const Key('expense-purpose')),
-      'Generator fuel',
-    );
-    await tester.tap(find.byKey(const Key('expense-approver')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Expense Approver').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('expense-category')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Fuel').last);
-    await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const Key('expense-description')),
-      'Diesel',
-    );
-    await tester.enterText(find.byKey(const Key('expense-amount')), '5000');
-    await tester.enterText(
-      find.byKey(const Key('expense-receipt-url')),
-      'https://receipts.test/fuel.jpg',
-    );
-    await tester.tap(find.byKey(const Key('add-expense-line')));
-    await tester.pump();
-    await tester.ensureVisible(find.text('Submit request'));
-    await tester.tap(find.text('Submit request'));
-    await tester.pumpAndSettle();
-
     expect(
       find.text('Verify the payment destination again.'),
       findsAtLeastNWidgets(1),
     );
     expect(find.textContaining('expired-token'), findsNothing);
+    expect(
+      tester
+          .widget<PrimaryActionButton>(
+            find.byKey(const Key('submit-expense-request')),
+          )
+          .onPressed,
+      isNull,
+    );
     expect(submitted, isFalse);
   });
 
@@ -1080,6 +1240,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          apiClientProvider.overrideWithValue(client),
           expenseCategoriesProvider.overrideWith((ref) async => const []),
           expenseFormContextProvider.overrideWith(
             (ref) async => _testFormContext,
@@ -1102,7 +1263,9 @@ void main() {
     expect(find.byKey(const Key('expense-category-code')), findsNothing);
     expect(find.byKey(const Key('expense-category')), findsNothing);
     expect(
-      find.textContaining('No expense categories are available.'),
+      find.textContaining(
+        'No expense categories are available. Ask an administrator to check the ERP category list.',
+      ),
       findsOneWidget,
     );
     final addExpense = tester.widget<OutlinedButton>(
@@ -1121,6 +1284,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          apiClientProvider.overrideWithValue(client),
           expenseCategoriesProvider.overrideWith((ref) async {
             categoryLoads += 1;
             if (categoryLoads == 1) {
@@ -1142,7 +1306,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Could not load expense categories.'), findsOneWidget);
+    expect(
+      find.text('Expense categories could not be loaded. Please try again.'),
+      findsOneWidget,
+    );
     expect(find.byKey(const Key('expense-category')), findsNothing);
 
     await tester.tap(find.byKey(const Key('expense-category-retry')));
@@ -1150,7 +1317,10 @@ void main() {
 
     expect(categoryLoads, 2);
     expect(find.byKey(const Key('expense-category')), findsOneWidget);
-    expect(find.text('Could not load expense categories.'), findsNothing);
+    expect(
+      find.text('Expense categories could not be loaded. Please try again.'),
+      findsNothing,
+    );
   });
 
   testWidgets('new expense request retries unavailable approver context', (
@@ -1163,6 +1333,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          apiClientProvider.overrideWithValue(client),
           expenseCategoriesProvider.overrideWith(
             (ref) async => const [
               ExpenseCategory(categoryCode: 'FUEL', categoryName: 'Fuel'),
@@ -1261,11 +1432,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.textContaining('No eligible expense approvers are available.'),
+      find.textContaining('No expense approver is available for your account.'),
       findsOneWidget,
     );
     expect(
-      find.textContaining('No payment destination is available.'),
+      find.textContaining(
+        'No payment account is available. Please contact an administrator.',
+      ),
       findsOneWidget,
     );
     expect(find.byKey(const Key('expense-approver')), findsNothing);
@@ -1288,6 +1461,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            apiClientProvider.overrideWithValue(client),
             expenseCategoriesProvider.overrideWith(
               (ref) async => const [
                 ExpenseCategory(
@@ -1344,6 +1518,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          apiClientProvider.overrideWithValue(client),
           expenseCategoriesProvider.overrideWith(
             (ref) async => const [
               ExpenseCategory(categoryCode: 'FUEL', categoryName: 'Fuel'),
@@ -1379,6 +1554,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          apiClientProvider.overrideWithValue(client),
           expenseCategoriesProvider.overrideWith(
             (ref) async => const [
               ExpenseCategory(
@@ -1400,6 +1576,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.byKey(const Key('expense-category')));
     await tester.tap(find.byKey(const Key('expense-category')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Fuel').last);

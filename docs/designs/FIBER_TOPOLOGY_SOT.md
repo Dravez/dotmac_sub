@@ -243,8 +243,9 @@ Migration `333_fiber_topology_staging` adds two evidence tables:
   `(source_system, profile, manifest_sha256)` and it records the raw file hash,
   row counts, blockers, candidates, actor, and normalization metadata. Archive
   metadata or feature ordering cannot create a duplicate normalized batch.
-- `fiber_topology_staged_features` stores each normalized source fact, stable
-  external ID, source properties, GeoJSON, content/geometry hashes, lineage to a
+- `fiber_topology_staged_features` stores each normalized source fact, an
+  external ID when present, a display-name fallback when a mixed map omits its
+  source ID, source properties, GeoJSON, content/geometry hashes, lineage to a
   prior source fact, and a non-authoritative match suggestion.
 
 `network.fiber_source_staging` is the sole writer. Its match states are:
@@ -255,8 +256,10 @@ Migration `333_fiber_topology_staging` adds two evidence tables:
 - `candidate`: content changed, a normalized-name candidate exists, or the
   source has a possible duplicate name/geometry;
 - `ambiguous`: more than one canonical candidate exists;
-- `blocked`: the source row lacks stable identity, valid expected geometry, or
-  valid Nigerian coordinates, or duplicates an external ID inside the batch.
+- `blocked`: a profile-required identity, valid expected geometry, or valid
+  Nigerian coordinates is missing, or an external ID is duplicated inside the
+  batch. Mixed browser-map rows may use a display name as evidence when their
+  source ID is absent; this never approves a canonical asset change.
 
 These states are review evidence, not asset decisions. The staging service only
 constructs `FiberTopologySourceBatch` and `FiberTopologyStagedFeature` rows.
@@ -273,6 +276,25 @@ python scripts/network/stage_fiber_topology_kmz.py --all-checked-in
 python scripts/network/stage_fiber_topology_kmz.py \
   --all-checked-in --stage --actor "operator identity"
 ```
+
+### Network Map browser admission
+
+Authorized staff can stage normalized KML or KMZ evidence from
+`/admin/network/map` through `network.map_kmz_transfer`. The browser adapter
+requires `network:fiber:import`, the typed mixed profile, reason, actor, and
+idempotency key. In addition to the one-type OSP profiles, **Mixed network
+map** stages fiber segments, access points, cabinets, splice closures, service
+buildings, and support structures in one immutable batch. It resolves each
+feature's type independently and validates geometry against that type. Source
+IDs are optional and help match known assets when present. Unknown map-layer
+types remain blocked; customer fields and placemark
+names are removed from those blocked observations. A mixed batch with no
+structural blockers is accepted as staged evidence, not as a canonical write.
+The transfer delegates persistence to `network.fiber_source_staging` inside
+the transfer owner's transaction. The returned overlay is preview evidence
+only; it never joins `ui.network_map_projection` and never bypasses identity,
+connectivity, or asset-change review. See
+`docs/designs/NETWORK_MAP_KMZ_IMPORT_EXPORT.md`.
 
 The checked-in six-source preview resolves all expected 4,681 rows with stable
 IDs and zero structural/coordinate blockers. Duplicate names and geometries are
@@ -771,6 +793,21 @@ configuration caches.
 - The legacy generic CRUD adapter delegates exact creates to the command owner,
   permits non-identity configuration updates only, and returns `410 Gone` for
   direct identity updates, historical creates, and deletes.
+
+### Legacy assignment mode field normalization
+
+`OntAssignment.wan_mode` and `ip_mode` are retired compatibility fields; current
+provisioning and service-intent paths do not depend on them. ORM assignments
+normalize `bridge`, `bridged`, and `setup_via_onu` to `OnuMode.bridging` in
+`wan_mode`, and to the valid `dhcp` value if bridge aliases reach the legacy
+`ip_mode` field. Other
+unknown strings fail validation. Database check constraints enforce the enum
+sets even for direct SQL writers. Migration
+`621_ont_assignment_mode_normalization` backfills bridge aliases, maps legacy
+`static`/`dynamic` aliases, clears unknown retired values to `NULL`, and installs
+the constraints. Keeping the fields loadable matters because customer list
+queries eager-load active ONT assignments; SQLAlchemy otherwise raises while
+decoding an invalid enum and the whole customer search fails.
 
 ## ONT assignment constraint cutover readiness
 

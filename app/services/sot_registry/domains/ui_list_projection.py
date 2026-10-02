@@ -756,6 +756,7 @@ DOMAIN = DomainSOT(
                 "customer.accounts",
                 "access.subscription_lifecycle",
                 "financial.billing_profile",
+                "financial.customer_chargeability",
                 "financial.invoices",
                 "financial.payments",
                 "financial.subscription_billing_treatments",
@@ -773,9 +774,10 @@ DOMAIN = DomainSOT(
                 "retain the full account name while the list presentation limits "
                 "visible names to four words and exposes the full text when cut. "
                 "Billing cohorts consume the canonical billing profile and "
-                "effective non-standard treatments plus canonical recurring "
-                "catalog prices; offer names and billing activation flags never "
-                "classify free service."
+                "customer-chargeability resolver. The non-billable work section "
+                "contains confirmed free/treated service and separately labeled "
+                "missing or contradictory pricing review; offer names and billing "
+                "activation flags never classify free service."
             ),
             contract=ServiceContract(
                 concerns=tuple(
@@ -787,6 +789,7 @@ DOMAIN = DomainSOT(
                             "canonical visible customer accounts",
                             "canonical subscription lifecycle records",
                             "canonical billing-mode profile",
+                            "canonical customer chargeability",
                             "effective non-standard billing treatment",
                             "canonical recurring catalog price",
                             "canonical catalog offers",
@@ -843,6 +846,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "effective prepaid/postpaid mode resolved from "
                             "collectible subscription modes with account fallback"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="canonical customer chargeability",
+                        owner="financial.customer_chargeability",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "typed confirmed non-billable, review-required, billable, "
+                            "or no-current-service classification and matching SQL cohort"
                         ),
                     ),
                     AuthorityInput(
@@ -1173,8 +1185,17 @@ DOMAIN = DomainSOT(
             ),
             notes=(
                 "The full page and HTMX response share one list partial. "
+                "Declared filters intersect when combined. Selected customer "
+                "identity remains visible after refresh, and reset clears user "
+                "filters while preserving an account-scoped entry point. "
+                "The synthetic unpaid status stays visible and selects only "
+                "collectible, non-proforma issued, partially paid, or overdue "
+                "invoices with a positive balance due; drafts are excluded. "
                 "Explicit start_date and end_date filters bound UTC created_at "
-                "with an inclusive end date. Exports consume the same canonical "
+                "with an inclusive end date; the filter labels and sortable table "
+                "column expose that Created (UTC) basis. Active customer filters "
+                "retain a typed human-readable selection across HTMX refreshes. "
+                "Exports consume the same canonical "
                 "scope without a page cap. The CSV customer_name column uses "
                 "the customer account's human display identity and does not "
                 "expose account UUIDs."

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Literal
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 from uuid import UUID
@@ -333,6 +334,7 @@ def team_inbox_queue(
     conversation_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    started_at = perf_counter()
     htmx_target = getattr(request, "headers", {}).get("hx-target")
     is_sidebar_request = htmx_target == "inbox-sidebar-content"
     is_queue_request = htmx_target == "inbox-conversation-queue"
@@ -391,19 +393,23 @@ def team_inbox_queue(
                     if is_sidebar_request
                     else team_inbox_projection.InboxQueueComposition.full_workspace
                 ),
-                # Ask the projection owner for pagination evidence. It keeps
-                # active queues exact and may use bounded next-page evidence
-                # for demand-loaded historical cohorts.
-                include_total_count=True,
+                # Interactive HTMX fragments must stay within the request
+                # timeout. Exact counts are unnecessary for filter/queue
+                # fragments, which only need bounded next-page evidence. Keep
+                # the exact count for the initial full workspace render.
+                include_total_count=not is_list_fragment_request,
             ),
         )
     except team_inbox_filters.InboxFilterError as exc:
         raise HTTPException(status_code=422, detail=exc.message) from exc
+    projection_finished_at = perf_counter()
     if projection.canonical_url is not None:
         return RedirectResponse(url=projection.canonical_url, status_code=307)
     can_manage_inbox = can(request, "support:ticket:update")
     manager_dashboard = None
-    context = _ctx(request, db)
+    context: dict[str, object] = (
+        {"request": request} if is_queue_request else _ctx(request, db)
+    )
     context.update(
         {
             "rows": projection.rows,
@@ -466,7 +472,7 @@ def team_inbox_queue(
             "actor_person_id": str(actor_person_id) if actor_person_id else "",
             "agent_introduction_text": (
                 team_inbox_agent_introduction.rendered_introduction(db, actor_person_id)
-                if actor_person_id
+                if actor_person_id and not is_list_fragment_request
                 else ""
             ),
         }
@@ -492,17 +498,45 @@ def team_inbox_queue(
                 ),
             }
         )
-    if is_list_fragment_request:
-        return templates.TemplateResponse(
+    context_finished_at = perf_counter()
+    if is_queue_request:
+        response = templates.TemplateResponse(
+            "admin/inbox/_queue.html",
+            context,
+            headers=INBOX_HTML_RESPONSE_HEADERS,
+        )
+    elif is_list_fragment_request:
+        response = templates.TemplateResponse(
             "admin/inbox/_sidebar.html",
             context,
             headers=INBOX_HTML_RESPONSE_HEADERS,
         )
-    return templates.TemplateResponse(
-        "admin/inbox/index.html",
-        context,
-        headers=INBOX_HTML_RESPONSE_HEADERS,
+    else:
+        response = templates.TemplateResponse(
+            "admin/inbox/index.html",
+            context,
+            headers=INBOX_HTML_RESPONSE_HEADERS,
+        )
+    finished_at = perf_counter()
+    logger.info(
+        "inbox_queue_route_timing",
+        extra={
+            "composition": (
+                "queue_only"
+                if is_queue_request
+                else "sidebar"
+                if is_sidebar_request
+                else "full_workspace"
+            ),
+            "projection_ms": round((projection_finished_at - started_at) * 1000, 2),
+            "context_ms": round(
+                (context_finished_at - projection_finished_at) * 1000, 2
+            ),
+            "render_ms": round((finished_at - context_finished_at) * 1000, 2),
+            "total_ms": round((finished_at - started_at) * 1000, 2),
+        },
     )
+    return response
 
 
 @router.get(
@@ -3474,6 +3508,7 @@ def _settings_context(
 def team_inbox_customer_completion_policy_update(
     request: Request,
     required_fields: list[str] = Form(default=[]),
+    identity_guard_enabled: bool = Form(default=True),
     db: Session = Depends(get_db),
 ):
     actor_person_id = _actor_uuid_from_request(request)
@@ -3506,13 +3541,17 @@ def team_inbox_customer_completion_policy_update(
                     AuditActorType.user if actor_person_id else AuditActorType.service
                 ),
                 decision_source="inbox_settings",
+                identity_guard_enabled=identity_guard_enabled,
             ),
         )
     except DomainError as exc:
         return _routes_redirect(status="error", message=exc.message)
     return _routes_redirect(
         status="success",
-        message=f"Customer completion policy v{outcome.version} is active.",
+        message=(
+            f"Customer completion policy v{outcome.version} is active; identity guard "
+            + ("enabled." if outcome.identity_guard_enabled else "disabled.")
+        ),
     )
 
 

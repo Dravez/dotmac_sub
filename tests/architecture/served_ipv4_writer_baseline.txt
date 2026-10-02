@@ -13,10 +13,21 @@
 # writer means deleting its line, never raising the count.
 #
 # Known blind spot: ``provisioning_helpers`` sets the column through
-# ``setattr(subscription, f"{version_key}_address", ...)``, which no
-# attribute-name scan can see. It is the allocator inside the owner's own path,
-# so it is not new debt — but do not read a clean run as proof that this file
-# lists every writer.
+# ``setattr(subscription, f"{version_key}_address", ...)`` (lines ~529, ~628),
+# which no attribute-name scan can see. It is the allocator inside the
+# owner's own path, so it is not new debt.
+#
+# A second, uncounted path: the operator/admin form in
+# ``app/services/web_catalog_subscriptions.py`` reads the raw form field
+# (~568) and validates it through ``_valid_assigned_ipv4`` (~719-720) before
+# it reaches the payload. That dict flows into ``app/schemas/catalog.py``'s
+# ``SubscriptionCreate``/``SubscriptionUpdate``/``SubscriptionTechnicalUpdate``
+# (~505/~544/~585), and from there into
+# ``app/services/catalog/subscriptions.py``'s ``Subscription(**data)``
+# (~1033) and ``setattr(subscription, key, value)`` (~1538) — both dict-driven
+# writes the attribute-name scan cannot see either.
+#
+# Do not read a clean run as proof that this file lists every writer.
 #
 # Format: count repository-relative-path.
 1 app/services/connectivity_backup.py

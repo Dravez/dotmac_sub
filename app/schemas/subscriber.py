@@ -213,6 +213,10 @@ class SubscriberCreate(SubscriberBase):
 
     @model_validator(mode="after")
     def _require_identity_when_creating_new(self) -> SubscriberCreate:
+        if self.status is SubscriberStatus.paused:
+            raise ValueError(
+                "Paused account status must be derived from a subscription pause"
+            )
         if self.person_id:
             return self
         if not self.first_name or not self.last_name or not self.email:
@@ -220,6 +224,20 @@ class SubscriberCreate(SubscriberBase):
                 "first_name, last_name, and email are required when person_id is not provided."
             )
         return self
+
+
+class SubscriberNotificationPreferencesUpdate(BaseModel):
+    """Closed notification-preference patch for a subscriber account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    billing_notifications: bool
+    sms_updates: bool
+    push_notifications: bool
+    service_notifications: bool
+    account_notifications: bool
+    usage_notifications: bool
+    general_notifications: bool
 
 
 class SubscriberUpdate(BaseModel):
@@ -291,6 +309,7 @@ class SubscriberUpdate(BaseModel):
 
     notes: str | None = None
     metadata_: dict | None = Field(default=None, serialization_alias="metadata")
+    notification_preferences: SubscriberNotificationPreferencesUpdate | None = None
 
     @field_validator("nin", mode="before")
     @classmethod

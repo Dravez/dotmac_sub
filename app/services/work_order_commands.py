@@ -39,14 +39,17 @@ from app.schemas.dispatch import (
     WorkOrderHeaderCreate,
     WorkOrderHeaderUpdate,
 )
+from app.schemas.network import InfrastructureWorkOrderHeaderCreate
 from app.services.audit_adapter import stage_audit_event
 from app.services.common import coerce_uuid
+from app.services.events import EventType, emit_event
 from app.services.field.source import mark_sub_authoritative
 from app.services.field.work_order_status import (
     TERMINAL_WORK_ORDER_STATUSES,
     WORK_ORDER_STATUSES,
     WorkOrderStatus,
 )
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.work_order_errors import WorkOrderCommandError
 
 _CREATE_ID_NAMESPACE = uuid.UUID("cbf90ef0-a977-49fb-a2ac-a636eb3b2342")
@@ -170,6 +173,59 @@ def _queue_work_order_tag_notifications(
             previous_tags=previous_tags,
             actor_person_id=actor_id,
         ),
+    )
+
+
+def _emit_work_order_created_event(
+    db: Session, work_order: WorkOrder, *, actor: str | None
+) -> None:
+    emit_event(
+        db,
+        EventType.custom,
+        {
+            "name": "work_order.created",
+            "tenant_id": str(OPERATOR_TENANT_ID),
+            "work_order_id": str(work_order.id),
+            "work_order_public_id": work_order.public_id,
+            "project_id": str(work_order.project_id)
+            if work_order.project_id is not None
+            else None,
+            "project_task_id": str(work_order.project_task_id)
+            if work_order.project_task_id is not None
+            else None,
+            "status": work_order.status,
+        },
+        actor=actor,
+        subscriber_id=work_order.subscriber_id,
+    )
+
+
+def _emit_work_order_updated_event(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    actor: str | None,
+    changed_fields: tuple[str, ...],
+) -> None:
+    emit_event(
+        db,
+        EventType.custom,
+        {
+            "name": "work_order.updated",
+            "tenant_id": str(OPERATOR_TENANT_ID),
+            "work_order_id": str(work_order.id),
+            "work_order_public_id": work_order.public_id,
+            "project_id": str(work_order.project_id)
+            if work_order.project_id is not None
+            else None,
+            "project_task_id": str(work_order.project_task_id)
+            if work_order.project_task_id is not None
+            else None,
+            "status": work_order.status,
+            "changed_fields": list(changed_fields),
+        },
+        actor=actor,
+        subscriber_id=work_order.subscriber_id,
     )
 
 
@@ -508,6 +564,11 @@ class WorkOrderCommands:
                     },
                 },
             )
+            _emit_work_order_created_event(
+                db,
+                row,
+                actor=_actor(auth)[1],
+            )
             _queue_work_order_tag_notifications(
                 db,
                 row,
@@ -540,6 +601,93 @@ class WorkOrderCommands:
                 status_code=409,
                 detail="Work order id already exists",
             ) from exc
+        return row
+
+    @staticmethod
+    def stage_infrastructure_work_order(
+        db: Session,
+        payload: InfrastructureWorkOrderHeaderCreate,
+        *,
+        origin_ticket_id: object,
+        auth: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        idempotency_key: str,
+    ) -> WorkOrder:
+        """Stage an outage work order; the coordinator owns the commit."""
+
+        data = _data(payload)
+        status = _validate_status(data.get("status") or WorkOrderStatus.draft.value)
+        if status not in _INITIAL_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail="Infrastructure work orders must start as draft or scheduled",
+            )
+        if any(data.get(field) is not None for field in _ASSIGNMENT_HEADER_FIELDS):
+            raise HTTPException(
+                status_code=422,
+                detail="Create the work order first, then use the assignment command",
+            )
+        _validate_schedule(data.get("scheduled_start"), data.get("scheduled_end"))
+        ticket_id = coerce_uuid(origin_ticket_id)
+        ticket = db.get(Ticket, ticket_id)
+        if ticket is None or not ticket.is_active:
+            raise WorkOrderCommandError(
+                "origin_ticket_not_found", "Origin ticket not found", kind="not_found"
+            )
+        data["status"] = status
+        data["work_order_kind"] = "infrastructure"
+        data["subscriber_id"] = None
+        key = str(idempotency_key).strip()
+        public_id = f"sub-{uuid.uuid5(_CREATE_ID_NAMESPACE, key).hex}"
+        supplied_metadata = dict(data.pop("metadata_", None) or {})
+        command_fingerprint = _fingerprint(
+            {"public_id": public_id, **data, "origin_ticket_id": ticket_id}
+        )
+        existing = (
+            db.query(WorkOrder).filter(WorkOrder.public_id == public_id).one_or_none()
+        )
+        if existing is not None:
+            if (
+                dict(existing.metadata_ or {}).get("native_create_fingerprint")
+                == command_fingerprint
+            ):
+                return existing
+            raise HTTPException(status_code=409, detail="Work order id already exists")
+        supplied_metadata.update(
+            {
+                "native_source": "sub",
+                "native_create_fingerprint": command_fingerprint,
+                "infrastructure_origin_ticket_id": str(ticket_id),
+            }
+        )
+        row = WorkOrder(
+            public_id=public_id,
+            origin_ticket_id=ticket_id,
+            metadata_=supplied_metadata,
+            work_order_created_at=data.get("work_order_created_at"),
+            **data,
+        )
+        db.add(row)
+        db.flush()
+        _audit(
+            db,
+            action="work_order.created",
+            work_order=row,
+            auth=auth,
+            request_id=request_id or key,
+            metadata={
+                "owner": "operations.work_order_commands",
+                "work_order_kind": "infrastructure",
+                "public_id": row.public_id,
+                "origin_ticket_id": str(ticket_id),
+            },
+        )
+        _emit_work_order_created_event(
+            db,
+            row,
+            actor=_actor(auth)[1],
+        )
+        _queue_work_order_tag_notifications(db, row, previous_tags=(), auth=auth)
         return row
 
     @staticmethod
@@ -581,6 +729,7 @@ class WorkOrderCommands:
         *,
         auth: dict[str, Any] | None = None,
         request_id: str | None = None,
+        commit: bool = True,
     ) -> WorkOrder:
         row = _get_work_order(db, public_id, lock=True)
         previous_tags = tuple(str(tag) for tag in (row.tags or ()))
@@ -744,14 +893,23 @@ class WorkOrderCommands:
                 },
             },
         )
+        _emit_work_order_updated_event(
+            db,
+            row,
+            actor=_actor(auth)[1],
+            changed_fields=tuple(sorted(data)),
+        )
         _queue_work_order_tag_notifications(
             db,
             row,
             previous_tags=previous_tags,
             auth=auth,
         )
-        db.commit()
-        db.refresh(row)
+        if commit:
+            db.commit()
+            db.refresh(row)
+        else:
+            db.flush()
         return row
 
     @staticmethod

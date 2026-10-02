@@ -92,6 +92,20 @@ Customer and reseller checkout render only the server-owned gateway option
 projection. An empty projection produces an honest unavailable state. Templates
 must never invent Paystack, a provider key, or a default provider.
 
+Mobile checkout is a server-initialized hosted checkout. The API initializes
+the transaction through the intent capability pinned on the durable payment
+intent and returns an HTTPS checkout URL. The mobile WebView loads that
+first-party URL directly; it must not synthesize a local HTML origin or embed a
+provider's inline JavaScript. This keeps Paystack bank-app/cookie checks and
+third-party authorization redirects in the provider's supported navigation
+model while the server remains authoritative for verification and settlement.
+When the hosted page requests a native-wallet handoff, the mobile client offers
+HTTP(S) app links to the operating system before keeping them in the WebView,
+and sends custom application schemes to the operating system directly. Android
+`intent://` execution is restricted to OPay's verified package/scheme. The
+checkout stays on the app back stack so provider completion can return through
+the same server-owned callback and caller-specific verification path.
+
 ### Payment gateway setup page contract
 
 - Screen: `admin.integration.payment_gateway_setup`; control-plane editor.

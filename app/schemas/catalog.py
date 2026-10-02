@@ -17,6 +17,7 @@ from pydantic import (
 
 from app.models.billing import LedgerEntryType, LedgerSource
 from app.models.catalog import (
+    AccessRequirement,
     AccessType,
     AddOnType,
     BillingCycle,
@@ -42,6 +43,7 @@ from app.models.catalog import (
     ServiceType,
     SubscriptionStatus,
     SuspensionAction,
+    UsageAllowanceResetBasis,
 )
 from app.schemas.status_presentation import StatusPresentation
 
@@ -54,6 +56,10 @@ class UsageAllowanceRead(BaseModel):
     included_gb: int | None = None
     overage_rate: Decimal | None = None
     overage_cap_gb: int | None = None
+    reset_basis: UsageAllowanceResetBasis
+    validity_days: int | None = None
+    rollover_enabled: bool
+    rollover_validity_cycles: int
     is_active: bool
 
 
@@ -62,7 +68,20 @@ class UsageAllowanceCreate(BaseModel):
     included_gb: int | None = Field(default=None, ge=0)
     overage_rate: Decimal | None = Field(default=None, ge=0)
     overage_cap_gb: int | None = Field(default=None, ge=0)
+    reset_basis: UsageAllowanceResetBasis = UsageAllowanceResetBasis.calendar_month
+    validity_days: int | None = Field(default=None, ge=1, le=366)
+    rollover_enabled: bool = False
+    rollover_validity_cycles: int = Field(default=1, ge=1, le=1)
     is_active: bool = True
+
+    @model_validator(mode="after")
+    def validate_cycle_policy(self):
+        if (
+            self.reset_basis is UsageAllowanceResetBasis.renewal_cycle
+            and self.validity_days is None
+        ):
+            raise ValueError("validity_days is required for renewal-cycle allowances")
+        return self
 
 
 class UsageAllowanceUpdate(BaseModel):
@@ -70,7 +89,20 @@ class UsageAllowanceUpdate(BaseModel):
     included_gb: int | None = Field(default=None, ge=0)
     overage_rate: Decimal | None = Field(default=None, ge=0)
     overage_cap_gb: int | None = Field(default=None, ge=0)
+    reset_basis: UsageAllowanceResetBasis | None = None
+    validity_days: int | None = Field(default=None, ge=1, le=366)
+    rollover_enabled: bool | None = None
+    rollover_validity_cycles: int | None = Field(default=None, ge=1, le=1)
     is_active: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_cycle_policy(self):
+        if (
+            self.reset_basis is UsageAllowanceResetBasis.renewal_cycle
+            and self.validity_days is None
+        ):
+            raise ValueError("validity_days is required when selecting renewal-cycle")
+        return self
 
 
 class SlaProfileRead(BaseModel):
@@ -478,7 +510,13 @@ class SubscriptionBase(BaseModel):
 
 
 class SubscriptionCreate(SubscriptionBase):
-    pass
+    @model_validator(mode="after")
+    def _reject_owner_only_pause(self) -> SubscriptionCreate:
+        if self.status is SubscriptionStatus.paused:
+            raise ValueError(
+                "A paused subscription requires an authoritative pause episode"
+            )
+        return self
 
 
 class SubscriptionUpdate(BaseModel):
@@ -592,15 +630,19 @@ class SubscriptionRead(SubscriptionBase):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def expires_at(self) -> datetime | None:
-        """The date the service genuinely lapses, or null when it has none.
+        """The paid-through/service-expiry boundary exposed to clients.
 
-        This is an explicit contract end only. ``next_billing_at`` is the next
-        *charge* date (prepaid) / next invoice date (postpaid), NOT an expiry —
-        clients must not treat it as one. Prepaid service lapses on balance
-        exhaustion (a consumption-driven event, not a date); the real pending
-        lapse date in that case is exposed by ``GET /me/service-status``.
+        For prepaid service, ``next_billing_at`` is the projected end of the
+        currently paid entitlement and therefore the customer-visible expiry
+        boundary. For postpaid service it remains the next invoice date and must
+        never be presented as expiry; only an explicit contract ``end_at``
+        supplies a date-based expiry there.
         """
-        return self.end_at
+        if self.end_at is not None:
+            return self.end_at
+        if self.billing_mode is BillingMode.prepaid:
+            return self.next_billing_at
+        return None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -647,12 +689,33 @@ class OfferVersionBase(BaseModel):
 
 
 class OfferVersionCreate(OfferVersionBase):
-    pass
+    # Owned by service_intent.offer_access_requirement (Release 1): required
+    # and explicit on every new admission. ``unclassified`` remains an
+    # accepted explicit value in Release 1; there is no application-level
+    # fallback. Never present on OfferVersionUpdate — the field is immutable
+    # once admitted (docs/designs/CATALOG_ACCESS_REQUIREMENT_AUTHORITY.md).
+    access_requirement: AccessRequirement
 
 
 class OfferVersionUpdate(BaseModel):
-    offer_id: UUID | None = None
-    version_number: int | None = Field(default=None, ge=1)
+    # offer_id and version_number are deliberately NOT here: together they
+    # are this row's immutable identity (a DB-level unique constraint on the
+    # pair — alembic/versions/611_offer_versions_unique_version_number.py).
+    # Letting either change on an update would let a PATCH race a concurrent
+    # admission targeting the same pair with no advisory lock or duplicate
+    # check guarding it. Same pattern as access_requirement's exclusion
+    # below (docs/designs/CATALOG_ACCESS_REQUIREMENT_AUTHORITY.md).
+    #
+    # extra="forbid" (matching SubscriptionTechnicalUpdate's identical
+    # identity-guard convention above): without it, Pydantic's default
+    # "ignore extra fields" behavior silently DROPS an offer_id/
+    # version_number/access_requirement sent in a PATCH body before
+    # offers.py's `_assert_offer_version_identity_immutable`/
+    # `assert_access_requirement_immutable` guards ever see them via
+    # `model_dump(exclude_unset=True)` — the request would appear to
+    # succeed as a silent no-op instead of failing closed with a real error.
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = Field(default=None, min_length=1, max_length=160)
     code: str | None = Field(default=None, max_length=60)
     service_type: ServiceType | None = None
@@ -675,6 +738,7 @@ class OfferVersionRead(OfferVersionBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    access_requirement: AccessRequirement
     created_at: datetime
     updated_at: datetime
 
@@ -1194,8 +1258,9 @@ class PlanChangePageResponse(BaseModel):
     current_offer: PlanOfferSummary | None = None
     available_offers: list[PlanOfferSummary] = Field(default_factory=list)
     prepaid_funding: Decimal | None = None
-    postpaid_receivables: Decimal = Decimal("0.00")
-    collection_blocking_balance: Decimal = Decimal("0.00")
+    postpaid_receivables: Decimal | None = None
+    collection_blocking_balance: Decimal | None = None
+    financial_position_unavailable: bool = False
     next_billing_date: datetime | None = None
     billing_message: str | None = None
     service_addresses: list[ServiceAddressOption] = Field(default_factory=list)

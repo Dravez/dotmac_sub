@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -841,6 +846,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -853,6 +859,7 @@ DOMAIN = DomainSOT(
                             "channel configuration",
                             "recipient suppression ledger",
                             "recent notification history",
+                            "selected template purpose category",
                             "evaluation time",
                         ),
                     ),
@@ -892,6 +899,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "persisted recipient, event, category, status, and "
                             "creation time used by the dedupe window"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected template purpose category",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "purpose persisted on the selected NotificationTemplate "
+                            "for manual customer-page sends"
                         ),
                     ),
                     AuthorityInput(
@@ -976,6 +992,107 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.payment_template_adoption",
+            module="app.services.payment_template_adoption",
+            owns=("explicit payment email content adoption",),
+            depends_on=(
+                "communications.notification_service",
+                "tenancy.operator_tenant",
+            ),
+            notes=(
+                "Dormant explicit one-time coordinator. Template Studio alone owns "
+                "published content and subsequent authoring; Sub's legacy row "
+                "retains UUID, conditions, and active state until sealed cutover."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="explicit payment email content adoption",
+                        role=OwnerRole.APPLICATION_COORDINATOR,
+                        input_names=(
+                            "legacy payment email content",
+                            "operator tenant identity",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="legacy payment email content",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Current legacy NotificationTemplate EMAIL UUID, text, conditions, and active state.",
+                    ),
+                    AuthorityInput(
+                        name="operator tenant identity",
+                        owner="tenancy.operator_tenant",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Configured operator tenant UUID for Template Studio's tenant-scoped identity.",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.COORDINATOR_MANAGED,
+                    boundary=(
+                        "The explicit backfill enters execute_owner_command once on "
+                        "a transaction-free session. Studio service mutations "
+                        "flush and commit together in that transaction."
+                    ),
+                    locking=(
+                        "The Studio tenant/slug/channel unique constraint arbitrates "
+                        "concurrent creates; changed existing versions refuse adoption."
+                    ),
+                    idempotency=(
+                        "Legacy UUID and full snapshot digest bind each fixed Studio "
+                        "slug; exact replay performs no writes."
+                    ),
+                    retries=(
+                        "A conflict aborts the entire pair; an operator must resolve "
+                        "changed content before explicit retry."
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        *owner_command_boundary_error_codes(
+                            "communications.payment_template_adoption"
+                        ),
+                        "payment_template_adoption.ambiguous_legacy",
+                        "payment_template_adoption.invalid_legacy",
+                        "payment_template_adoption.studio_conflict",
+                        "payment_template_adoption.invalid_contexts",
+                        "payment_template_adoption.invalid_tenant",
+                        "payment_template_adoption.unsafe_runtime_role",
+                    ),
+                    mapping_owner="Explicit operator backfill caller",
+                    fail_closed_on=(
+                        "ambiguous legacy email identity",
+                        "invalid receipt content",
+                        "Studio operator edits or draft changes",
+                        "PostgreSQL current role with SUPERUSER or BYPASSRLS",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.SHADOWING,
+                    old_owner="No contracted one-time backfill owner",
+                    new_owner="communications.payment_template_adoption",
+                    verification="Explicit backfill and representative read-only parity report.",
+                    cutover_gate=(
+                        "First prove installed Studio content and parity; then seal "
+                        "the old content writer and switch rendering together."
+                    ),
+                    fallback_retirement="Retire legacy content writing at the sealed switch.",
+                ),
+                steward="customer communications",
+                design_refs=(
+                    "docs/designs/PAYMENT_EMAIL_COMPOSITION_CUTOVER.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_payment_template_adoption.py",
+                    "tests/architecture/test_payment_template_adoption_boundary.py",
+                    "tests/integration/test_payment_template_adoption_runtime_role_pg.py",
+                ),
+            ),
+        ),
+        SOTService(
             name="communications.customer_experience_intents",
             module="app.services.customer_experience_communications",
             owns=(
@@ -1021,6 +1138,7 @@ DOMAIN = DomainSOT(
             module="app.services.notification",
             owns=(
                 "notification template lifecycle and activation validity",
+                "notification-template purpose for customer-page sends",
                 "notification row lifecycle",
                 "delivery state",
                 "notification delivery latency class enforcement",
@@ -1038,7 +1156,10 @@ DOMAIN = DomainSOT(
                 "An explicit send_at always remains authoritative; otherwise "
                 "immediate delivery bypasses quiet-hours deferral while normal "
                 "and batch customer delivery continue to respect it. "
-                "Every web and API template mutation enters this owner. Inactive "
+                "For manual customer-page sends, the selected template's persisted "
+                "purpose supplies the customer-status policy category; automated "
+                "event categories remain owned by EventNotificationSpec. Every web "
+                "and API template mutation enters this owner. Inactive "
                 "drafts may remain incomplete, but activation validates the exact "
                 "renderer vocabulary and event-specific required fields. The "
                 "payment_received contract requires receipt_number and receipt_url "
@@ -2512,8 +2633,8 @@ DOMAIN = DomainSOT(
                         owner="auth.permission_gate",
                         kind=AuthorityKind.CONTROL_INPUT,
                         source=(
-                            "Typed administrator-selected Customer fields, actor, "
-                            "decision source, and command provenance."
+                            "Typed administrator-selected Customer fields, identity-guard "
+                            "decision, actor, decision source, and command provenance."
                         ),
                     ),
                 ),
@@ -2531,22 +2652,27 @@ DOMAIN = DomainSOT(
             name="communications.team_inbox_customer_completion",
             module="app.services.team_inbox_customer_completion",
             owns=(
-                "Customer-only Inbox resolution readiness",
+                "Inbox Customer completion and classified-Lead resolution readiness",
                 "canonical Inbox Customer profile completion coordination",
             ),
             depends_on=(
                 "communications.team_inbox_customer_completion_policy",
                 "communications.team_inbox_threads",
                 "communications.conversation_lead_relationships",
+                "ai.intake",
                 "customer.accounts",
                 "customer.canonical_profile_patch",
                 "party.registry",
+                "sales.lead_intake",
                 "observability.audit_log",
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_customer_completion",
                 concerns=(
-                    ("Customer-only Inbox resolution readiness", OwnerRole.RESOLVER),
+                    (
+                        "Inbox Customer completion and classified-Lead resolution readiness",
+                        OwnerRole.RESOLVER,
+                    ),
                     (
                         "canonical Inbox Customer profile completion coordination",
                         OwnerRole.APPLICATION_COORDINATOR,
@@ -2570,6 +2696,15 @@ DOMAIN = DomainSOT(
                         owner="communications.conversation_lead_relationships",
                         kind=AuthorityKind.AUTHORITATIVE_RECORD,
                         source="Active reviewed conversation-to-Lead link.",
+                    ),
+                    AuthorityInput(
+                        name="final Inbox sales classification",
+                        owner="ai.intake",
+                        kind=AuthorityKind.DERIVED_PROJECTION,
+                        source=(
+                            "Final classified inbound message metadata for a "
+                            "new-connection or coverage request with known party type."
+                        ),
                     ),
                     AuthorityInput(
                         name="canonical Customer profile",
@@ -3517,6 +3652,54 @@ DOMAIN = DomainSOT(
             ),
         ),
         SOTService(
+            name="communications.zeptomail_delivery_reconciliation",
+            module="app.services.zeptomail_delivery_reconciliation",
+            owns=("ZeptoMail provider delivery reconciliation",),
+            depends_on=(
+                "communications.notification_service",
+                "communications.team_inbox_outbound_intents",
+            ),
+            contract=_team_inbox_contract(
+                service_name="communications.zeptomail_delivery_reconciliation",
+                concerns=(
+                    (
+                        "ZeptoMail provider delivery reconciliation",
+                        OwnerRole.RECONCILER,
+                    ),
+                ),
+                inputs=(
+                    AuthorityInput(
+                        name="authenticated ZeptoMail delivery observation",
+                        owner="external:zeptomail",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "Signed webhook or OAuth email-log status, provider "
+                            "references, observed time, and bounded failure reason."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="submitted notification client reference",
+                        owner="communications.notification_service",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source=(
+                            "Notification UUID sent as X-TM-CLIENT-REF and its current "
+                            "provider-submission state."
+                        ),
+                    ),
+                ),
+                transaction_mode=TransactionMode.OWNER_MANAGED,
+                projections=(
+                    "provider-confirmed Notification and Inbox delivery state",
+                ),
+                test_refs=("tests/test_zeptomail_delivery_tracking.py",),
+            ),
+            notes=(
+                "SMTP acceptance is recorded as submitted, never delivered. Signed "
+                "callbacks handle delivered and bounce outcomes; the OAuth log "
+                "reconciler repairs missed callbacks and Process failed outcomes."
+            ),
+        ),
+        SOTService(
             name="communications.team_inbox_delivery_receipts",
             module="app.services.team_inbox_delivery_receipts",
             owns=("provider delivery receipt reconciliation",),
@@ -3722,7 +3905,9 @@ DOMAIN = DomainSOT(
                 "Party-first prospect capture only for unmatched identity, and "
                 "retain ambiguous identity for human review. The first persisted "
                 "widget visitor message requests optional, exact-scope AI intake; "
-                "missing or inactive policy leaves the human Inbox path unchanged."
+                "missing or inactive policy leaves the human Inbox path unchanged. "
+                "Visitor photo messages are stored by the same owner with "
+                "bounded image uploads and session-scoped private media reads."
             ),
             contract=_team_inbox_contract(
                 service_name="communications.team_inbox_widget",
@@ -3749,6 +3934,15 @@ DOMAIN = DomainSOT(
                         source=(
                             "Exact-origin typed name, email, optional phone, first "
                             "message, page provenance, client session id, and spam evidence."
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="typed visitor message and photo command",
+                        owner="communications.team_inbox_widget",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "Session-scoped text and up to five validated private "
+                            "image uploads bound to one native Inbox message."
                         ),
                     ),
                     AuthorityInput(
@@ -3784,6 +3978,16 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 transaction_mode=TransactionMode.OWNER_MANAGED,
+                domain_error_codes=(
+                    "communications.team_inbox_widget.message_required",
+                    "communications.team_inbox_widget.message_too_long",
+                    "communications.team_inbox_widget.too_many_photos",
+                    "communications.team_inbox_widget.invalid_photo",
+                    "communications.team_inbox_widget.invalid_message_id",
+                    "communications.team_inbox_widget.message_id_conflict",
+                    "communications.team_inbox_widget.media_not_found",
+                    "communications.team_inbox_widget.session_mismatch",
+                ),
                 event_types=(
                     "team_inbox.widget_message_recorded.v1",
                     "team_inbox.widget_read_state_changed.v1",
@@ -4829,4 +5033,169 @@ DOMAIN = DomainSOT(
     "communication services. Survey adapters delegate lifecycle, invitation "
     "and response writes to communications.surveys. Admin inbox mutation "
     "routes delegate to the committed team-inbox command boundary.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="communications.event_notifications",
+                label="Event-based customer notifications",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Notifications are triggered by fixed application events today; configurable rule actions are not connected.",
+            ),
+            AutomationCatalogItem(
+                key="communications.notification_delivery",
+                label="Notification delivery queue",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Delivery is managed by the notification service and cannot yet be configured as a rule.",
+            ),
+            AutomationCatalogItem(
+                key="communications.zeptomail_reconciliation",
+                label="ZeptoMail delivery reconciliation",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="This scheduled integration job has no Automation Center trigger or action yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.campaign_processing",
+                label="Campaign processing",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Campaign processing is currently handled by its existing scheduled service.",
+            ),
+            AutomationCatalogItem(
+                key="communications.operational_escalation_delivery",
+                label="Operational escalation delivery",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Escalation delivery is currently managed by its policy and delivery services.",
+            ),
+            AutomationCatalogItem(
+                key="communications.outgoing_webhooks",
+                label="Outgoing platform webhooks",
+                group="Messaging",
+                state=AutomationCatalogState.unavailable,
+                explanation="Webhook delivery is governed by registered integrations, not configurable rule steps yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.inbound_message_processing",
+                label="Inbound message processing",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Inbound messages use fixed identity, safety, and routing checks that are not rule steps yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.inbox_automation_rules",
+                label="Inbox automation rules",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing Inbox rule engine is not connected to the Automation Center's audited run history.",
+            ),
+            AutomationCatalogItem(
+                key="communications.fifo_queue_promotion",
+                label="FIFO queue promotion",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Queue promotion follows the current routing policy and is not configurable as a rule step.",
+            ),
+            AutomationCatalogItem(
+                key="communications.queue_position_notification",
+                label="Queue-position notification",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Queue notices are produced by the queue owner and are not configurable rule actions yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.scheduled_reply_release",
+                label="Scheduled reply release",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Scheduled replies are handled by the Inbox scheduler; no Center schedule trigger exists yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.snooze_wakeup",
+                label="Snooze wake-up",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Snooze timing is owned by the Inbox lifecycle and is not a configurable rule step yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.whatsapp_window_expiry",
+                label="WhatsApp service-window expiry",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The provider reply window is checked by existing message delivery safeguards.",
+            ),
+            AutomationCatalogItem(
+                key="communications.reply_reminders",
+                label="Reply reminders",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reminder timing and cancellation are owned by the reply-reminder service, not Center rules yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.ai_intake_processing",
+                label="AI intake processing",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="AI ownership and hand-off checks are protected by the AI intake owner and are not configurable rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="communications.ai_intake_recovery",
+                label="AI intake recovery",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="AI recovery is handled by its existing recovery worker and has no Center trigger yet.",
+            ),
+            AutomationCatalogItem(
+                key="communications.failed_outbound_retry",
+                label="Failed outbound message retry",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Retry limits and exact-message safeguards are not exposed as configurable rule actions.",
+            ),
+            AutomationCatalogItem(
+                key="communications.media_promotion",
+                label="Media promotion",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Media handling is performed by the existing upload and Inbox delivery services.",
+            ),
+            AutomationCatalogItem(
+                key="communications.participant_backfill",
+                label="Participant backfill",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="Participant repair is a maintenance action and is not available as a business rule step.",
+            ),
+            AutomationCatalogItem(
+                key="communications.stale_conversation_resolution",
+                label="Stale-conversation auto-resolution",
+                group="Team Inbox",
+                state=AutomationCatalogState.unavailable,
+                explanation="The active policy is code-managed and does not yet expose a safe Center rule contract.",
+            ),
+            AutomationCatalogItem(
+                key="communications.durable_timer_dispatcher",
+                label="Durable timer dispatcher",
+                group="Service levels",
+                state=AutomationCatalogState.unavailable,
+                explanation="Timer delivery is protected infrastructure; business timer rules are listed separately.",
+            ),
+            AutomationCatalogItem(
+                key="communications.retired_stale_auto_resolution",
+                label="Retired Team Inbox auto-resolution",
+                group="Team Inbox",
+                state=AutomationCatalogState.retired,
+                explanation="This automation is retired. Developers must restore and review its code before it can become available.",
+            ),
+            AutomationCatalogItem(
+                key="reports.ncc_weekly_report",
+                label="NCC weekly report",
+                group="Reports and exports",
+                state=AutomationCatalogState.unavailable,
+                explanation="The report delivery owner controls its local-time schedule and duplicate-send protection; the Center cannot reschedule it yet.",
+            ),
+        ),
+    ),
 )

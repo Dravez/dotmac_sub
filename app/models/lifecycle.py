@@ -12,6 +12,7 @@ from app.models.catalog import SubscriptionStatus
 
 class LifecycleEventType(enum.Enum):
     activate = "activate"
+    pause = "pause"
     suspend = "suspend"
     resume = "resume"
     cancel = "cancel"

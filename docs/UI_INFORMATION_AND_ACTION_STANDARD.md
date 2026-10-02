@@ -445,10 +445,22 @@ implementation.
   invoice or payment intent. Missing or unauthorized quotations render the same
   not-found state.
 - Review state: Draft/Sent Quotes without a current approval show `Awaiting
-  staff review` and no payment action. Approved Quotes show `Approved — Payment
-  required`. Rejected Quotes show the owner-supplied rejection message. Mobile
-  must consume `can_pay_deposit`; it must not infer payment eligibility from
-  Quote status or deposit amount.
+  staff review` and no payment action. Approved unpaid Quotes show `Approved —
+  Payment required`. Rejected Quotes show the owner-supplied rejection message.
+  A paid Quote shows `Paid` and no payment action, including when its linked
+  deposit Invoice is paid. Mobile consumes `deposit_paid` and `can_pay_deposit`;
+  it must not infer payment eligibility from Quote status or deposit amount.
+- Customer service requests show the selected installation or relocation type
+  and coverage before review. A move that changes access technology requires
+  the customer to choose a compatible destination plan before pinning the new
+  location. Customer Quote reads omit subtotal, tax, total,
+  deposit policy and amount, and priced line items until approval applies to the
+  current commercial snapshot. Staff must add at least one priced line and a
+  positive total before approving a request for payment. A changed Quote hides
+  prices again until staff approves its new snapshot. An approved relocation
+  shows the full charge and uses the canonical subscription-change Invoice
+  payment path. After settlement, the Home screen shows relocation progress
+  from the issued WorkOrder.
 - Mutation: the customer confirms through the CSRF-protected POST intent route.
   The request carries idempotency evidence only; it cannot submit amount,
   currency, invoice identity, or provider choice. The server fixes the provider
@@ -456,7 +468,9 @@ implementation.
   quotation-deposit capability.
 - States: unauthenticated, unauthorized/not found, expired, cancelled/inactive,
   already paid, Paystack unavailable, checkout failed, pending verification,
-  and confirmed are distinct and fail closed.
+  and confirmed are distinct and fail closed. Expected Paystack routing or
+  checkout-start failures return a generic retryable unavailable response; the
+  adapter logs the typed failure without exposing its configuration details.
 - Responsive behavior: summary and action stack on small screens, retain the
   authoritative amount and primary action, and do not expose internal
   collection-account or payment-intent identifiers.
@@ -736,6 +750,12 @@ implementation.
   acceptance, accepted, approved, rejected with reason, paid, and sync
   unavailable/failed remain distinct. A sent outbox event is never labelled
   accepted by ERP.
+- Approval actions: a selected approver with expense-write permission sees a
+  separate approval section for submitted claims on the exact work order.
+  **Approve** accepts every requested line amount unchanged and requires no
+  reason. **Adjust amount** opens positive line-level approved amounts and ends
+  with **Approve adjusted amount**; a reason is required only when a value
+  differs. Requested values remain visible and immutable.
 - Responsive behavior: line items are stacked cards at every width, controls
   retain labels and text errors, totals name their currency, and add/remove and
   submit actions remain accessible without relying on colour.
@@ -756,9 +776,10 @@ implementation.
   replacement, work-order completion, or reassignment cannot hide history;
   another requester's claim remains unavailable. New submission continues to
   require the owner-resolved active technician and assigned work order.
-- States: loading, empty, read failure, locally queued drafts, submitted,
-  approved, rejected, canceled, paid, and ERP/payment delivery problems remain
-  distinct. Manager mode defaults to `Pending` and provides separate
+- States: loading, empty, read failure, locally queued drafts, submitting to
+  ERP, submitted after ERP acceptance, submission failed with an inline Retry
+  action, approved, rejected, canceled, paid, and ERP/payment delivery problems
+  remain distinct. Manager mode defaults to `Pending` and provides separate
   `My request` and `History` tabs. The requester tab uses the same requester
   query. The pending and resolved manager tabs filter the authoritative manager
   projection without reinterpreting expense status, and every history item
@@ -772,6 +793,11 @@ implementation.
   is unresolved or unavailable, navigation also omits Materials, and a manager
   restored onto that branch receives manager content rather than the material
   list.
+- Manager approval actions: **Approve** remains the primary one-tap action for
+  an unchanged request. **Adjust amount** is secondary and prepopulates every
+  line with its requested value. Adjusted approvals show requested total,
+  approved total, and reason in manager and requester history. Approval is
+  online-only and a stale revision fails closed with refresh guidance.
 
 ## Field Work-Order Note Contract
 

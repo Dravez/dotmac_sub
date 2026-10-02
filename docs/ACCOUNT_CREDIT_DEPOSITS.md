@@ -88,6 +88,14 @@ against a current succeeded payment is repair drift, not an active customer
 request, so the active-request owner does not block a replacement deposit while
 `financial.topup_intent_proof_reconciliation` remains the repair owner.
 
+The self-care `GET /api/v1/me/topup` response includes both `deposit_allowed`
+and the owner's `active_deposit_request` projection. The mobile Top Up page
+shows the request's message, amount, and reference when deposits are blocked,
+and does not request an allocation preview or offer another checkout. Refresh
+re-reads the owner projection. When a preview request fails for another reason,
+the page shows the API's safe error message and offers a retry; online checkout
+still requires a fresh preview fingerprint.
+
 The owner-generated preview is mandatory before checkout starts. For the exact
 requested amount it reports:
 
@@ -103,6 +111,14 @@ invoice set with the balances and ordering facts that affect application.
 Gateway and direct-transfer intent creation must present that reviewed
 fingerprint back to the owner. If the reviewed preview is stale, intent
 creation fails closed and the customer must review the updated preview first.
+
+Mobile direct transfer follows the same owner sequence as the web flow: create
+the exact typed intent, present the collection-account identities returned by
+the server, and submit the receipt with both `intent_id` and
+`selected_account_id`. Direct transfer is not an online gateway option. If the
+customer explicitly abandons the receipt step, the mobile adapter calls the
+canonical unsubmitted-intent cancellation command so the abandoned request
+does not block a later deposit.
 
 If an invoice appears after intent creation, confirmed cash is accepted and the
 new credit is immediately applied to eligible invoices. Duplicate callbacks and

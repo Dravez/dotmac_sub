@@ -82,7 +82,10 @@ from app.services.access_resolution import resolve_customer_access
 from app.services.billing_profile import resolve_billing_profiles
 from app.services.billing_settings import resolve_payment_due_days
 from app.services.credential_crypto import decrypt_credential
-from app.services.customer_financial_position import prepaid_available_balances
+from app.services.customer_financial_position import (
+    get_customer_billing_summary,
+    prepaid_available_balances,
+)
 from app.services.customer_network_path import (
     SubscriptionNetworkPath,
     project_customer_network_map,
@@ -491,18 +494,18 @@ def _build_common_financials(db: Session, accounts: Sequence[Subscriber]):
                 exc_info=True,
             )
 
-    total_invoiced = 0
+    total_invoiced = Decimal("0.00")
     total_paid = 0
     overdue_invoices = 0
     last_payment = None
     last_invoice = None
     if account_ids:
-        total_invoiced = (
-            db.query(func.coalesce(func.sum(Invoice.total), 0))
-            .filter(Invoice.account_id.in_(account_ids))
-            .filter(Invoice.is_active.is_(True))
-            .scalar()
-            or 0
+        total_invoiced = sum(
+            (
+                get_customer_billing_summary(db, account_id).total_billed
+                for account_id in account_ids
+            ),
+            start=Decimal("0.00"),
         )
         total_paid = (
             db.query(func.coalesce(func.sum(Payment.amount), 0))

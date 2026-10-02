@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.field import router
+from app.api.field.expense_requests import _expense_command_error
 from app.db import get_db
 from app.models.dispatch import TechnicianProfile
 from app.models.field_erp_sync import (
+    FieldErpSyncEvent,
     FieldErpSyncFlow,
+    FieldErpSyncStatus,
     SyncFlowOwner,
     SyncFlowOwnership,
 )
@@ -24,6 +28,7 @@ from app.models.subscriber import Subscriber, UserType
 from app.models.system_user import SystemUser
 from app.models.vendor_routes import Vendor
 from app.models.work_order import WorkOrder
+from app.services import backoffice
 from app.services.auth_dependencies import require_user_auth
 from app.services.field import attachments as attachments_module
 from app.services.field import expense_categories as expense_categories_module
@@ -277,6 +282,119 @@ def _submit_expense(
         ),
     )
     return field_expense_requests.get(db_session, _auth(user), str(outcome.id))
+
+
+def test_submission_enqueue_failure_logs_safe_context_and_retries_idempotently(
+    db_session, monkeypatch, caplog
+):
+    user = _user(db_session)
+    _profile(db_session, user)
+    subscriber = _subscriber(db_session)
+    work_order = _work_order(
+        db_session,
+        subscriber,
+        crm_work_order_id="wo-expense-staging-failure",
+    )
+    request_id = uuid4()
+    account_number = "0123456789"
+    destination_token = "secret-destination-token-value"
+    original_enqueue = backoffice.enqueue_expense_submission
+
+    def fail_enqueue(*_args, **_kwargs):
+        raise RuntimeError(
+            f"unsafe provider detail {destination_token} {account_number}"
+        )
+
+    monkeypatch.setattr(backoffice, "enqueue_expense_submission", fail_enqueue)
+    with caplog.at_level(logging.ERROR, logger="app.services.field.expense_requests"):
+        with pytest.raises(FieldExpenseRequestError) as raised:
+            _submit_expense(
+                db_session,
+                user,
+                work_order,
+                request_id=request_id,
+            )
+
+    assert raised.value.code == "operations.expense_requests.erp_staging_failed"
+    assert raised.value.details == {}
+    assert db_session.get(FieldExpenseRequest, request_id) is None
+    assert (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == request_id)
+        .count()
+        == 0
+    )
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "Field expense ERP delivery staging failed"
+    )
+    assert record.request_id == str(request_id)
+    assert record.expense_request_id == str(request_id)
+    assert record.command_id == str(request_id)
+    assert record.correlation_id == str(request_id)
+    assert record.work_order_public_id == work_order.public_id
+    assert record.requester_system_user_id == str(user.id)
+    assert record.exception_type == "RuntimeError"
+    assert "Traceback" in caplog.text
+    assert destination_token not in caplog.text
+    assert account_number not in caplog.text
+
+    monkeypatch.setattr(backoffice, "enqueue_expense_submission", original_enqueue)
+    created = _submit_expense(
+        db_session,
+        user,
+        work_order,
+        request_id=request_id,
+    )
+    replayed = _submit_expense(
+        db_session,
+        user,
+        work_order,
+        request_id=request_id,
+    )
+    assert created["id"] == replayed["id"] == request_id
+    assert db_session.query(FieldExpenseRequest).filter_by(id=request_id).count() == 1
+    assert (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == request_id)
+        .count()
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "operations.expense_requests.erp_staging_failed",
+        "operations.expense_requests.erp_delivery_not_configured",
+    ),
+)
+def test_mobile_expense_erp_staging_errors_are_service_unavailable(code):
+    error = _expense_command_error(
+        FieldExpenseRequestError(
+            code=code,
+            message="ERP delivery is temporarily unavailable. Please retry.",
+        )
+    )
+
+    assert error.status_code == 503
+    assert error.detail == {
+        "code": code,
+        "message": "ERP delivery is temporarily unavailable. Please retry.",
+        "details": {},
+    }
+
+
+def test_mobile_expense_genuine_idempotency_conflict_remains_conflict():
+    error = _expense_command_error(
+        FieldExpenseRequestError(
+            code="operations.expense_requests.idempotency_conflict",
+            message="Request identity was already used with different expense details.",
+        )
+    )
+
+    assert error.status_code == 409
 
 
 def _cancel_expense(db_session, user: SystemUser, request_id):
@@ -666,10 +784,12 @@ def test_expense_request_api(db_session, fake_uploads, monkeypatch):
     receipt = client.post(
         "/api/v1/field/expense-requests/receipts",
         data={"work_order_id": "wo-expense-api"},
-        files={"file": ("taxi.jpg", b"receipt-bytes", "image/jpeg")},
+        files={"file": ("taxi.png", b"\x89PNG\r\n\x1a\n", "image/png")},
     )
     assert receipt.status_code == 201
     assert receipt.json()["work_order_id"] == "wo-expense-api"
+    assert receipt.json()["file_name"] == "taxi.png"
+    assert receipt.json()["mime_type"] == "image/png"
 
     retired = client.post(
         "/api/v1/field/expense-requests",
@@ -736,6 +856,18 @@ def test_expense_request_api(db_session, fake_uploads, monkeypatch):
     detail = client.get(f"/api/v1/field/expense-requests/{request_id}")
     assert detail.status_code == 200
     assert detail.json()["id"] == request_id
+
+    delivery = (
+        db_session.query(FieldErpSyncEvent)
+        .filter(FieldErpSyncEvent.entity_id == UUID(request_id))
+        .one()
+    )
+    delivery.status = FieldErpSyncStatus.dead.value
+    db_session.commit()
+    retried = client.post(f"/api/v1/field/expense-requests/{request_id}/retry-delivery")
+    assert retried.status_code == 200
+    assert retried.json()["erp_sync_status"] == "pending"
+    assert retried.json()["erp_sync_event_id"] == str(delivery.id)
 
     legacy_submit = client.post(f"/api/v1/field/expense-requests/{request_id}/submit")
     assert legacy_submit.status_code == 410

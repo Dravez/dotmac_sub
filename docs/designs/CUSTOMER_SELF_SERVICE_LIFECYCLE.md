@@ -114,6 +114,13 @@ connection/outage evidence, freshness, next action, and any pending plan or
 network change. Customer Portal, Reseller Portal, Customer 360, and mobile
 consume the same DTO.
 
+The customer service-change options response preserves an unverified financial
+position. When reviewed prepaid funding evidence is missing, the page owner
+returns `financial_position_unavailable=true` and null for prepaid funding,
+postpaid receivables, and collection-blocking balance. The API and mobile client
+preserve those nulls; the client explains that review is required and disables
+plan selection. The command owner remains the final admission gate.
+
 Operationally current is a typed lifecycle-policy decision evaluated at one
 explicit instant. The normal cohort is `pending`, `active`, `blocked`,
 `suspended`, `stopped`, and `disabled`; only a `stopped` or `disabled` row whose
@@ -209,6 +216,11 @@ Completed in this slice:
   actor, and reason, then resumes only from structural payment, fulfillment,
   RADIUS, or provisioning evidence. A crash after payment settlement but before
   fulfillment release is explicitly detectable and repairable.
+- Customer 360 Stats Records treats custom start and end dates as an inclusive
+  typed usage window owned by `customer.usage_summary`. The table, chart,
+  pagination links, and CSV export preserve that exact window. CSV serialization
+  remains an admin adapter concern, exports all matching rows rather than only the
+  current page, and neutralizes spreadsheet-formula prefixes in textual cells.
 
 The lifecycle migration is complete. Further changes extend this contract and
 must preserve these owners rather than introduce compatibility writers.

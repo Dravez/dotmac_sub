@@ -1,14 +1,16 @@
 """Billing and arrangement flows for customer portal."""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.billing import (
     CreditNote,
@@ -50,6 +52,57 @@ INTERNAL_LEDGER_MEMO_PREFIXES = (
     "Data repair 2026-06-29:",
     "Validated account credit consumed",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerInvoiceHistoryQuery:
+    """Typed customer-visible invoice-history cohort and page request."""
+
+    account_id: UUID
+    status: InvoiceStatus | None
+    page: int
+    per_page: int
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerInvoiceHistoryPage:
+    """One bounded invoice-history page and its exact filtered total."""
+
+    invoices: tuple[Invoice, ...]
+    total: int
+
+
+def _get_customer_invoice_history(
+    db: Session,
+    query: CustomerInvoiceHistoryQuery,
+) -> CustomerInvoiceHistoryPage:
+    filters = [
+        Invoice.account_id == query.account_id,
+        Invoice.is_active.is_(True),
+    ]
+    if query.status is None:
+        filters.append(Invoice.status != InvoiceStatus.void)
+    else:
+        filters.append(Invoice.status == query.status)
+
+    invoices = tuple(
+        db.scalars(
+            select(Invoice)
+            .options(
+                selectinload(Invoice.lines),
+                selectinload(Invoice.payment_allocations),
+            )
+            .where(*filters)
+            .order_by(
+                func.coalesce(Invoice.issued_at, Invoice.created_at).desc(),
+                Invoice.id.asc(),
+            )
+            .limit(query.per_page)
+            .offset((query.page - 1) * query.per_page)
+        ).all()
+    )
+    total = db.scalar(select(func.count(Invoice.id)).where(*filters)) or 0
+    return CustomerInvoiceHistoryPage(invoices=invoices, total=int(total))
 
 
 def _enum_value(value: Any) -> str:
@@ -201,27 +254,21 @@ def get_billing_page(
     if not account_id_str:
         return empty_result
 
-    invoices = billing_service.invoices.list(
-        db=db,
-        account_id=account_id_str,
-        status=status if status else None,
-        is_active=None,
-        order_by="issued_at",
-        order_dir="desc",
-        limit=per_page,
-        offset=(page - 1) * per_page,
+    requested_status = cast(
+        InvoiceStatus | None,
+        _validate_enum(status, InvoiceStatus, "status") if status else None,
     )
-
-    stmt = (
-        select(func.count(Invoice.id))
-        .where(Invoice.account_id == coerce_uuid(account_id_str))
-        .where(Invoice.is_active.is_(True))
+    history = _get_customer_invoice_history(
+        db,
+        CustomerInvoiceHistoryQuery(
+            account_id=coerce_uuid(account_id_str),
+            status=requested_status,
+            page=page,
+            per_page=per_page,
+        ),
     )
-    if status:
-        stmt = stmt.where(
-            Invoice.status == _validate_enum(status, InvoiceStatus, "status")
-        )
-    total = db.scalar(stmt) or 0
+    invoices = history.invoices
+    total = history.total
     prepaid_balance: Decimal | None = None
     try:
         prepaid_balance = get_available_balance(db, account_id_str)

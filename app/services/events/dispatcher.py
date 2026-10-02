@@ -11,7 +11,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from app.models.event_store import EventStatus, EventStore
 from app.services import event_store as event_store_service
 from app.services.domain_errors import DomainError
 from app.services.events.types import Event, EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.session_hooks import run_after_commit
 
 logger = logging.getLogger(__name__)
@@ -529,6 +530,7 @@ def reset_dispatcher() -> None:
 def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     """Initialize and register all event handlers."""
     from app.services.events.handlers.arrangements import ArrangementHandler
+    from app.services.events.handlers.automation import AutomationEventHandler
     from app.services.events.handlers.billing_lifecycle_projection import (
         BillingLifecycleProjectionHandler,
     )
@@ -542,6 +544,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     from app.services.events.handlers.ip_assignment_projection import (
         IPAssignmentProjectionHandler,
     )
+    from app.services.events.handlers.lead_intake import LeadIntakeHandler
     from app.services.events.handlers.lifecycle import LifecycleHandler
     from app.services.events.handlers.materials_lifecycle_projection import (
         MaterialsLifecycleProjectionHandler,
@@ -580,12 +583,14 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     dispatcher.register_handler(IPAssignmentProjectionHandler())
     dispatcher.register_handler(CredentialSessionProjectionHandler())
     dispatcher.register_handler(ArrangementHandler())
+    dispatcher.register_handler(AutomationEventHandler())
     from app.services.events.handlers.subscription_change_execution import (
         SubscriptionChangeExecutionHandler,
     )
 
     dispatcher.register_handler(SubscriptionChangeExecutionHandler())
     dispatcher.register_handler(ReferralHandler())
+    dispatcher.register_handler(LeadIntakeHandler())
     dispatcher.register_handler(PrepaidRenewalHandler())
     dispatcher.register_handler(StaffInviteHandler())
     dispatcher.register_handler(ResellerInviteHandler())
@@ -603,6 +608,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
         "Event handlers initialized: integration_delivery, lifecycle, "
         "notification, provisioning, sales_lifecycle_projection, enforcement, "
         "ip_assignment_projection, credential_session_projection, arrangements, "
+        "automation, "
         "referral, prepaid_renewal, "
         "staff_invite, reseller_invite, password_recovery",
         extra={
@@ -617,6 +623,7 @@ def emit_event(
     event_type: EventType,
     payload: dict[str, Any],
     *,
+    event_id: UUID | None = None,
     actor: str | None = None,
     subscriber_id: UUID | str | None = None,
     account_id: UUID | str | None = None,
@@ -638,6 +645,7 @@ def emit_event(
         db: Database session
         event_type: The type of event
         payload: Event-specific data
+        event_id: Optional caller-owned deterministic event identity
         actor: Who/what triggered the event
         subscriber_id: Related subscriber ID
         account_id: Related account ID
@@ -661,6 +669,14 @@ def emit_event(
         )
     """
 
+    # Events are emitted by a single-operator deployment. Stamp the envelope
+    # once at the shared boundary so automation and other consumers do not
+    # have to infer tenant scope from optional transport metadata. A caller's
+    # explicit value remains authoritative and is validated by its consumer.
+    event_payload = dict(payload)
+    if isinstance(db, Session):
+        event_payload.setdefault("tenant_id", str(OPERATOR_TENANT_ID))
+
     # Normalize UUIDs
     def to_uuid(value: UUID | str | None) -> UUID | None:
         if value is None:
@@ -671,7 +687,8 @@ def emit_event(
 
     event = Event(
         event_type=event_type,
-        payload=payload,
+        payload=event_payload,
+        event_id=event_id or uuid4(),
         actor=actor,
         subscriber_id=to_uuid(subscriber_id),
         account_id=to_uuid(account_id),

@@ -53,6 +53,7 @@ import '../features/support/ticket_detail_screen.dart';
 import '../features/support/tickets_screen.dart';
 import '../features/service/service_tab_screen.dart';
 import '../models/subscription.dart';
+import '../models/service_request_option.dart';
 import '../providers/auth_controller.dart';
 import '../providers/impersonation.dart';
 
@@ -174,14 +175,31 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/chat', redirect: (_, __) => '/support/chat'),
       GoRoute(
         path: '/pay',
-        builder: (_, state) =>
-            PaymentWebViewScreen(args: state.extra as CheckoutArgs),
+        // CheckoutArgs is intentionally in-memory only. A gateway return URL
+        // cannot reconstruct it, so PaymentLinkHandler owns those links.
+        // Keep this guard as defence in depth for stale external links and
+        // process-restoration attempts.
+        redirect: (_, state) => paymentRouteRedirect(state.extra),
+        builder: (_, state) => PaymentWebViewScreen(
+          args: state.extra as CheckoutArgs,
+        ),
       ),
-      // Self-serve installation quotes (map-pin → estimate → pay deposit).
-      GoRoute(path: '/quotes', builder: (_, __) => const QuotesScreen()),
+      // Self-serve service quotes (map-pin → estimate → pay deposit).
+      GoRoute(
+        path: '/quotes',
+        builder: (_, state) => QuotesScreen(
+          sourceSubscriptionId: state.extra is Subscription
+              ? (state.extra as Subscription).id
+              : null,
+        ),
+      ),
       GoRoute(
         path: '/quotes/request',
-        builder: (_, __) => const QuoteRequestScreen(),
+        redirect: (_, state) =>
+            state.extra is ServiceRequestSelection ? null : '/quotes',
+        builder: (_, state) => QuoteRequestScreen(
+          selection: state.extra as ServiceRequestSelection,
+        ),
       ),
       // Account — identity & settings, reached from the header avatar
       // (AccountAvatarButton) instead of a bottom-nav tab. A top-level route
@@ -412,6 +430,13 @@ final routerProvider = Provider<GoRouter>((ref) {
     ],
   );
 });
+
+/// /pay may only be opened by an active checkout flow, which supplies its
+/// non-serializable [CheckoutArgs] via GoRouter's in-memory `extra` value.
+/// Deep links have no such value and must return to a stable screen instead of
+/// throwing while casting null to CheckoutArgs.
+String? paymentRouteRedirect(Object? extra) =>
+    extra is CheckoutArgs ? null : '/billing';
 
 /// Root navigator key. Drill-down routes live inside the shell (bottom bar
 /// stays); only modal money tasks (/topup, /pay) sit above it as top-level

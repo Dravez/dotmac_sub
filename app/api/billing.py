@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.webhook_observation import webhook_observation
-from app.db import finish_read_response, get_db
+from app.db import begin_read_only_snapshot, finish_read_response, get_db
 from app.models.audit import AuditActorType
 from app.models.billing import (
     InvoiceStatus,
@@ -108,6 +108,10 @@ from app.schemas.billing import (
     PaymentAllocationPreviewRead,
     PaymentAllocationPreviewRequest,
     PaymentAllocationRead,
+    PaymentAllocationReversalConfirm,
+    PaymentAllocationReversalPreviewRead,
+    PaymentAllocationReversalPreviewRequest,
+    PaymentAllocationReversalRead,
     PaymentChannelAccountCreate,
     PaymentChannelAccountRead,
     PaymentChannelAccountUpdate,
@@ -156,7 +160,11 @@ from app.services.application_exception_observability import (
     PaymentVerificationOutcome,
     record_payment_verification_outcome,
 )
-from app.services.auth_dependencies import require_permission, require_user_auth
+from app.services.auth_dependencies import (
+    require_any_permission,
+    require_permission,
+    require_user_auth,
+)
 from app.services.billing import adjustments as account_adjustment_service
 from app.services.customer_context import require_customer_account_id
 from app.services.db_session_adapter import db_session_adapter
@@ -192,6 +200,24 @@ CARD_SAVE_ERROR_MESSAGE = (
     "Payment was recorded, but we could not save this card. You can add a card "
     "from Payment Methods."
 )
+
+# The narrower egress scope for a future ERP accounting-sync machine
+# principal. Does not widen any existing scope: it grants ONLY the v2
+# accounting-sync feed, never the legacy /invoices/sync endpoint below.
+INTEGRATION_ACCOUNTING_SYNC_READ_SCOPE = "integration:accounting_sync:read"
+
+_PARTIAL_CURSOR_DETAIL = (
+    "after_updated_at and after_id must both be supplied together, or neither."
+)
+
+
+def _validate_sync_cursor_pair(
+    after_updated_at: datetime | None, after_id: UUID | None
+) -> None:
+    """Decision B: a partial keyset-cursor pair is a caller error (422),
+    validated at the endpoint boundary before any service call."""
+    if (after_updated_at is None) != (after_id is None):
+        raise HTTPException(status_code=422, detail=_PARTIAL_CURSOR_DETAIL)
 
 
 # --- Dashboard ---
@@ -239,9 +265,24 @@ def sync_invoices(
     ),
     limit: int = Query(default=500, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    after_updated_at: datetime | None = Query(
+        default=None,
+        description=(
+            "Keyset cursor watermark: return rows after this updated_at "
+            "(paired with after_id). Supply both or neither."
+        ),
+    ),
+    after_id: UUID | None = Query(
+        default=None,
+        description=(
+            "Keyset cursor tiebreaker id (paired with after_updated_at). "
+            "Supply both or neither."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """Lightweight, deterministic invoice feed for accounting synchronization."""
+    _validate_sync_cursor_pair(after_updated_at, after_id)
     return finish_read_response(
         db,
         billing_service.invoices.sync_list_response(
@@ -252,6 +293,8 @@ def sync_invoices(
             updated_since=updated_since,
             limit=limit,
             offset=offset,
+            after_updated_at=after_updated_at,
+            after_id=after_id,
         ),
     )
 
@@ -260,7 +303,13 @@ def sync_invoices(
     "/invoices/accounting-sync/v2",
     response_model=ListResponse[InvoiceAccountingSyncRead],
     tags=["invoices"],
-    dependencies=[Depends(require_permission("billing:invoice:read"))],
+    dependencies=[
+        Depends(
+            require_any_permission(
+                "billing:invoice:read", INTEGRATION_ACCOUNTING_SYNC_READ_SCOPE
+            )
+        )
+    ],
 )
 def sync_invoices_for_accounting_v2(
     invoice_id: UUID | None = None,
@@ -273,10 +322,35 @@ def sync_invoices_for_accounting_v2(
     ),
     limit: int = Query(default=500, ge=1, le=SYNC_FEED_MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
+    after_updated_at: datetime | None = Query(
+        default=None,
+        description=(
+            "Keyset cursor watermark: return rows after this updated_at "
+            "(paired with after_id). Supply both or neither."
+        ),
+    ),
+    after_id: UUID | None = Query(
+        default=None,
+        description=(
+            "Keyset cursor tiebreaker id (paired with after_updated_at). "
+            "Supply both or neither."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """Return versioned invoice accounting facts and blocking issue codes."""
 
+    # This response now carries a content digest alongside each invoice's
+    # header/lines/issues, resolved by three separate selectinload statements
+    # (header, account, lines). Under READ COMMITTED a commit landing between
+    # those statements could leave updated_at stale while lines/digest moved —
+    # exactly the "same revision key, different projection" contradiction this
+    # feed exists to close, just from a within-process race. Pinning one
+    # REPEATABLE READ, READ ONLY snapshot before any query runs makes every
+    # statement in this request see the same point-in-time data (a no-op on
+    # non-PostgreSQL binds; see app.db.begin_read_only_snapshot).
+    begin_read_only_snapshot(db)
+    _validate_sync_cursor_pair(after_updated_at, after_id)
     return finish_read_response(
         db,
         invoice_sync_projection.list_invoice_accounting_sync(
@@ -289,6 +363,8 @@ def sync_invoices_for_accounting_v2(
                 updated_since=updated_since,
                 limit=limit,
                 offset=offset,
+                after_updated_at=after_updated_at,
+                after_id=after_id,
             ),
         ),
     )
@@ -1038,6 +1114,31 @@ def list_payment_allocations(
 )
 def delete_payment_allocation(allocation_id: str, db: Session = Depends(get_db)):
     billing_service.payment_allocations.delete(db, allocation_id)
+
+
+@router.post(
+    "/payment-allocation-reversals/preview",
+    response_model=PaymentAllocationReversalPreviewRead,
+    tags=["payments"],
+    dependencies=[Depends(require_permission("billing:payment:update"))],
+)
+def preview_payment_allocation_reversal(
+    payload: PaymentAllocationReversalPreviewRequest, db: Session = Depends(get_db)
+):
+    return billing_service.payment_allocations.preview_reviewed_reversal(db, payload)
+
+
+@router.post(
+    "/payment-allocation-reversals/confirm",
+    response_model=PaymentAllocationReversalRead,
+    status_code=status.HTTP_200_OK,
+    tags=["payments"],
+    dependencies=[Depends(require_permission("billing:payment:update"))],
+)
+def confirm_payment_allocation_reversal(
+    payload: PaymentAllocationReversalConfirm, db: Session = Depends(get_db)
+):
+    return billing_service.payment_allocations.confirm_reviewed_reversal(db, payload)
 
 
 # --- Credit Note Lines ---
@@ -2132,6 +2233,7 @@ def _require_subscriber(principal: dict) -> dict:
 )
 def initiate_payment(
     payload: PaymentInitiateRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: Session = Depends(get_db),
     principal: dict = Depends(require_user_auth),
 ):
@@ -2154,6 +2256,7 @@ def initiate_payment(
                 str(payload.payment_method_id) if payload.payment_method_id else None
             ),
             idempotency_key=payload.idempotency_key,
+            redirect_url=(str(request.url_for("verify_payment")) if request else None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2164,9 +2267,12 @@ def initiate_payment(
             detail=PAYMENT_CHARGE_ERROR_MESSAGE,
         ) from exc
     return PaymentInitiateResponse(
+        intent_id=result.get("intent_id"),
         invoice_id=payload.invoice_id,
         invoice_number=result.get("invoice_number"),
-        amount=Decimal(str(result.get("amount") or 0)),
+        amount=Decimal(
+            str(result.get("amount") or result.get("requested_amount") or 0)
+        ),
         currency=result.get("currency", "NGN"),
         provider_type=result["provider_type"],
         provider_public_key=result.get("provider_public_key"),

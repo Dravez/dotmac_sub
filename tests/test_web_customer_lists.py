@@ -2,6 +2,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.models.catalog import (
     AccessType,
     BillingCycle,
@@ -23,9 +25,11 @@ from app.models.network import (
     IPAssignment,
     IPv4Address,
     IPVersion,
+    MgmtIpMode,
     OLTDevice,
     OntAssignment,
     OntUnit,
+    OnuMode,
     PonPort,
 )
 from app.models.network_monitoring import DeviceType, NetworkDevice, PopSite
@@ -243,6 +247,49 @@ def test_customer_list_excludes_reseller_users(db_session):
     assert reseller.email not in emails
 
 
+def test_customer_search_loads_bridge_mode_ont_assignment(db_session):
+    customer = _make_customer(
+        db_session, f"bridge-ont-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    ont = OntUnit(serial_number=f"ONT-{uuid.uuid4().hex}")
+    db_session.add(ont)
+    db_session.flush()
+    db_session.add(
+        OntAssignment(
+            ont_unit_id=ont.id,
+            subscriber_id=customer.id,
+            active=True,
+            wan_mode="bridge",
+            ip_mode="bridge",
+        )
+    )
+    db_session.commit()
+
+    context = _build_context(
+        db_session,
+        search=customer.email,
+        status=None,
+        customer_type=None,
+        nas_id=None,
+        pop_site_id=None,
+        page=1,
+        per_page=25,
+    )
+
+    assert [item["email"] for item in context["customers"]] == [customer.email]
+    assignment = context["customers"][0]["raw"].ont_assignments[0]
+    assert assignment.wan_mode is OnuMode.bridging
+    assert assignment.ip_mode is MgmtIpMode.dhcp
+
+
+def test_ont_assignment_rejects_unknown_mode_values():
+    with pytest.raises(ValueError, match="Invalid ONT assignment WAN mode"):
+        OntAssignment(ont_unit_id=uuid.uuid4(), wan_mode="pppoe")
+
+    with pytest.raises(ValueError, match="Invalid ONT assignment IP mode"):
+        OntAssignment(ont_unit_id=uuid.uuid4(), ip_mode="bridge_mode")
+
+
 def test_customer_billing_filter_uses_profiles_and_non_billable_authority(db_session):
     prepaid = _make_customer(db_session, "prepaid-filter@example.com")
     _make_subscription(
@@ -354,6 +401,102 @@ def test_customer_non_billable_filter_requires_every_collectible_service_to_be_f
 
     assert non_billable["customers"] == []
     assert {item["email"] for item in postpaid["customers"]} == {mixed.email}
+
+
+def test_customer_non_billable_section_includes_missing_catalog_price_for_review(
+    db_session,
+):
+    customer = _make_customer(db_session, "missing-price-review@example.com")
+    _make_subscription(
+        db_session,
+        customer,
+        status=SubscriptionStatus.active,
+        billing_mode=BillingMode.prepaid,
+        offer=_make_offer(db_session, recurring_amount=None),
+    )
+    db_session.commit()
+
+    context = _build_context(
+        db_session,
+        search="missing-price-review",
+        status=None,
+        customer_type=None,
+        nas_id=None,
+        pop_site_id=None,
+        billing_mode="non_billable",
+        page=1,
+        per_page=25,
+    )
+
+    assert {item["email"] for item in context["customers"]} == {customer.email}
+    row = context["customers"][0]
+    assert row["chargeability_label"] == "Review required"
+    assert "missing catalog price" in row["chargeability_detail"]
+
+
+def test_customer_non_billable_section_includes_disabled_free_service(db_session):
+    customer = _make_customer(db_session, "disabled-free-review@example.com")
+    customer.status = SubscriberStatus.delinquent
+    _make_subscription(
+        db_session,
+        customer,
+        status=SubscriptionStatus.disabled,
+        billing_mode=BillingMode.prepaid,
+        offer=_make_offer(db_session, recurring_amount=Decimal("0.00")),
+    )
+    db_session.commit()
+
+    context = _build_context(
+        db_session,
+        search="disabled-free-review",
+        status=None,
+        customer_type=None,
+        nas_id=None,
+        pop_site_id=None,
+        billing_mode="non_billable",
+        page=1,
+        per_page=25,
+    )
+
+    assert {item["email"] for item in context["customers"]} == {customer.email}
+    assert context["customers"][0]["chargeability_label"] == ("Confirmed non-billable")
+    assert context["customers"][0]["status"] == SubscriberStatus.delinquent.value
+
+
+def test_customer_non_billable_section_marks_paid_and_unknown_mix_for_review(
+    db_session,
+):
+    customer = _make_customer(db_session, "mixed-paid-unknown-review@example.com")
+    _make_subscription(
+        db_session,
+        customer,
+        status=SubscriptionStatus.active,
+        billing_mode=BillingMode.postpaid,
+        offer=_make_offer(db_session, recurring_amount=Decimal("9000.00")),
+    )
+    _make_subscription(
+        db_session,
+        customer,
+        status=SubscriptionStatus.active,
+        billing_mode=BillingMode.postpaid,
+        offer=_make_offer(db_session, recurring_amount=None),
+    )
+    db_session.commit()
+
+    context = _build_context(
+        db_session,
+        search="mixed-paid-unknown-review",
+        status=None,
+        customer_type=None,
+        nas_id=None,
+        pop_site_id=None,
+        billing_mode="non_billable",
+        page=1,
+        per_page=25,
+    )
+
+    assert {item["email"] for item in context["customers"]} == {customer.email}
+    assert context["customers"][0]["chargeability_label"] == "Review required"
 
 
 def test_customer_billing_filter_rejects_unsupported_value():

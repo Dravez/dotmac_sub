@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -298,7 +303,9 @@ DOMAIN = DomainSOT(
                 "adaptive planner. The engine uses the existing bounded clarification budget before an "
                 "explicit classifier_unavailable_after_retries handoff. The "
                 "unsupported_or_troubleshooting_exhausted reason requires an accepted "
-                "classification and genuinely unavailable support options."
+                "classification and genuinely unavailable support options. A final "
+                "qualifying social sales classification stages one PII-free durable "
+                "lead-candidate event; Sales remains the sole Lead writer."
             ),
             contract=ServiceContract(
                 concerns=(
@@ -561,8 +568,9 @@ DOMAIN = DomainSOT(
                     mode=TransactionMode.OWNER_MANAGED,
                     boundary=(
                         "Configuration mutation enters execute_owner_command once. "
-                        "Classification is read-only and its typed result is persisted "
-                        "by the Inbox coordinator with the inbound message."
+                        "Classification writes its typed result through the session "
+                        "owner and stages any qualifying sales-candidate event in the "
+                        "same transaction as the inbound-message projection."
                     ),
                     locking=(
                         "Configuration upsert locks the scope row; classification writes no row. "
@@ -573,6 +581,7 @@ DOMAIN = DomainSOT(
                     idempotency=(
                         "Configuration uses command evidence; provider message deduplication "
                         "precedes classification so one inbound fact produces at most one attempt. "
+                        "A message-derived event id makes the Sales handoff replay-safe. "
                         "Clarification delivery uses an inbound-message-derived communication-intent "
                         "dedupe key."
                     ),
@@ -600,11 +609,20 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("ai.intake_config_updated",),
+                    event_types=(
+                        "ai.intake_config_updated",
+                        "ai.intake_lead_candidate_classified",
+                    ),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
-                    compatibility="Version 1 carries only bounded configuration-change evidence.",
-                    replay="Configuration remains authoritative in AiIntakeConfig.",
+                    compatibility=(
+                        "Version 1 carries bounded configuration-change evidence or "
+                        "PII-free classification and allowlisted attribution."
+                    ),
+                    replay=(
+                        "Configuration remains authoritative in AiIntakeConfig; the "
+                        "message-derived candidate event id and Sales command are idempotent."
+                    ),
                 ),
                 migration=MigrationContract(
                     state=AuthorityMigrationState.COMPLETE,
@@ -1028,4 +1046,15 @@ DOMAIN = DomainSOT(
     "owning domain service, which applies its own guards, events, and "
     "audit. ai.intake is the separate bounded customer-message classifier; "
     "it may select a destination service team but never an agent or queue position.",
+    automation=AutomationDomainCapabilities(
+        catalog_items=(
+            AutomationCatalogItem(
+                key="maintenance.expired_ai_insights",
+                label="Expired AI operational insights",
+                group="Maintenance and reliability",
+                state=AutomationCatalogState.unavailable,
+                explanation="Insight cleanup is a protected background task; it does not have a customer-rule trigger or action in the Center.",
+            ),
+        ),
+    ),
 )

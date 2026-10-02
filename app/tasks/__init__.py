@@ -33,10 +33,6 @@ from app.tasks.catalog import (
 )
 from app.tasks.channel_health import observe_channel_health
 from app.tasks.collections import prepaid_balance_sweep
-from app.tasks.crm_ticket_pull import (
-    pull_crm_tickets,
-    sync_crm_ticket,
-)
 from app.tasks.cross_app_drift import run_cross_app_drift_detection
 from app.tasks.customer_impact_metrics import export_customer_impact_metrics
 from app.tasks.device_projection import reconcile_device_projections
@@ -77,6 +73,12 @@ from app.tasks.infrastructure_polling import run_infrastructure_poll
 from app.tasks.integration_delivery import (
     deliver_integration_event,
     deliver_meta_lead_conversion,
+)
+from app.tasks.integration_delivery import (
+    deliver_meta_capi_lead as deliver_meta_capi_lead,
+)
+from app.tasks.integration_delivery import (
+    redrive_meta_capi_leads as redrive_meta_capi_leads,
 )
 from app.tasks.integration_inbox import (
     reclaim_stale_claims as reclaim_stale_integration_inbox_claims,
@@ -247,6 +249,7 @@ from app.tasks.wireguard import (
     generate_connection_log_report as wireguard_connection_report,
 )
 from app.tasks.workflow import detect_sla_breaches as retired_detect_sla_breaches
+from app.tasks.zeptomail_delivery import reconcile_submitted_email
 
 __all__ = [
     "cleanup_old_operations",
@@ -257,7 +260,9 @@ __all__ = [
     "run_import_job",
     "run_integration_job",
     "deliver_integration_event",
+    "deliver_meta_capi_lead",
     "deliver_meta_lead_conversion",
+    "redrive_meta_capi_leads",
     "reclaim_stale_integration_inbox_claims",
     "process_due_campaigns",
     "process_due_campaign_steps",
@@ -283,8 +288,6 @@ __all__ = [
     "audit_cutover_balance_invariant_task",
     "audit_funded_inactive_exposure_task",
     "check_billing_switch_task",
-    "pull_crm_tickets",
-    "sync_crm_ticket",
     "auto_confirm_resolved_tickets",
     "retry_failed_inbox_outbound_messages",
     "promote_inbox_message_media_assets",
@@ -343,6 +346,7 @@ __all__ = [
     "run_vpn_health_scan",
     "deliver_notification_queue",
     "deliver_notification",
+    "reconcile_submitted_email",
     "observe_channel_health",
     "snapshot_mrr",
     "snapshot_ip_pool_utilization",

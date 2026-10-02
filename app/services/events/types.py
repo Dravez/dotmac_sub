@@ -31,6 +31,16 @@ class EventType(enum.Enum):
     # Canonical Party identity events
     party_identity_reactivated = "party.identity_reactivated"
 
+    # Automation Center control-plane events
+    automation_rule_changed = "automation.rule_changed"
+    automation_script_changed = "automation.script_changed"
+    custom_field_definition_changed = "custom_field.definition_changed"
+    custom_field_value_changed = "custom_field.value_changed"
+
+    # Support ticket lifecycle events
+    support_ticket_created = "support.ticket.created"
+    support_ticket_sla_breached = "support.ticket.sla_breached"
+
     # Subscriber events
     subscriber_created = "subscriber.created"
     subscriber_updated = "subscriber.updated"
@@ -39,15 +49,18 @@ class EventType(enum.Enum):
     subscriber_location_prompt_snoozed = "subscriber.location_prompt_snoozed"
     field_location_history_pruned = "field_location.history_pruned"
     subscriber_billing_approval_changed = "subscriber.billing_approval_changed"
+    subscriber_billing_mode_changed = "subscriber.billing_mode_changed"
     carried_source_identity_adjudicated = "billing.carried_source_identity.adjudicated"
     subscriber_suspended = "subscriber.suspended"
     subscriber_reactivated = "subscriber.reactivated"
     subscriber_throttled = "subscriber.throttled"
     subscriber_unthrottled = "subscriber.unthrottled"
 
-    # Subscription events (8)
+    # Subscription events
     subscription_created = "subscription.created"
     subscription_activated = "subscription.activated"
+    subscription_paused = "subscription.paused"
+    subscription_pause_resumed = "subscription.pause_resumed"
     subscription_suspended = "subscription.suspended"
     subscription_resumed = "subscription.resumed"
     subscription_disabled = "subscription.disabled"
@@ -80,6 +93,10 @@ class EventType(enum.Enum):
     payment_failed = "payment.failed"
     payment_refunded = "payment.refunded"
     payment_reversed = "payment.reversed"
+
+    # PII-free Fiber acquisition and marketing delivery lifecycle.
+    fiber_coverage_evaluated = "fiber.coverage_evaluated"
+    marketing_conversion_ready = "marketing.conversion_ready"
     payment_provider_event_processed = "payment_provider_event.processed"
     payment_provider_event_failed = "payment_provider_event.failed"
     payment_gateway_finance_identity_ensured = (
@@ -124,6 +141,7 @@ class EventType(enum.Enum):
     customer_subledger_opening_position_corrected = (
         "customer_subledger.opening_position_corrected"
     )
+    native_prepaid_opening_repaired = "customer_subledger.native_opening_repaired"
     customer_subledger_authority_activated = "customer_subledger.authority_activated"
 
     # Billing - Bank-transfer evidence lifecycle
@@ -159,7 +177,10 @@ class EventType(enum.Enum):
     prepaid_renewal_terms_audited = "prepaid_renewal_terms.audited"
     prepaid_proforma_adopted = "prepaid_proforma.adopted"
     prepaid_paid_invoice_repaired = "prepaid_paid_invoice.repaired"
+    prepaid_paid_invoice_coverage_corrected = "prepaid_paid_invoice.coverage_corrected"
     prepaid_draft_reconciled = "prepaid_draft.reconciled"
+    prepaid_reviewed_draft_settled = "prepaid_reviewed_draft.settled"
+    prepaid_invoice_sequence_reconstructed = "prepaid_invoice_sequence.reconstructed"
     prepaid_billing_calendar_reconciled = "prepaid_billing_calendar.reconciled"
     ip_assignment_service_ownership_reconciled = (
         "ip_assignment.service_ownership_reconciled"
@@ -206,10 +227,15 @@ class EventType(enum.Enum):
     service_team_party_cutover_adopted = "service_team.party_cutover_adopted"
     workqueue_action_coordinated = "workqueue.action_coordinated"
     ai_intake_config_updated = "ai.intake_config_updated"
+    ai_intake_lead_candidate_classified = "ai.intake_lead_candidate_classified"
     plan_family_catalogue_published = "catalog.plan_family_catalogue_published"
     catalog_offer_reseller_availability_changed = (
         "catalog.offer_reseller_availability_changed"
     )
+    catalog_offer_access_requirement_classified = (
+        "catalog.offer_access_requirement_classified"
+    )
+    catalog_offer_version_admitted = "catalog.offer_version_admitted"
     ncc_weekly_delivery_configuration_changed = (
         "ncc.weekly_delivery_configuration_changed"
     )
@@ -238,6 +264,7 @@ class EventType(enum.Enum):
     vendor_advance_settled = "vendor_advance.settled"
     vendor_project_published = "vendor_project.published"
     vendor_project_assigned = "vendor_project.assigned"
+    vendor_project_unassigned = "vendor_project.unassigned"
     vendor_project_started = "vendor_project.started"
     vendor_project_completed = "vendor_project.completed"
     vendor_quote_changed = "vendor_quote.changed"
@@ -297,6 +324,7 @@ class EventType(enum.Enum):
     network_map_asset_change_proposed = "network_map_asset_change.proposed"
     network_map_asset_change_applied = "network_map_asset_change.applied"
     network_map_asset_change_rejected = "network_map_asset_change.rejected"
+    network_map_kmz_import_staged = "network_map.kmz_import_staged"
 
     # OLT events (3)
     olt_created = "olt.created"
@@ -391,12 +419,14 @@ class EventType(enum.Enum):
     ticket_resolution_disputed = "ticket.resolution_disputed"
     ticket_merged = "ticket.merged"
     ticket_work_order_issued = "ticket.work_order_issued"
+    outage_infrastructure_work_order_issued = "outage.infrastructure_work_order_issued"
     work_order_field_outcome_recorded = "work_order.field_outcome_recorded"
     customer_password_changed = "customer.password_changed"  # noqa: S105
 
-    # Reseller events (5)
+    # Reseller events (6)
     reseller_created = "reseller.created"
     reseller_user_provisioned = "reseller_user.provisioned"
+    reseller_user_access_revoked = "reseller_user.access_revoked"
     reseller_login = "reseller.login"
     reseller_logout = "reseller.logout"
     reseller_impersonated = "reseller.impersonated"
@@ -541,6 +571,8 @@ class AccountCreditApplicationState(str, enum.Enum):
 # Mapping from EventType to LifecycleEventType for subscription events
 SUBSCRIPTION_LIFECYCLE_MAP = {
     EventType.subscription_activated: "activate",
+    EventType.subscription_paused: "pause",
+    EventType.subscription_pause_resumed: "resume",
     EventType.subscription_suspended: "suspend",
     EventType.subscription_resumed: "resume",
     EventType.subscription_disabled: "other",

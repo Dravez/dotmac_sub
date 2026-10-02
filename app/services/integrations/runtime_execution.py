@@ -17,10 +17,7 @@ from app.models.integration_platform import (
     IntegrationCapabilityBinding,
     IntegrationInstallationState,
 )
-from app.services.integrations.connectors.dotmac_crm import (
-    DotmacCrmRunner,
-    RuntimeCrmObservationSource,
-)
+from app.services.integrations.connectors.dotmac_crm import DotmacCrmRunner
 from app.services.integrations.connectors.dotmac_erp import DotmacErpRunner
 from app.services.integrations.connectors.fiber_inquiry_http import (
     FiberInquiryHttpRunner,
@@ -34,6 +31,7 @@ from app.services.integrations.connectors.lead_capture_http import (
     LeadCaptureHttpRunner,
 )
 from app.services.integrations.connectors.meta_social_runtime import (
+    MetaCapiRunner,
     MetaSocialRuntimeRunner,
 )
 from app.services.integrations.connectors.nextcloud_talk import (
@@ -44,6 +42,7 @@ from app.services.integrations.connectors.whatsapp_runtime import WhatsAppRuntim
 from app.services.integrations.manifest import ConnectorManifest, ConnectorRuntimeType
 from app.services.integrations.registry import require_pinned_connector_definition
 from app.services.integrations.runtime import (
+    CapabilitySupportRunner,
     CapabilityValidationRunner,
     ConnectorRunner,
     OperationEnvelope,
@@ -57,6 +56,10 @@ from app.services.secrets import resolve_secret
 
 class RuntimeExecutionError(RuntimeError):
     """Raised before dispatch when a pinned runtime contract is invalid."""
+
+
+class CapabilityUnavailableError(RuntimeExecutionError):
+    """A pinned capability was withdrawn by its current runner."""
 
 
 class RuntimeTierUnavailableError(RuntimeExecutionError):
@@ -92,6 +95,7 @@ def default_runner_registry() -> RunnerRegistry:
     registry.register("whatsapp", WhatsAppRuntimeRunner())
     registry.register("nextcloud.talk", NextcloudTalkRuntimeRunner())
     registry.register("meta.social", MetaSocialRuntimeRunner())
+    registry.register("meta.capi", MetaCapiRunner())
     return registry
 
 
@@ -176,6 +180,18 @@ def resolve_runner(
     raise RuntimeExecutionError(f"unsupported connector runtime tier: {tier.value}")
 
 
+def require_runner_capability(
+    manifest: ConnectorManifest, capability_id: str, runner: ConnectorRunner
+) -> None:
+    """Refuse withdrawn runner capabilities before resolving secret material."""
+    if manifest.capability(capability_id) is None:
+        raise RuntimeExecutionError("binding capability is not declared")
+    if isinstance(runner, CapabilitySupportRunner) and not runner.supports_capability(
+        capability_id
+    ):
+        raise CapabilityUnavailableError("connector capability is retired")
+
+
 def build_execution_context(
     db: Session,
     *,
@@ -215,8 +231,12 @@ def build_execution_context(
         raise RuntimeExecutionError(
             "connector manifest pin is not available in this deployment"
         ) from exc
-    if manifest.capability(binding.capability_id) is None:
-        raise RuntimeExecutionError("binding capability is not declared")
+    runner = runner_override or resolve_runner(
+        manifest,
+        registry=runner_registry,
+        external_factory=external_runner_factory,
+    )
+    require_runner_capability(manifest, binding.capability_id, runner)
 
     material: dict[str, str] = {}
     for name, reference in dict(revision.secret_refs or {}).items():
@@ -224,11 +244,6 @@ def build_execution_context(
         if not resolved:
             raise RuntimeExecutionError(f"secret binding could not be resolved: {name}")
         material[str(name)] = str(resolved)
-    runner = runner_override or resolve_runner(
-        manifest,
-        registry=runner_registry,
-        external_factory=external_runner_factory,
-    )
     return RuntimeExecutionContext(
         binding=binding,
         manifest=manifest,
@@ -304,20 +319,3 @@ def make_operation_executor(
         )
 
     return execute
-
-
-def crm_observation_source(
-    context: RuntimeExecutionContext,
-    *,
-    correlation_id: str,
-    trigger: OperationTrigger,
-    actor: str | None = None,
-) -> RuntimeCrmObservationSource:
-    return RuntimeCrmObservationSource(
-        make_operation_executor(
-            context,
-            correlation_id=correlation_id,
-            trigger=trigger,
-            actor=actor,
-        )
-    )

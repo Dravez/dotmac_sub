@@ -221,8 +221,6 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.collections.run_bundle_reconcile": _c(
         "collections", STATE, GUARDED, HEALTH
     ),
-    "app.tasks.crm_ticket_pull.pull_crm_tickets": _c("crm", SWEEP, IDEMP, HEALTH),
-    "app.tasks.crm_ticket_pull.sync_crm_ticket": _c("crm", SWEEP, IDEMP, STATUS),
     "app.tasks.cross_app_drift.run_cross_app_drift_detection": _c(
         "monitoring",
         SWEEP,
@@ -366,6 +364,22 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
         "Durable delivery state, stable Meta event ID, bounded retry, and "
         "dead-letter evidence.",
     ),
+    "app.tasks.integration_delivery.deliver_meta_capi_lead": _c(
+        "integrations",
+        STATE,
+        STATEFUL,
+        DEAD,
+        "Stable inquiry-derived event ID, row lock, bounded backoff, and durable "
+        "success or dead-letter evidence.",
+    ),
+    "app.tasks.integration_delivery.redrive_meta_capi_leads": _c(
+        "integrations",
+        SWEEP,
+        IDEMP,
+        STATUS,
+        "Beat redrives pending, due retryable, and expired-lease Meta Lead rows; "
+        "the delivery row serializes duplicate worker execution.",
+    ),
     "app.tasks.integration_inbox.reclaim_stale_claims": _c(
         "integrations",
         SWEEP,
@@ -437,6 +451,15 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     ),
     "app.tasks.notifications.deliver_notification_queue": _c(
         "notifications", STATE, GUARDED, STATUS
+    ),
+    "app.tasks.zeptomail_delivery.reconcile_submitted_email": _c(
+        "notifications",
+        SWEEP,
+        IDEMP,
+        LOG,
+        "A bounded status sweep; each provider observation has a stable "
+        "idempotency key, failed lookups are logged, and the next scheduled "
+        "sweep retries unresolved emails.",
     ),
     "app.tasks.oauth.check_token_health": _c("integrations", SWEEP, IDEMP, HEALTH),
     "app.tasks.oauth.refresh_expiring_tokens": _c(
@@ -646,7 +669,7 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.radius.reap_radacct_ghosts": _c("radius", SWEEP, IDEMP, HEALTH),
     "app.tasks.radius.reconcile_active_sessions": _c(
         "radius",
-        SWEEP,
+        AUTORETRY,
         IDEMP,
         HEALTH,
         "Permanent rebuild of the live-session projection from external accounting.",
@@ -747,7 +770,9 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
         STATUS,
         "Locks ready AI intake sessions with skip_locked, records generation "
         "attempt evidence, and sends outbound messages with deterministic "
-        "dedupe keys after rechecking human takeover.",
+        "dedupe keys after rechecking human takeover. Transaction-fatal database "
+        "errors escape to the owner boundary and are retried with bounded task "
+        "backoff rather than being converted into a session failure.",
     ),
     "app.tasks.team_inbox.repair_whatsapp_locations": _c(
         "support",

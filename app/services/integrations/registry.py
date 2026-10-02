@@ -264,20 +264,13 @@ def _dotmac_crm_manifest(
     version: str,
     include_chat_session: bool,
     include_quote_command: bool = True,
+    include_ticket_observation: bool,
 ) -> ConnectorManifest:
-    """Build the current CRM manifest and its bounded pre-chat predecessor."""
+    """Build current CRM and exact historical manifest versions."""
 
     capabilities = [
         CapabilityManifest(
             id="crm.subscriber_observation.v1",
-            modes=(
-                CapabilityMode.scheduled,
-                CapabilityMode.manual,
-                CapabilityMode.reconcile,
-            ),
-        ),
-        CapabilityManifest(
-            id="crm.ticket_observation.v1",
             modes=(
                 CapabilityMode.scheduled,
                 CapabilityMode.manual,
@@ -297,6 +290,20 @@ def _dotmac_crm_manifest(
             modes=(CapabilityMode.interactive,),
         ),
     ]
+    # Historical versions declare the immutable ticket pin. Version 1.4.0
+    # passes False: this branch is not a current capability declaration.
+    if include_ticket_observation:
+        capabilities.insert(
+            1,
+            CapabilityManifest(
+                id="crm.ticket_observation.v1",
+                modes=(
+                    CapabilityMode.scheduled,
+                    CapabilityMode.manual,
+                    CapabilityMode.reconcile,
+                ),
+            ),
+        )
     if include_chat_session:
         capabilities.append(
             CapabilityManifest(
@@ -624,11 +631,41 @@ def _dotmac_integrator_manifest(
     )
 
 
-_DEFINITIONS: tuple[ConnectorManifest, ...] = (
-    ConnectorManifest(
+def _fiber_inquiry_manifest(
+    *, version: str, include_coverage_defaults: bool
+) -> ConnectorManifest:
+    properties: dict[str, object] = {
+        "signature_header": {"type": "string", "minLength": 1},
+        "delivery_id_header": {"type": "string", "minLength": 1},
+        "signature_prefix": {"type": "string"},
+        "site_id": {"type": "string", "minLength": 1},
+    }
+    required = [
+        "signature_header",
+        "delivery_id_header",
+        "signature_prefix",
+        "site_id",
+    ]
+    if include_coverage_defaults:
+        properties = {
+            "signature_header": {
+                "type": "string",
+                "minLength": 1,
+                "default": "X-Dotmac-Fiber-Signature",
+            },
+            "delivery_id_header": {
+                "type": "string",
+                "minLength": 1,
+                "default": "X-Dotmac-Fiber-Delivery",
+            },
+            "signature_prefix": {"type": "string", "default": "sha256="},
+            "site_id": {"type": "string", "minLength": 1},
+        }
+        required = ["site_id"]
+    return ConnectorManifest(
         key="fiber.inquiry.http",
         name="Fiber Website Inquiry",
-        version="1.0.0",
+        version=version,
         connector_type="messaging",
         description="Signed fiber.dotmac.ng inquiry ingress for Team Inbox.",
         runtime=RuntimeManifest(
@@ -643,18 +680,8 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
         ),
         config_schema={
             "type": "object",
-            "properties": {
-                "signature_header": {"type": "string", "minLength": 1},
-                "delivery_id_header": {"type": "string", "minLength": 1},
-                "signature_prefix": {"type": "string"},
-                "site_id": {"type": "string", "minLength": 1},
-            },
-            "required": [
-                "signature_header",
-                "delivery_id_header",
-                "signature_prefix",
-                "site_id",
-            ],
+            "properties": properties,
+            "required": required,
             "additionalProperties": False,
         },
         secrets=(SecretBindingManifest(name="webhook_signing_secret"),),
@@ -664,6 +691,64 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
         ),
         egress=EgressManifest(),
         health=HealthManifest(operation="connection.validate.v1"),
+    )
+
+
+def _http_webhook_manifest(
+    *, version: str, include_bearer_authorization: bool
+) -> ConnectorManifest:
+    properties: dict[str, object] = {
+        "url": {"type": "string"},
+        "method": {"type": "string"},
+        "timeout_seconds": {"type": "number"},
+        "max_attempts": {"type": "integer"},
+    }
+    if include_bearer_authorization:
+        properties["authorization_scheme"] = {
+            "type": "string",
+            "enum": ["Bearer"],
+        }
+    return ConnectorManifest(
+        key="webhook.http",
+        name="HTTP Webhook",
+        version=version,
+        connector_type="automation",
+        description="Approved outbound HTTPS event delivery transport.",
+        catalogue_visible=False,
+        runtime=RuntimeManifest(
+            type=ConnectorRuntimeType.builtin_worker,
+            module="app.services.integrations.connectors.http_webhook",
+        ),
+        capabilities=(
+            CapabilityManifest(
+                id="events.deliver.v1",
+                modes=(CapabilityMode.event, CapabilityMode.manual),
+            ),
+        ),
+        config_schema={
+            "type": "object",
+            "properties": properties,
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        secrets=(
+            SecretBindingManifest(name="signing_secret", required=False),
+            SecretBindingManifest(name="authorization", required=False),
+        ),
+        data_access=DataAccessManifest(
+            reads=("events.outbound_projection",),
+            emits=("events.external_delivery_receipt",),
+            classifications=("domain_event_projection",),
+        ),
+        egress=EgressManifest(allow_installation_hosts=True),
+        health=HealthManifest(operation="connection.validate.v1"),
+    )
+
+
+_DEFINITIONS: tuple[ConnectorManifest, ...] = (
+    _fiber_inquiry_manifest(
+        version="1.1.0",
+        include_coverage_defaults=True,
     ),
     ConnectorManifest(
         key="lead.capture.http",
@@ -706,50 +791,17 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
         health=HealthManifest(operation="connection.validate.v1"),
     ),
     _dotmac_integrator_manifest(version="1.1.0", include_settlement=True),
-    ConnectorManifest(
-        key="webhook.http",
-        name="HTTP Webhook",
-        version="1.0.0",
-        connector_type="automation",
-        description="Approved outbound HTTPS event delivery transport.",
-        catalogue_visible=False,
-        runtime=RuntimeManifest(
-            type=ConnectorRuntimeType.builtin_worker,
-            module="app.services.integrations.connectors.http_webhook",
-        ),
-        capabilities=(
-            CapabilityManifest(
-                id="events.deliver.v1",
-                modes=(CapabilityMode.event, CapabilityMode.manual),
-            ),
-        ),
-        config_schema={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "method": {"type": "string"},
-                "timeout_seconds": {"type": "number"},
-                "max_attempts": {"type": "integer"},
-            },
-            "required": ["url"],
-            "additionalProperties": False,
-        },
-        secrets=(
-            SecretBindingManifest(name="signing_secret", required=False),
-            SecretBindingManifest(name="authorization", required=False),
-        ),
-        data_access=DataAccessManifest(
-            reads=("events.outbound_projection",),
-            emits=("events.external_delivery_receipt",),
-            classifications=("domain_event_projection",),
-        ),
-        egress=EgressManifest(allow_installation_hosts=True),
-        health=HealthManifest(operation="connection.validate.v1"),
+    _http_webhook_manifest(
+        version="1.1.0",
+        include_bearer_authorization=True,
     ),
+    # The current manifest excludes retired ticket observation; historical
+    # manifest digests below remain available for pin identification only.
     _dotmac_crm_manifest(
-        version="1.3.0",
+        version="1.4.0",
         include_chat_session=False,
         include_quote_command=False,
+        include_ticket_observation=False,
     ),
     _whatsapp_manifest(
         version="1.1.0",
@@ -788,6 +840,43 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
             classifications=("staff_identity", "support_content", "message_content"),
         ),
         egress=EgressManifest(allow_installation_hosts=True),
+        health=HealthManifest(operation="connection.validate.v1"),
+    ),
+    ConnectorManifest(
+        key="meta.capi",
+        name="Meta Conversions API",
+        version="1.0.0",
+        connector_type="marketing",
+        description="Server-side website Lead delivery to a Meta dataset.",
+        runtime=RuntimeManifest(
+            type=ConnectorRuntimeType.builtin_worker,
+            module="app.services.integrations.connectors.meta_social_runtime",
+        ),
+        capabilities=(
+            CapabilityManifest(
+                id="marketing.website_lead.send.v1",
+                modes=(CapabilityMode.event, CapabilityMode.reconcile),
+            ),
+        ),
+        config_schema={
+            "type": "object",
+            "properties": {
+                "pixel_id": {"type": "string", "default": "410389919883152"},
+                "api_version": {"type": "string", "default": "v26.0"},
+                "test_event_code": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 10},
+                "max_attempts": {"type": "integer", "default": 8},
+            },
+            "required": ["pixel_id", "api_version"],
+            "additionalProperties": False,
+        },
+        secrets=(SecretBindingManifest(name="access_token"),),
+        data_access=DataAccessManifest(
+            reads=("sales.website_fiber_lead",),
+            emits=("marketing.meta_lead_delivery_receipt",),
+            classifications=("sales_acquisition", "hashed_customer_contact"),
+        ),
+        egress=EgressManifest(hosts=("graph.facebook.com",)),
         health=HealthManifest(operation="connection.validate.v1"),
     ),
     _meta_social_manifest(
@@ -881,6 +970,14 @@ _DEFINITIONS: tuple[ConnectorManifest, ...] = (
 )
 
 _HISTORICAL_DEFINITIONS: tuple[ConnectorManifest, ...] = (
+    _fiber_inquiry_manifest(
+        version="1.0.0",
+        include_coverage_defaults=False,
+    ),
+    _http_webhook_manifest(
+        version="1.0.0",
+        include_bearer_authorization=False,
+    ),
     _dotmac_integrator_manifest(version="1.0.0", include_settlement=False),
     _whatsapp_manifest(version="1.0.0", include_phone_number_id=False),
     _dotmac_erp_manifest(
@@ -898,10 +995,20 @@ _HISTORICAL_DEFINITIONS: tuple[ConnectorManifest, ...] = (
     # ERP 1.0.0 remains executable while installations explicitly adopt the
     # workforce attendance capability introduced in 1.1.0.
     _dotmac_erp_manifest(version="1.0.0", include_workforce_attendance=False),
-    # CRM 1.0.0 predates the temporary chat-session capability. It remains
-    # executable because a deployed pin is an immutable compatibility fact.
-    _dotmac_crm_manifest(version="1.2.0", include_chat_session=False),
-    _dotmac_crm_manifest(version="1.0.0", include_chat_session=False),
+    # Historical CRM pins remain identifiable by exact digest. Retired ticket
+    # and chat capabilities cannot execute; retained actions can still run.
+    _dotmac_crm_manifest(
+        version="1.3.0",
+        include_chat_session=False,
+        include_quote_command=False,
+        include_ticket_observation=True,
+    ),
+    _dotmac_crm_manifest(
+        version="1.2.0", include_chat_session=False, include_ticket_observation=True
+    ),
+    _dotmac_crm_manifest(
+        version="1.0.0", include_chat_session=False, include_ticket_observation=True
+    ),
     # CRM 1.1.0 is the ONLY manifest that ever declared `crm.chat_session.v1`
     # (ADR 0006, retired 2026-08-30 with the CRM itself). 1.2.0 drops the
     # capability. This exact 1.1.0 digest is retained UNCHANGED rather than
@@ -912,7 +1019,9 @@ _HISTORICAL_DEFINITIONS: tuple[ConnectorManifest, ...] = (
     # reachability -- Sub has no caller for `crm.chat_session.v1` any more, and
     # the runner no longer maps it to an action, so a 1.1.0-pinned binding for
     # it now fails closed with `capability_not_supported`.
-    _dotmac_crm_manifest(version="1.1.0", include_chat_session=True),
+    _dotmac_crm_manifest(
+        version="1.1.0", include_chat_session=True, include_ticket_observation=True
+    ),
     _meta_social_manifest(
         version="1.1.0",
         include_shared_oauth=True,

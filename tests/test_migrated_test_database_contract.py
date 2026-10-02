@@ -115,12 +115,13 @@ def test_repository_heads_match_alembics_effective_dependency_heads() -> None:
     # effective branch heads in its version table.
     assert repository_heads() == frozenset(
         {
-            "607_inbox_lead_identity_expiry",
+            "636_allow_name_identified_fiber_topology_features",
             "bi_0001_billing",
             "cl_0001_collections",
             "ib_0001_conversations",
             "pm_0001_payment_intents",
             "so_0001_service_delivery_orders",
             "su_0003_billing_treatments",
+            "ts_0002_notify_identity",
         }
     )

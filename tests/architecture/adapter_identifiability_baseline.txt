@@ -13,7 +13,6 @@ app/services/web_billing_credits.py 2
 app/services/web_billing_dunning.py 4
 app/services/web_billing_health.py 14
 app/services/web_billing_invoice_cache.py 3
-app/services/web_billing_invoices.py 1
 app/services/web_billing_ledger.py 4
 app/services/web_billing_reconciliation.py 1
 app/services/web_catalog_offers.py 18
@@ -25,10 +24,10 @@ app/services/web_consolidated_billing.py 4
 app/services/web_control_plane.py 15
 app/services/web_customer_auth.py 4
 app/services/web_customer_availability.py 1
-app/services/web_customer_details.py 35
+app/services/web_customer_details.py 34
 app/services/web_customer_user_access.py 6
 app/services/web_fup.py 2
-app/services/web_integration_syncs.py 9
+app/services/web_integration_syncs.py 6
 app/services/web_integrations.py 8
 app/services/web_integrations_webhooks.py 5
 app/services/web_network_alarm_rules.py 2

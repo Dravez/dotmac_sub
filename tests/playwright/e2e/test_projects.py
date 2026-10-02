@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from playwright.sync_api import expect
@@ -77,7 +78,9 @@ def test_admin_project_template_dependency_journey(admin_page, settings):
         "Disposable browser regression template"
     )
     admin_page.get_by_role("button", name="Create Template").click()
-    expect(admin_page).to_have_url("**/admin/projects/templates/*")
+    expect(admin_page).to_have_url(
+        re.compile(r".*/admin/projects/templates/[0-9a-f-]{36}$")
+    )
 
     admin_page.get_by_role("link", name="Edit Tasks").click()
     admin_page.get_by_role("button", name="Add Task").click()
@@ -86,23 +89,30 @@ def test_admin_project_template_dependency_journey(admin_page, settings):
     titles = admin_page.get_by_label("Title")
     titles.nth(0).fill("Survey")
     titles.nth(1).fill("Install")
-    admin_page.get_by_label("Depends On (earlier tasks)").nth(1).select_option(
-        label="Survey"
+    admin_page.get_by_label("Depends on earlier work").nth(1).select_option(
+        label="Task: Survey"
     )
-    admin_page.get_by_role("button", name="Save Tasks").click()
+    admin_page.get_by_role("button", name="Save new revision").click()
 
-    expect(admin_page.get_by_text("Survey", exact=True)).to_be_visible()
-    expect(admin_page.get_by_text("Install", exact=True)).to_be_visible()
+    task_rows = admin_page.locator("tbody tr")
+    expect(task_rows.nth(0).locator("td").nth(1)).to_contain_text("Survey")
+    expect(task_rows.nth(1).locator("td").nth(1)).to_contain_text("Install")
+    expect(task_rows.nth(1).locator("td").nth(2)).to_have_text("Survey")
 
     admin_page.get_by_role("link", name="Edit Tasks").click()
     admin_page.get_by_role("button", name="Move up").nth(1).click()
     expect(
         admin_page.get_by_text(
-            "A dependency was removed because tasks may depend only on earlier tasks."
+            "A dependency was removed because it no longer precedes this task."
         )
     ).to_be_visible()
-    admin_page.get_by_role("button", name="Save Tasks").click()
+    admin_page.get_by_role("button", name="Save new revision").click()
+    task_rows = admin_page.locator("tbody tr")
+    expect(task_rows.nth(0).locator("td").nth(1)).to_contain_text("Install")
+    expect(task_rows.nth(0).locator("td").nth(2)).to_have_text("-")
 
     admin_page.on("dialog", lambda dialog: dialog.accept())
     admin_page.get_by_role("button", name="Delete Template").click()
-    expect(admin_page).to_have_url("**/admin/projects/templates")
+    expect(admin_page).to_have_url(
+        re.compile(r"^https?://[^/?#]+/admin/projects/templates$")
+    )

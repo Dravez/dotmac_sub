@@ -37,14 +37,9 @@ class CustomerServicesPage(BasePage):
 
     def expect_service_details_visible(self) -> None:
         """Assert service details are visible."""
+        expect(self.page.get_by_text("Plan speed", exact=True).first).to_be_visible()
         expect(
-            self.page.locator("[data-testid='service-details']")
-            .or_(
-                self.page.get_by_text("Plan", exact=False).or_(
-                    self.page.get_by_text("Speed", exact=False)
-                )
-            )
-            .first
+            self.page.locator('a[aria-label="Manage service"]').first
         ).to_be_visible()
 
     def get_service_count(self) -> int:

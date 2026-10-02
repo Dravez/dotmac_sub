@@ -42,6 +42,8 @@ account-scoped; it is never coerced to zero, paid, funded, or safe-to-suspend.
 | Append-only customer-position entries | `financial.ledger` | Owns adjustment/reversal evidence; it does not replace invoice or payment owners. |
 | Prepaid opening position | `financial.prepaid_funding_reconstruction` | Owns the one-time reviewed baseline and native-after-cutover projection. |
 | Customer-facing financial position | `customer.financial_position` | Resolves document/event facts without becoming their writer. |
+| Customer chargeability | `financial.customer_chargeability` | Classifies current service as billable, confirmed non-billable, review-required, or absent from explicit price/treatment evidence. |
+| Billing-mode transition | `financial.billing_mode_transition` | Previews and atomically confirms reviewed account-wide prepaid/postpaid changes without rewriting money or paid periods. |
 | Current prepaid coverage | `financial.prepaid_service_coverage` | Classifies exact evidence; writes no money, dates, or access state. |
 | Service-extension lifecycle | `financial.service_extensions` | Owns create/apply/cancel/reverse, immutable grant and linked reversal evidence, and extension-caused billing-anchor changes; requests restoration from the access lifecycle owner. |
 | Prepaid renewal charge and execution | `financial.prepaid_service_renewals` | Resolves the exact taxed contract charge and coordinates the paid invoice, funding application, entitlement, anchor, and renewed outcome together. |
@@ -51,6 +53,7 @@ account-scoped; it is never coerced to zero, paid, funded, or safe-to-suspend.
 | Postpaid collections policy | `financial.dunning` | Owns overdue AR consequences and financial shields. |
 | Financial consequence confirmation | `financial.dunning` access consequence owner | Locks, recomputes, fingerprints, applies, and evidences suspend/restore/throttle/reject consequences. |
 | Locks and subscription/account state | `access.subscription_lifecycle` | Sole writer of reason-scoped locks, account status, and child-service access state in one transaction. |
+| Ticket SLA suspension consequence | `support.ticket_sla_service_consequence` | Selects exactly one active service from a breached Ticket's canonical customer link, fails closed on ambiguity, and delegates the system lock and suspension writes to `access.subscription_lifecycle`; billing treatment is unchanged. |
 | Network projection | `access.radius_projection` | Owns the exact per-login plan, idempotent external writes, and bidirectional convergence check. |
 
 Routes, jobs, webhooks, event handlers, commands, and notification transports
@@ -171,13 +174,25 @@ fingerprint-bound preview and explicitly allow retraction, and an applied
 service extension quarantines the candidate. Confirmation aligns the anchor to
 the entitlement end and records durable audit evidence without posting money.
 
-For a lapsed prepaid settlement, the replacement period starts on the
-payment's `Africa/Lagos` calendar date. The owner resolves WAT local midnight
-and advances the typed calendar cadence before converting the half-open period
-boundaries back to UTC for storage. A payment between 00:00 and 00:59 WAT is
-therefore part of the new WAT day even though its UTC timestamp is on the
-previous date. Date-only customer and operator projections convert the stored
-boundary back to the configured display timezone before rendering it.
+For a prepaid settlement, the replacement period starts after the exact
+uninterrupted coverage containing the payment instant. That coverage is the
+union of active entitlements and applied, non-reversed service-extension grant
+intervals; a mutable billing anchor alone is not evidence. If no exact coverage
+contains the payment, a lapsed replacement starts on the payment's
+`Africa/Lagos` calendar date. The owner advances the typed cadence from the
+selected boundary and stores UTC instants. Canceled or reversed extensions can
+therefore never defer a paid period, and an applied extension is not added a
+second time after the new paid month.
+
+Finance-reviewed historical multi-invoice reconstruction uses a typed reader
+under that same renewal calendar owner. Dates default to Lagos midnight; an
+explicit documentary-anniversary mode preserves exact stored instants only
+when the first invoice's linked period, reviewed local dates, and expected
+initial anchor all agree. It never silently rounds a historical anniversary,
+shifts a preceding paid period, or treats date equality as proof of no overlap.
+The preview includes exact UTC/Lagos intervals; apply uses that locked preview.
+Expired reconstruction never restores access. See
+`docs/runbooks/REVIEWED_PREPAID_INVOICE_SEQUENCE_RECONSTRUCTION.md`.
 
 A cash-funded prepaid renewal creates a document only after the complete charge
 is available. The owner creates one draft and base-subscription line, issues and
@@ -187,16 +202,21 @@ the paid line. Underfunding creates no invoice or partial application. New
 renewals no longer write the historical invoice-less account-adjustment debit.
 See `docs/designs/FUNDED_PREPAID_RENEWAL_INVOICING.md`.
 
-Historical paid periods that exactly match the retired UTC-midnight rule, plus
-paid lapsed periods proved by an older stale anchor and strict documentary/
-payment-period ordering, are owned by
+Historical paid periods that exactly match the retired UTC-midnight rule, paid
+lapsed periods proved by an older stale anchor and strict documentary/payment-
+period ordering, and the exact signature where an applied extension was carried
+forward twice are owned by
 `financial.prepaid_billing_calendar_reconciliation`. Its admin queue is
-preview-first and fingerprint-bound: only one unambiguous invoice, payment
-settlement, base line, entitlement, calendar defect, and access-lock snapshot
-can be corrected. Refunds, reversals, applied extensions, usage quota periods,
-coverage overlaps, multiple evidence rows, or an unproved anchor relationship
-are quarantined for manual review. Reversed extension history does not provide
-coverage and does not block an otherwise proved correction.
+preview-first and fingerprint-bound: only one unambiguous invoice, exact fully
+funding allocation/payment/settlement set, base line, entitlement, calendar
+defect, and access-lock snapshot can be corrected. Split allocations are
+supported only for the retired UTC-midnight defect, where payment timing is not
+an input to the corrected dates. An applied extension is accepted only for the
+exact double-extension signature; other applied extensions, refunds, reversals,
+usage quota periods, coverage overlaps, multiple evidence rows, or an unproved
+anchor relationship are quarantined for manual review. Canceled and reversed
+extension history does not provide coverage and does not block an otherwise
+proved correction.
 
 Every repair records zero economic delta and stages invoice evidence, audit,
 event, and idempotency rows atomically. A current lapsed-payment repair also
@@ -230,12 +250,16 @@ The same owner has a separate dry-run-first command for the historical case
 where generic conversion already made an onboarding document final and an
 exact allocation later made it `paid`, while its line and period remained
 unlinked. Repair requires one active paid non-proforma invoice, one positive
-unlinked line, one named matching prepaid subscription with either no billing
-anchor or a stale anchor at or before the paid settlement period, one active
-full-value allocation from a successful unreturned settlement, no credit-note
-funding, no overlapping entitlement or competing document, and exact equality
-with the shared taxed renewal charge. The Payment may also fund other invoices;
-only this invoice's allocation must equal its total.
+unlinked line, one named matching prepaid subscription, one active full-value
+allocation from a successful unreturned settlement, no credit-note funding or
+competing document, and exact equality with the shared taxed renewal charge.
+Ordinarily the subscription has no anchor or one stale at or before the paid
+settlement period, with no overlapping entitlement. A separately permission-
+gated staff repair may retain exactly one earlier unreversed adjustment-funded
+entitlement when its end equals the current anchor and falls strictly inside the
+new single payment-derived period. Automatic payment finalization never applies
+that reviewed overlap. The Payment may also fund other invoices; only this
+invoice's allocation must equal its total.
 
 Payment finalization invokes the same exact repair participant before prepaid
 entitlement and financial-access restoration run. If exactly one matching
@@ -293,6 +317,14 @@ Current exact coverage wins over reserve balance. A customer is not suspended
 during a funded or explicitly granted service period merely because they do not
 hold the next period's reserve. `min_balance` is a top-up target and becomes an
 access threshold only when at least one service is due and uncovered.
+
+A completed prepaid subscription pause grants unused time through one active
+`ServiceEntitlement` linked uniquely to the authoritative pause episode. Its
+interval begins at the captured paid-through anchor and ends after the exact
+effective pause duration. It posts no money and does not rewrite the original
+paid invoice or entitlement. The lifecycle transaction creates this evidence
+before advancing `next_billing_at`; missing, overlapping, or anchor-inconsistent
+coverage aborts resume for operator review.
 
 ## Decision ladders
 
@@ -595,6 +627,37 @@ settlement command, which atomically allocates funding, creates entitlement,
 and advances the billing anchor. Ambiguous or changed evidence leaves all
 customer and financial state unchanged.
 
+## Ticket SLA subscription pause
+
+`paused` is distinct from `suspended`. A paused subscription denies normal
+network access and is not collectible, but retains its service configuration,
+credentials, assigned IPs, devices, offer identity, and billing cadence. The
+subscriber account status is a derived `paused` projection when no higher-
+precedence active, suspended, blocked, or pending child service exists. The
+account remains portal-accessible so the customer can see the support state.
+
+`access.subscription_lifecycle` owns `SubscriptionPauseEpisode` and
+`SubscriptionPauseCause`. The episode is one continuous interval; causes are
+independently releasable. Only an active subscription may start an episode,
+and a partial unique index permits at most one active episode per subscription.
+The support coordinator may add the typed
+`ticket_resolution_sla_breach` cause only after revalidating a durable breach
+event, breached SLA clock, unresolved Ticket, and one unique active service.
+
+The initial billing treatment is selected by the immutable Automation rule as
+`extend_by_effective_pause_duration`. Pause records the canonical billing
+anchor but does not move it. Authorized manual resume after Ticket resolution
+computes `[effective_at, resumed_at)` in exact seconds and moves the anchor by
+that duration through the existing compare-and-set billing-anchor writer.
+Changed or missing anchor evidence fails closed. Event replay returns the
+existing cause, and resume replay never moves the anchor twice.
+
+Independent enforcement locks can be added while paused. Releasing the Ticket
+cause closes the episode only when no other pause cause remains; an outstanding
+access restriction results in `suspended`, otherwise the service becomes
+`active`. Notifications and network projection run after commit and cannot
+change the financial result.
+
 ## Coverage and lock reconciliation
 
 `financial.prepaid_service_coverage_reconciliation` previews each subscription
@@ -767,3 +830,21 @@ exports, or secret values in these records.
 - `tests/test_account_lifecycle.py`
 - `tests/test_events_enforcement_services.py`
 - `tests/test_radius_shadow_handler_integration.py`
+# Account-scoped native opening omissions
+
+An account created after the legacy financial handoff but before the prepaid
+funding authority cutover can be repaired independently only when canonical
+Sub-native facts completely reconstruct its position at that original cutover,
+it remains in the prepaid cohort, and it has no Splynx identity, Splynx
+transactions, active funding baseline, or customer-subledger opening. The
+dry-run-first owner is `financial.customer_subledger_opening_positions`; it
+does not weaken the signed complete-cohort contract for migrated or
+Splynx-linked accounts.
+
+The repair records an immutable original-cutover opening. Runtime verified
+funding then uses that opening plus canonical facts recorded or effective after
+the cutover, exactly like other approved openings. Changed native facts,
+authority evidence, cohort membership, approval evidence, permissions, or a
+competing opening/baseline fail closed. The repair has no authority to change
+invoices, payments, subscription/access state, ledger entries, or billing
+anchors.

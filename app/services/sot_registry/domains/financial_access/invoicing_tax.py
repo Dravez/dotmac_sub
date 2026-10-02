@@ -216,11 +216,13 @@ SERVICES: tuple[SOTService, ...] = (
             "exact invoice-credit and account-credit-consumption links",
             "native unallocated-credit reconciliation transactions",
             "historical payment settlement evidence reconciliation",
+            "reviewed historical payment-allocation consumption evidence repair",
             "payment settlement access-reconciliation handoff",
             "payment-originated ledger postings",
             "cash-first verified provider settlement evidence",
             "settlement-aware customer receipt application summary",
             "payment allocation reconciliation exception lifecycle",
+            "reviewed payment-allocation reversal",
             "payment refund eligibility and preview",
             "payment refund confirmation and exact ledger evidence",
             "payment refund idempotency and audit evidence",
@@ -1190,9 +1192,13 @@ SERVICES: tuple[SOTService, ...] = (
     SOTService(
         name="financial.historical_invoice_tax_corrections",
         module="app.services.historical_invoice_tax_corrections",
-        owns=("reviewed historical invoice tax correction coordination",),
+        owns=(
+            "reviewed historical invoice tax correction coordination",
+            "reviewed VAT correction using an existing replacement invoice",
+        ),
         depends_on=(
             "financial.account_credit_applications",
+            "financial.customer_subledger_opening_positions",
             "financial.customer_tax_policies",
             "financial.invoices",
             "financial.payments",
@@ -1201,11 +1207,15 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "This correction-only coordinator never edits issued invoice lines or "
             "creates a tax-only revenue charge. It binds one paid base-only invoice, "
-            "one pristine subscription draft, one voided Finance-authored VAT draft, "
-            "one succeeded native payment, and one active tax rate. Confirmation "
-            "voids and releases the incorrect invoice through financial.invoices, "
-            "settles the subscription, creates the full VAT-correct replacement, and "
-            "consumes the selected payment exactly in one transaction."
+            "one succeeded native payment, and one active tax rate. The original "
+            "command settles a separately reviewed subscription draft and constructs "
+            "a replacement. Its existing-replacement command instead validates and "
+            "reuses one VAT-inclusive Finance draft, repairs missing non-position "
+            "legacy allocation evidence through financial.payments, voids the source, "
+            "amends an approved opening through the customer-subledger opening owner "
+            "when the released allocation predates that opening, "
+            "and settles only the replacement while preserving the exact residual "
+            "customer credit in one transaction."
         ),
         contract=ServiceContract(
             concerns=(
@@ -1220,8 +1230,29 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical tax-rate evidence",
                     ),
                 ),
+                ConcernContract(
+                    name="reviewed VAT correction using an existing replacement invoice",
+                    role=OwnerRole.APPLICATION_COORDINATOR,
+                    input_names=(
+                        "reviewed existing-replacement tax correction command",
+                        "canonical source and replacement invoices",
+                        "canonical selected payment and settlement evidence",
+                        "canonical customer-subledger opening position",
+                        "canonical customer VAT policy",
+                        "canonical tax-rate evidence",
+                    ),
+                ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical customer-subledger opening position",
+                    owner="financial.customer_subledger_opening_positions",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "the exact approved opening and append-only correction required "
+                        "when a reviewed source allocation predates that opening"
+                    ),
+                ),
                 AuthorityInput(
                     name="reviewed historical tax correction command",
                     owner="financial.historical_invoice_tax_corrections",
@@ -1231,6 +1262,37 @@ SERVICES: tuple[SOTService, ...] = (
                         "evidence invoice, subscription draft, selected payment, tax "
                         "rate, issue/due instants, permission, actor, reason, preview "
                         "fingerprint, command identity, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="reviewed existing-replacement tax correction command",
+                    owner="financial.historical_invoice_tax_corrections",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed account, source invoice and line, existing VAT draft, "
+                        "payment, tax rate, issuance instants, Finance approver and "
+                        "ticket, permission, actor, preview fingerprint, command "
+                        "identity, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical source and replacement invoices",
+                    owner="financial.invoices",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "locked paid source and existing VAT-inclusive draft, active "
+                        "lines, source closure, replacement issuance, and typed "
+                        "replacement correction metadata"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical selected payment and settlement evidence",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "selected succeeded Payment, exact source allocation and "
+                        "unallocated-credit ledger rows, reconciled PaymentSettlement, "
+                        "and paired allocation-consumption evidence"
                     ),
                 ),
                 AuthorityInput(
@@ -1272,15 +1334,20 @@ SERVICES: tuple[SOTService, ...] = (
             transaction=TransactionContract(
                 mode=TransactionMode.COORDINATOR_MANAGED,
                 boundary=(
-                    "correct_historical_invoice_tax enters execute_owner_command once "
+                    "Both public correction commands each enter execute_owner_command exactly once "
                     "on a transaction-free session; invoice void/release, subscription "
-                    "issuance and allocation, replacement construction/issuance and "
-                    "allocation, typed lineage, audit, and event commit together."
+                    "issuance and allocation or existing-draft issuance, replacement "
+                    "allocation, typed lineage, audit, and event commit together. "
+                    "Historical payment settlement and non-position consumption evidence "
+                    "repair flush through financial.payments in that same transaction; "
+                    "a fingerprinted pre-opening release correction flushes through "
+                    "financial.customer_subledger_opening_positions."
                 ),
                 locking=(
                     "Locks the customer account first, then the three reviewed invoices "
                     "in UUID order, their active lines and source allocation, followed "
-                    "by the selected payment and tax rate before re-previewing."
+                    "by the selected payment, selected ledger evidence, and tax rate "
+                    "before re-previewing."
                 ),
                 idempotency=(
                     "The bounded correction key reserves one replacement invoice; the "
@@ -1289,7 +1356,8 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 retries=(
                     "Exact replay returns the recorded replacement and linked closure "
-                    "and allocations. Stale, conflicting, partial, refunded, exempt, or "
+                    "and allocations. The existing-draft path also verifies its exact "
+                    "residual credit. Stale, conflicting, partial, refunded, exempt, or "
                     "otherwise ambiguous evidence fails closed."
                 ),
             ),
@@ -1310,11 +1378,16 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.historical_invoice_tax_corrections.invoice_missing",
                     "financial.historical_invoice_tax_corrections.not_actionable",
                     "financial.historical_invoice_tax_corrections.permission_denied",
+                    "financial.historical_invoice_tax_corrections.payment_consumption_evidence_rejected",
+                    "financial.historical_invoice_tax_corrections.payment_settlement_evidence_rejected",
+                    "financial.historical_invoice_tax_corrections.preopening_release_rejected",
                     "financial.historical_invoice_tax_corrections.preview_invalid",
                     "financial.historical_invoice_tax_corrections.reason_invalid",
                     "financial.historical_invoice_tax_corrections.replay_conflict",
                     "financial.historical_invoice_tax_corrections.replacement_document_mismatch",
                     "financial.historical_invoice_tax_corrections.replacement_settlement_incomplete",
+                    "financial.historical_invoice_tax_corrections.source_void_evidence_mismatch",
+                    "financial.historical_invoice_tax_corrections.correction_balance_mismatch",
                     "financial.historical_invoice_tax_corrections.scope_invalid",
                     "financial.historical_invoice_tax_corrections.stale_preview",
                     "financial.historical_invoice_tax_corrections.subscription_settlement_incomplete",
@@ -1324,7 +1397,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "missing or ambiguous document, payment, allocation, or tax evidence",
                     "customer VAT exemption or changed tax snapshot",
                     "stale preview, permission failure, or idempotency conflict",
-                    "any non-zero selected-payment or customer-credit remainder",
+                    "any mismatch between the reviewed post-settlement customer-credit remainder and the resulting payment/account balance",
                 ),
             ),
             events=EventContract(
@@ -1345,12 +1418,13 @@ SERVICES: tuple[SOTService, ...] = (
                 old_owner="none; historical tax corrections required manual review",
                 new_owner="financial.historical_invoice_tax_corrections",
                 verification=(
-                    "Focused preview, exact settlement, rollback, replay, drift, "
-                    "permission, registry, and architecture-boundary tests."
+                    "Focused preview, exact settlement, preserved-residual settlement, "
+                    "rollback, replay, drift, permission, registry, and architecture-"
+                    "boundary tests."
                 ),
                 cutover_gate=(
-                    "Only the fingerprinted CLI confirmation may invoke this owner, "
-                    "and it requires one explicitly named customer evidence chain."
+                    "Only fingerprinted CLI confirmation may invoke either correction "
+                    "mode, each with one explicitly named customer evidence chain."
                 ),
                 fallback_retirement=(
                     "No tax-only invoice, paid-invoice mutation, raw SQL, generic "
@@ -2490,6 +2564,134 @@ SERVICES: tuple[SOTService, ...] = (
         ),
     ),
     SOTService(
+        name="financial.customer_chargeability",
+        module="app.services.customer_chargeability",
+        owns=(
+            "typed customer chargeability classification",
+            "non-billable and pricing-review cohort predicate",
+        ),
+        depends_on=(
+            "access.subscription_lifecycle",
+            "financial.subscription_billing_treatments",
+            "service_intent.catalog_policy",
+        ),
+        notes=(
+            "Classifies the complete current administrative service scope as "
+            "billable, confirmed non-billable, review-required, or no-current-"
+            "service. Missing or contradictory pricing is visible review work "
+            "and never becomes authority to suppress customer billing."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="typed customer chargeability classification",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "canonical current subscription scope",
+                        "canonical recurring catalog price",
+                        "effective non-standard billing treatment",
+                        "chargeability classification protocol",
+                    ),
+                ),
+                ConcernContract(
+                    name="non-billable and pricing-review cohort predicate",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "canonical current subscription scope",
+                        "canonical recurring catalog price",
+                        "effective non-standard billing treatment",
+                        "chargeability classification protocol",
+                    ),
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical current subscription scope",
+                    owner="access.subscription_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "pending, active, blocked, suspended, stopped, and disabled "
+                        "Subscription rows; terminal and historical rows are excluded"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical recurring catalog price",
+                    owner="service_intent.catalog_policy",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "active recurring offer-version price with offer-price fallback "
+                        "plus the explicit subscription unit-price override"
+                    ),
+                ),
+                AuthorityInput(
+                    name="effective non-standard billing treatment",
+                    owner="financial.subscription_billing_treatments",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source="effective complimentary or sponsored arrangement",
+                ),
+                AuthorityInput(
+                    name="chargeability classification protocol",
+                    owner="financial.customer_chargeability",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed status/reason vocabulary and matching resolver/SQL "
+                        "predicate semantics"
+                    ),
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.READ_ONLY,
+                boundary="Callers own session lifecycle; classification performs no writes.",
+                locking=(
+                    "List projections read committed facts; financial commands re-resolve "
+                    "after locking their source records."
+                ),
+                idempotency=(
+                    "The same service, price, treatment, and observation time evidence "
+                    "produces the same typed classification."
+                ),
+                retries="Read-only classification is safe to retry.",
+            ),
+            errors=ErrorContract(
+                domain_codes=(),
+                mapping_owner="customer list and billing-mode transition adapters",
+                fail_closed_on=(
+                    "missing recurring catalog price",
+                    "multiple active recurring catalog prices",
+                    "catalog and explicit subscription price contradiction",
+                ),
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.COMPLETE,
+                old_owner=(
+                    "customer-list-local collectible-only free-service predicate"
+                ),
+                new_owner="financial.customer_chargeability",
+                verification=(
+                    "Resolver, SQL cohort, lifecycle-status, missing-price, mixed-service, "
+                    "list, export, and architecture tests."
+                ),
+                cutover_gate=(
+                    "Customer list and billing-mode eligibility consume the shared owner."
+                ),
+                fallback_retirement=(
+                    "The duplicated list-local zero-price and treatment predicate is absent."
+                ),
+            ),
+            steward="finance and customer operations",
+            design_refs=(
+                "docs/designs/CUSTOMER_CHARGEABILITY_AND_BILLING_MODE_TRANSITIONS.md",
+                "docs/SOT_RELATIONSHIP_MAP.md",
+                "docs/FRONTEND_SPEC.md",
+            ),
+            test_refs=(
+                "tests/test_customer_chargeability.py",
+                "tests/test_web_customer_lists.py",
+                "tests/architecture/test_billing_profile_boundary.py",
+            ),
+        ),
+    ),
+    SOTService(
         name="financial.billing_profile",
         module="app.services.billing_profile",
         owns=(
@@ -2523,7 +2725,7 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "canonical account billing mode",
                         "canonical collectible subscription billing modes",
-                        "canonical offer billing mode",
+                        "canonical offer billing-mode availability",
                         "billing profile protocol",
                     ),
                 ),
@@ -2545,10 +2747,13 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
-                    name="canonical offer billing mode",
+                    name="canonical offer billing-mode availability",
                     owner="service_intent.catalog_policy",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                    source="CatalogOffer billing_mode for the requested service",
+                    source=(
+                        "active OfferBillingModeAvailability variants, falling back "
+                        "to CatalogOffer.billing_mode as the default when none exist"
+                    ),
                 ),
                 AuthorityInput(
                     name="billing profile protocol",
@@ -2588,6 +2793,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.billing_profile.billing_mode_unresolved",
                     "financial.billing_profile.mixed_collectible_subscription_billing_modes",
                     "financial.billing_profile.offer_not_found",
+                    "financial.billing_profile.offer_billing_mode_unavailable",
                     "financial.billing_profile.requested_billing_mode_mismatch",
                     "financial.billing_profile.subscriber_not_found",
                 ),
@@ -2632,6 +2838,227 @@ SERVICES: tuple[SOTService, ...] = (
                 "tests/test_billing_profile.py",
                 "tests/test_shared_policy_services.py",
                 "tests/test_billing_cleanup_remediation.py",
+                "tests/architecture/test_billing_profile_boundary.py",
+            ),
+        ),
+    ),
+    SOTService(
+        name="financial.billing_mode_transition",
+        module="app.services.billing_mode_transitions",
+        owns=(
+            "billing-mode transition eligibility and impact preview",
+            "account-wide billing-mode transition",
+        ),
+        depends_on=(
+            "access.subscription_lifecycle",
+            "customer.accounts",
+            "customer.billing_approval",
+            "customer.financial_position",
+            "events.dispatcher",
+            "financial.billing_profile",
+            "financial.customer_chargeability",
+            "financial.invoices",
+            "financial.prepaid_enforcement_state",
+            "financial.subscription_billing_treatments",
+            "observability.audit_log",
+            "service_intent.catalog_policy",
+            "service_intent.subscription_change_execution",
+        ),
+        notes=(
+            "A reviewed command changes one account and every current non-terminal "
+            "subscription atomically between prepaid and postpaid. It preserves "
+            "billing anchors, finalized receivables, and credit evidence; missing "
+            "prices, unsupported offers, treatments, pending plan changes, draft "
+            "billing, active locks, and stale previews fail closed."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="billing-mode transition eligibility and impact preview",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "billing-mode transition command evidence",
+                        "canonical billing profile",
+                        "canonical customer chargeability",
+                        "canonical account and subscription lifecycle",
+                        "canonical target-mode offer availability",
+                        "canonical customer financial position",
+                        "canonical invoice state",
+                        "effective subscription billing treatment",
+                        "pending subscription plan change",
+                    ),
+                ),
+                ConcernContract(
+                    name="account-wide billing-mode transition",
+                    role=OwnerRole.APPLICATION_COORDINATOR,
+                    input_names=(
+                        "billing-mode transition command evidence",
+                        "signed billing-mode transition preview",
+                        "canonical billing profile",
+                        "canonical customer chargeability",
+                        "canonical account and subscription lifecycle",
+                        "canonical target-mode offer availability",
+                        "canonical customer financial position",
+                        "canonical invoice state",
+                        "effective subscription billing treatment",
+                        "pending subscription plan change",
+                    ),
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="billing-mode transition command evidence",
+                    owner="financial.billing_mode_transition",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed account, target mode, actor, scope, reason, command, "
+                        "correlation, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="signed billing-mode transition preview",
+                    owner="financial.billing_mode_transition",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source="SHA-256 fingerprint over every displayed decision input",
+                ),
+                AuthorityInput(
+                    name="canonical billing profile",
+                    owner="financial.billing_profile",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source="automation-safe account and subscription billing-mode profile",
+                ),
+                AuthorityInput(
+                    name="canonical customer chargeability",
+                    owner="financial.customer_chargeability",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source="typed billable, non-billable, or review-required verdict",
+                ),
+                AuthorityInput(
+                    name="canonical account and subscription lifecycle",
+                    owner="access.subscription_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "locked Subscriber status and every current Subscription status, "
+                        "billing mode, next billing anchor, and active enforcement lock"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical target-mode offer availability",
+                    owner="service_intent.catalog_policy",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "active OfferBillingModeAvailability variants with "
+                        "CatalogOffer.billing_mode as the no-variant default"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical customer financial position",
+                    owner="customer.financial_position",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "currency-typed native available credit and finalized open "
+                        "receivables"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical invoice state",
+                    owner="financial.invoices",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="active draft and finalized account invoice records",
+                ),
+                AuthorityInput(
+                    name="effective subscription billing treatment",
+                    owner="financial.subscription_billing_treatments",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source="effective or scheduled non-standard billing arrangements",
+                ),
+                AuthorityInput(
+                    name="pending subscription plan change",
+                    owner="service_intent.subscription_change_execution",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="pending SubscriptionChangeRequest records",
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.COORDINATOR_MANAGED,
+                boundary=(
+                    "Confirmation enters execute_owner_command once; account and "
+                    "subscription modes, prepaid timer cleanup, idempotency, audit, and "
+                    "event evidence commit or roll back together."
+                ),
+                locking=(
+                    "Locks Subscriber first, then current Subscription rows, offers and "
+                    "availability, treatments, plan changes, enforcement locks, and "
+                    "invoices in stable identifier order before re-previewing."
+                ),
+                idempotency=(
+                    "A target-scoped deterministic outbox event identity replays the "
+                    "original typed outcome; different-account reuse fails closed."
+                ),
+                retries=(
+                    "Transient transaction failures may retry with identical command and "
+                    "preview evidence; changed evidence requires a new preview."
+                ),
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    "financial.billing_mode_transition.account_not_found",
+                    "financial.billing_mode_transition.idempotency_account_mismatch",
+                    "financial.billing_mode_transition.idempotency_conflict",
+                    "financial.billing_mode_transition.invalid_idempotency_key",
+                    "financial.billing_mode_transition.invalid_preview_fingerprint",
+                    "financial.billing_mode_transition.invalid_reason",
+                    "financial.billing_mode_transition.invalid_replay_evidence",
+                    "financial.billing_mode_transition.invalid_scope",
+                    "financial.billing_mode_transition.stale_preview",
+                    "financial.billing_mode_transition.transition_not_allowed",
+                    *owner_command_boundary_error_codes(
+                        "financial.billing_mode_transition"
+                    ),
+                ),
+                mapping_owner="admin billing-account web adapter",
+                fail_closed_on=(
+                    "missing or contradictory price evidence",
+                    "mixed or stale billing profile",
+                    "unsupported target-mode offer",
+                    "open treatment, plan change, draft invoice, or enforcement lock",
+                    "missing billing boundary or insufficient due prepaid funding",
+                ),
+            ),
+            events=EventContract(
+                event_types=("subscriber.billing_mode_changed",),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility="Additive payload fields only within schema version 1.",
+                replay="Consumers use committed mode and command identity; they never re-decide.",
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.COMPLETE,
+                old_owner=(
+                    "generic account update rejection with no coordinated transition owner"
+                ),
+                new_owner="financial.billing_mode_transition",
+                verification=(
+                    "Preview, eligibility, both directions, stale confirmation, replay, "
+                    "rollback, permission, UI, PostgreSQL locking, and architecture tests."
+                ),
+                cutover_gate=(
+                    "Admin billing accounts expose only the reviewed owner command; generic "
+                    "account and subscription editors remain unable to change mode."
+                ),
+                fallback_retirement=(
+                    "No adapter or generic CRUD service writes account/subscription mode "
+                    "for an existing billing account."
+                ),
+            ),
+            steward="billing operations",
+            design_refs=(
+                "docs/designs/CUSTOMER_CHARGEABILITY_AND_BILLING_MODE_TRANSITIONS.md",
+                "docs/SOT_RELATIONSHIP_MAP.md",
+                "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+            ),
+            test_refs=(
+                "tests/test_billing_mode_transitions.py",
                 "tests/architecture/test_billing_profile_boundary.py",
             ),
         ),

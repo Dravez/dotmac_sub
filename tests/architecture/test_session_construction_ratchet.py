@@ -74,7 +74,29 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +2 from tests/integration/test_team_inbox_contact_link_concurrency.py: two
 #: PostgreSQL concurrency proofs for reviewed endpoint links and first-inbound
 #: identity claims, each with its own `sessionmaker`.
-TEST_FIXTURE_BASELINE_TOTAL = 131
+#: +1 from tests/integration/test_invoice_accounting_sync_keyset_postgres.py: a
+#: real dual-session PostgreSQL proof that the accounting-sync feed's keyset
+#: cursor does not skip a stationary row under a genuinely concurrent,
+#: independently-committing writer, with its own `sessionmaker`.
+#: +4 from tests/test_chat_widget_media_transaction.py: two isolated SQLite
+#: transaction-boundary proofs each construct one disposable Engine and Session.
+#: +8 from ADR 0017 enforcement evidence proofs: the out-of-band writer tests
+#: (tests/test_enforcement_application_writer.py) each bind a disposable SQLite
+#: Engine/sessionmaker in place of db_session_adapter.create_session, and the
+#: PostgreSQL durability proofs
+#: (tests/integration/test_enforcement_application_evidence_durability.py) use
+#: their own sessionmaker to observe the evidence from a fresh connection after
+#: the caller rolls back.
+#: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
+#: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
+#: isolated like the writer tests (EnforcementApplication carries no FKs).
+#: +1 from tests/integration/test_module_lineage_rehearsal.py: the disposable
+#: database fixture creates its stand-in schema before Alembic and disposes
+#: that bootstrap engine in a finally block.
+#: +3 from tests/integration/test_notification_template_seed_concurrency.py:
+#: one migrated PostgreSQL engine plus two independently committing sessions
+#: prove concurrent startup seeders safely converge on one template per key.
+TEST_FIXTURE_BASELINE_TOTAL = 150
 
 
 def _baseline() -> dict[str, int]:

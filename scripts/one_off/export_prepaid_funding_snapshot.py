@@ -12,15 +12,19 @@ consequence follows:
 * enforcement services apply profile, activation, shield, health, and lifecycle
   policy from config-owned inputs.
 
-The export is complete-or-blocked. Every migrated candidate must have one frozen
-source row whose active transaction net reconciles to the final opening-balance
-position; a complete empty transaction set is zero. A native account created
-after the fixed handoff has an explicit zero history component plus canonical
-native facts. A carried account with no retained source identity has an explicit
-typed unresolved disposition and produces a blocker artifact before the command
-exits. No unresolved cohort can produce a partial or signed funding manifest;
-other missing, duplicated, malformed, or unreconciled source evidence aborts the
-whole artifact.
+The export is complete-or-blocked for the full candidate cohort by default. A
+separately supplied, explicitly confirmed reviewed account-ID file may narrow
+the candidate cohort for a bounded reconciliation; the selected IDs must still
+belong to the current prepaid candidate cohort. Every selected migrated
+candidate must have one frozen source row whose active transaction net
+reconciles to the final opening-balance position; a complete empty transaction
+set is zero. A native account created after the fixed handoff has an explicit
+zero history component plus canonical native facts. A carried account with no
+retained source identity has an explicit typed unresolved disposition and
+produces a blocker artifact before the command exits. No unresolved selected
+cohort can produce a partial or signed funding manifest; other missing,
+duplicated, malformed, or unreconciled source evidence aborts the whole
+artifact.
 
 Safety: this command has no apply mode, sets its PostgreSQL transaction read
 only, requires an explicitly approved primary override for an ephemeral restore,
@@ -71,6 +75,7 @@ from scripts.one_off.billing_alignment_audit import (
     LEGACY_FINANCIAL_REPLAY_AT,
     _configure_read_only_session,
 )
+from scripts.one_off.prepaid_funding_scope import resolve_reviewed_account_scope
 
 _ACTION_PLAN_FIELDS = {
     "schema",
@@ -244,6 +249,7 @@ def build_prepaid_funding_snapshot(
     *,
     snapshot_at: datetime,
     source: str,
+    candidate_account_ids: set[UUID] | None = None,
 ) -> FundingSnapshotExport:
     """Build one complete history-derived candidate snapshot.
 
@@ -258,12 +264,22 @@ def build_prepaid_funding_snapshot(
     if not source_label:
         raise ValueError("source label must not be empty")
 
-    candidate_ids = tuple(
-        sorted(
-            (str(value) for value in candidate_prepaid_funding_account_ids(db)),
-            key=str,
-        )
+    all_candidate_ids = {
+        UUID(str(value)) for value in candidate_prepaid_funding_account_ids(db)
+    }
+    selected_candidate_ids = (
+        all_candidate_ids
+        if candidate_account_ids is None
+        else set(candidate_account_ids)
     )
+    unexpected = selected_candidate_ids - all_candidate_ids
+    if unexpected:
+        rendered = ", ".join(sorted(str(value) for value in unexpected))
+        raise ValueError(
+            "selected funding accounts are outside the current prepaid "
+            f"candidate cohort: {rendered}"
+        )
+    candidate_ids = tuple(sorted(str(value) for value in selected_candidate_ids))
     account_ids = tuple(UUID(value) for value in candidate_ids)
     currency = display_format.default_currency(db)
     try:
@@ -468,6 +484,15 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--blockers-out", type=Path)
     parser.add_argument(
+        "--reviewed-account-ids-file",
+        type=Path,
+        help="newline-delimited reviewed account UUIDs for a bounded scope",
+    )
+    parser.add_argument(
+        "--confirm-reviewed-scope",
+        help="required acknowledgement when a bounded reviewed scope is supplied",
+    )
+    parser.add_argument(
         "--signing-key-ref",
         help="OpenBao reference to the Ed25519 private signing key",
     )
@@ -495,10 +520,18 @@ def main() -> int:
             statement_timeout_ms=args.statement_timeout_ms,
             allow_primary=args.allow_primary,
         )
+        reviewed_scope = resolve_reviewed_account_scope(
+            args.reviewed_account_ids_file,
+            allowed_account_ids={
+                UUID(str(value)) for value in candidate_prepaid_funding_account_ids(db)
+            },
+            confirmation=args.confirm_reviewed_scope,
+        )
         export = build_prepaid_funding_snapshot(
             db,
             snapshot_at=args.snapshot_at,
             source=args.source,
+            candidate_account_ids=reviewed_scope,
         )
         diagnostics = export.diagnostics_payload()
         print(
