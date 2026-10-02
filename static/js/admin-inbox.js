@@ -321,6 +321,7 @@
       },
 
       desktopSidebarStyle() {
+        if (window.innerWidth < 1024) return "";
         return `--inbox-sidebar-width:${this.sidebarWidth}px;width:var(--inbox-sidebar-width)`;
       },
 
