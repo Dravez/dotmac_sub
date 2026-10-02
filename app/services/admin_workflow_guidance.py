@@ -1411,6 +1411,7 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             "decide-payment-proof",
             "Verify or reject payment proof",
             1,
+            2,
             permission="billing:proof:verify",
         ),
         _action("verify-proof-result", "Verify the resulting records", 3),
