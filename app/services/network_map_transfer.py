@@ -76,7 +76,6 @@ _CLASSIFY = OwnerCommandDefinition(
 )
 
 _KML_NS = "http://www.opengis.net/kml/2.2"
-XML.register_namespace("", _KML_NS)
 
 
 class NetworkMapTransferError(DomainError):
