@@ -162,6 +162,25 @@ class TestResponsivePanes:
         assert inbox.triage_mode() in {"list", "detail"}
         expect(admin_page.locator("[data-inbox-sidebar-content]")).to_be_visible()
 
+    @pytest.mark.parametrize("width", (375, 425, 645))
+    def test_mobile_width_has_no_horizontal_overflow(self, admin_page, settings, width):
+        admin_page.set_viewport_size({"width": width, "height": 844})
+        inbox = AdminInboxPage(admin_page, settings.base_url)
+        inbox.goto()
+        inbox.expect_loaded()
+
+        overflow = admin_page.evaluate(
+            """() => ({
+                document: document.documentElement.scrollWidth <= window.innerWidth,
+                sidebar: (() => {
+                    const sidebar = document.querySelector('[data-inbox-sidebar-content]');
+                    return !sidebar || sidebar.scrollWidth <= sidebar.clientWidth;
+                })(),
+            })"""
+        )
+        assert overflow == {"document": True, "sidebar": True}
+        expect(admin_page.locator("[data-inbox-empty-state]")).not_to_be_visible()
+
     def test_desktop_width_shows_the_sidebar(self, admin_page, settings):
         admin_page.set_viewport_size({"width": 1440, "height": 900})
         inbox = AdminInboxPage(admin_page, settings.base_url)

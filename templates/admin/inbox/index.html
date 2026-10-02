@@ -30,7 +30,7 @@
     <div class="inbox-main-frame flex h-full min-h-0 w-full overflow-hidden rounded-2xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-900">
 
     <section id="inbox-sidebar"
-             class="relative flex w-full min-w-0 shrink-0 flex-col border-r border-slate-200/60 bg-slate-50/50 dark:border-slate-700/60 dark:bg-slate-900/60 md:w-[320px] [[data-triage-mode=detail]_&]:hidden md:[[data-triage-mode=detail]_&]:flex"
+             class="relative flex w-full min-w-0 shrink-0 flex-col border-r border-slate-200/60 bg-slate-50/50 dark:border-slate-700/60 dark:bg-slate-900/60 md:w-full lg:w-[320px] [[data-triage-mode=detail]_&]:hidden md:[[data-triage-mode=detail]_&]:flex"
              :style="desktopSidebarStyle()"
              data-triage-pane="list"
              aria-label="Conversation queue">
@@ -40,7 +40,7 @@
         <button type="button"
                 x-show="!managerDashboardOpen"
                 x-cloak
-                class="group absolute right-0 top-1/2 z-30 hidden h-14 w-3 -translate-y-1/2 cursor-ew-resize touch-none flex-col items-center justify-center gap-[3px] rounded-l-lg rounded-r-none border border-r-0 border-[rgba(245,158,11,0.45)] shadow-[0_8px_18px_rgba(15,23,42,0.12)] outline-none sm:flex dark:border-[rgba(245,158,11,0.50)] dark:shadow-[0_8px_18px_rgba(0,0,0,0.30)]"
+                class="group absolute right-0 top-1/2 z-30 hidden h-14 w-3 cursor-ew-resize touch-none flex-col items-center justify-center gap-[3px] rounded-l-lg rounded-r-none border border-r-0 border-[rgba(245,158,11,0.45)] shadow-[0_8px_18px_rgba(15,23,42,0.12)] outline-none lg:flex dark:border-[rgba(245,158,11,0.50)] dark:shadow-[0_8px_18px_rgba(0,0,0,0.30)]"
                 :class="resizingSidebar ? 'bg-[#F59E0B] dark:bg-[#D97706]' : 'bg-[rgba(255,251,235,0.95)] hover:bg-[#F59E0B] focus:bg-[#F59E0B] dark:bg-[rgba(120,53,15,0.90)] dark:hover:bg-[#D97706] dark:focus:bg-[#D97706]'"
                 @pointerdown="startSidebarResize($event)"
                 :aria-pressed="resizingSidebar.toString()"
