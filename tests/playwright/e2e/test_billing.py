@@ -93,9 +93,7 @@ class TestInvoicesList:
         expect(invoice_table).to_have_attribute(
             "data-list-url", re.compile(r"^(?!.*[?&]status=unpaid).*$")
         )
-        expect(admin_page).to_have_url(
-            re.compile(r"^(?!.*[?&]status=unpaid).*$")
-        )
+        expect(admin_page).to_have_url(re.compile(r"^(?!.*[?&]status=unpaid).*$"))
         expect(status_filter).to_have_value("")
 
         page.filter_by_status("paid")
