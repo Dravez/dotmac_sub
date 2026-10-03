@@ -325,9 +325,7 @@ def update_customer_profile(
             )
             stage_audit_event(
                 db,
-                actor=AuditActor.user(
-                    str(subscriber.id), label=command.context.actor
-                ),
+                actor=AuditActor.user(str(subscriber.id), label=command.context.actor),
                 action="portal_profile_update",
                 entity_type="subscriber",
                 entity_id=str(subscriber.id),
