@@ -93,9 +93,7 @@ def _canonical_location(
     lga_value: str | None,
 ) -> tuple[str | None, str | None, str | None]:
     raw_country_code = (country_code_value or "").strip()
-    country_code = customer_profile_location.canonical_country_code(
-        raw_country_code
-    )
+    country_code = customer_profile_location.canonical_country_code(raw_country_code)
     if raw_country_code and not country_code:
         raise _fail("invalid_country", "Select a country from the available list.")
 
@@ -105,24 +103,32 @@ def _canonical_location(
         if region:
             region = ncc_location.canonical_state(region)
             if not region or region == "INTERNATIONAL":
-                raise _fail("invalid_region", "Select a valid Nigerian state or the FCT.")
+                raise _fail(
+                    "invalid_region", "Select a valid Nigerian state or the FCT."
+                )
         if lga and not region:
-            raise _fail("invalid_region", "Select a Nigerian state before selecting an LGA.")
+            raise _fail(
+                "invalid_region",
+                "Select a Nigerian state before selecting an LGA.",
+            )
         if lga:
             lga = ncc_location.canonical_lga(region, lga)
             if not lga:
                 raise _fail(
                     "invalid_lga",
-                    f"The selected LGA is not part of {region}.",
+                    f"{(lga_value or '').strip()!r} is not a Local Government "
+                    f"Area of {region!r}.",
                 )
     elif lga:
-        raise _fail("invalid_lga", "LGA is available only for Nigerian contact addresses.")
+        raise _fail(
+            "invalid_lga", "LGA is available only for Nigerian contact addresses."
+        )
     return country_code or None, region or None, lga or None
 
 
 def _validated_fields(
     command: UpdateCustomerProfileCommand,
-) -> dict[str, object]:
+) -> SubscriberUpdate:
     country_code, region, lga = _canonical_location(
         command.country_code, command.region, command.lga
     )
@@ -165,14 +171,13 @@ def _validated_fields(
     }
     if command.gender and command.gender.strip():
         fields["gender"] = command.gender.strip()
-    if command.nin is not None:
-        fields["nin"] = command.nin.strip() or None
+    fields["nin"] = (command.nin or "").strip() or None
 
     try:
-        validated = SubscriberUpdate(**fields)
+        validated = SubscriberUpdate.model_validate(fields)
     except Exception as exc:
         raise _fail("invalid_profile", "Some profile details are invalid.") from exc
-    return validated.model_dump(exclude_unset=True)
+    return validated
 
 
 def update_customer_profile(
@@ -187,7 +192,7 @@ def update_customer_profile(
     fields = _validated_fields(command)
 
     def operation() -> CustomerProfileUpdateOutcome:
-        subscriber = db.scalar(
+        subscriber: Subscriber | None = db.scalar(
             select(Subscriber)
             .where(Subscriber.id == command.subscriber_id)
             .with_for_update()
@@ -196,17 +201,21 @@ def update_customer_profile(
             raise _fail("subscriber_not_found", "Customer account was not found.")
 
         nin_locked = bool((subscriber.metadata_ or {}).get("nin_verified"))
-        if command.enforce_biodata and subscriber.category == SubscriberCategory.residential:
-            if (fields.get("date_of_birth") is None or not fields.get("gender")):
+        if (
+            command.enforce_biodata
+            and subscriber.category == SubscriberCategory.residential
+        ):
+            if fields.date_of_birth is None or fields.gender is None:
                 raise _fail(
                     "invalid_biodata",
                     "Date of birth and gender are required to complete your profile.",
                 )
-            nin_value = fields.get("nin")
+            nin_value = fields.nin
             if not nin_locked and not nin_value:
                 raise _fail("invalid_biodata", "Enter your 11-digit NIN.")
-        if nin_locked and fields.get("nin") != subscriber.nin:
-            fields.pop("nin", None)
+        submitted_fields = set(fields.model_fields_set)
+        if nin_locked and fields.nin != subscriber.nin:
+            submitted_fields.discard("nin")
 
         previous_values = {
             field: getattr(subscriber, field)
@@ -231,7 +240,7 @@ def update_customer_profile(
             )
         }
         email_changed = (subscriber.email or "").casefold() != str(
-            fields.get("email") or ""
+            fields.email or ""
         ).casefold()
 
         for field in (
@@ -253,23 +262,29 @@ def update_customer_profile(
             "locale",
             "nin",
         ):
-            if field in fields:
-                setattr(subscriber, field, fields[field])
+            if field in submitted_fields:
+                setattr(subscriber, field, getattr(fields, field))
         if email_changed:
             subscriber.email_verified = False
 
-        preferences = SubscriberNotificationPreferencesUpdate(
-            billing_notifications=command.billing_notifications,
-            sms_updates=command.sms_updates,
-            push_notifications=command.push_notifications,
-            service_notifications=command.service_notifications,
-            account_notifications=command.account_notifications,
-            usage_notifications=command.usage_notifications,
-            general_notifications=command.general_notifications,
-        )
         metadata = dict(subscriber.metadata_ or {})
         previous_metadata = dict(metadata)
-        metadata.update(preferences.model_dump())
+        preference_values = {
+            "billing_notifications": command.billing_notifications,
+            "sms_updates": command.sms_updates,
+            "push_notifications": command.push_notifications,
+            "service_notifications": command.service_notifications,
+            "account_notifications": command.account_notifications,
+            "usage_notifications": command.usage_notifications,
+            "general_notifications": command.general_notifications,
+        }
+        metadata["billing_notifications"] = command.billing_notifications
+        metadata["sms_updates"] = command.sms_updates
+        metadata["push_notifications"] = command.push_notifications
+        metadata["service_notifications"] = command.service_notifications
+        metadata["account_notifications"] = command.account_notifications
+        metadata["usage_notifications"] = command.usage_notifications
+        metadata["general_notifications"] = command.general_notifications
         subscriber.metadata_ = metadata
 
         changed_fields = tuple(
@@ -281,10 +296,12 @@ def update_customer_profile(
         )
         preferences_changed = any(
             previous_metadata.get(field) != value
-            for field, value in preferences.model_dump().items()
+            for field, value in preference_values.items()
         )
         if preferences_changed:
-            changed_fields = tuple(sorted((*changed_fields, "notification_preferences")))
+            changed_fields = tuple(
+                sorted((*changed_fields, "notification_preferences"))
+            )
         if email_changed:
             changed_fields = tuple(sorted((*changed_fields, "email_verified")))
 
@@ -335,7 +352,7 @@ def update_customer_profile(
         context=command.context,
         operation=operation,
     )
-    if outcome.email_changed and fields.get("email"):
+    if outcome.email_changed and fields.email:
         try:
             from app.services import auth_flow
 

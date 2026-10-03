@@ -897,7 +897,7 @@ DOMAIN = DomainSOT(
         SOTService(
             name="customer.portal_profile_commands",
             module="app.services.customer_portal_profile_commands",
-            owns=("customer portal profile and contact-address edits",),
+            owns=("customer portal profile update",),
             depends_on=(
                 "customer.accounts",
                 "customer.identity_scope",

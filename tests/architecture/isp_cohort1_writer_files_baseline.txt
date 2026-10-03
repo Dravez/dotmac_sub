@@ -23,6 +23,11 @@
 # ADDED deliberately. It is the registered `customer.canonical_profile_patch`
 # participant, isolated from `customer.accounts`, and applies only an explicit
 # typed field set inside its calling coordinator's transaction.
+#
+# 2026-10-03 — `service|app/services/customer_portal_profile_commands.py`
+# ADDED deliberately. It is the registered owner for portal profile writes;
+# its two direct Subscriber writes reset email verification and persist the
+# seven declared notification preference keys atomically with the profile.
 
 cli_script|scripts/migration/backfill_crm_subscriber_links.py
 cli_script|scripts/migration/backfill_party_status.py
@@ -45,6 +50,7 @@ service|app/services/customer_canonical_profile_patch.py
 service|app/services/customer_location_requests.py
 service|app/services/customer_portal_contacts.py
 service|app/services/customer_portal_notifications.py
+service|app/services/customer_portal_profile_commands.py
 service|app/services/gis_sync.py
 service|app/services/mrr_snapshot.py
 service|app/services/network_subscriber_bridge.py

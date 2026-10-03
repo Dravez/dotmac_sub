@@ -554,7 +554,9 @@ class TestCustomerProfileNotifications:
             update_customer_profile,
         )
 
-        with patch("app.services.subscriber.emit_event") as emit_event_mock:
+        with patch(
+            "app.services.customer_portal_profile_commands.emit_event"
+        ) as emit_event_mock:
             outcome = update_customer_profile(
                 db_session,
                 command=UpdateCustomerProfileCommand(
@@ -600,7 +602,7 @@ class TestCustomerProfileNotifications:
                 return_value=customer,
             ),
             patch(
-                "app.services.web_customer_actions.update_customer_profile"
+                "app.web.customer.routes.portal_profile_commands.update_customer_profile"
             ) as update_mock,
         ):
             response = customer_update_profile(

@@ -139,8 +139,12 @@ class UpdateCustomerProfileCommand:
 
 @dataclass(frozen=True, slots=True)
 class CustomerProfileUpdateOutcome:
-    subscriber: Subscriber
+    subscriber_record: Subscriber
     email_changed: bool
+
+    @property
+    def subscriber(self) -> Subscriber:
+        return self.subscriber_record
 
 
 CUSTOMER_INVOICE_PAYMENT_METHOD_PAYSTACK = "paystack"
@@ -3445,7 +3449,7 @@ def update_customer_profile(
     if subscriber is None:
         return None
     return CustomerProfileUpdateOutcome(
-        subscriber=subscriber,
+        subscriber_record=subscriber,
         email_changed=outcome.email_changed,
     )
 

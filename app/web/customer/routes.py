@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from app.db import finish_read_transaction, get_db
-from app.models.subscriber import Subscriber
 from app.services import auth_flow as auth_flow_service
 from app.services import autopay as autopay_service
 from app.services import billing_payment_receipts as payment_receipts_service
@@ -54,7 +53,6 @@ from app.services import customer_portal_flow_payment_methods as customer_cards
 from app.services import customer_portal_notifications as customer_notifications_service
 from app.services import customer_portal_profile_commands as portal_profile_commands
 from app.services import payment_proofs as payment_proofs_service
-from app.services import service_address as service_address_service
 from app.services import web_customer_actions as customer_profile_service
 from app.services import web_customer_auth as web_customer_auth_service
 from app.services import web_network_speedtests as web_network_speedtests_service
@@ -63,7 +61,6 @@ from app.services.application_exception_observability import (
     PaymentVerificationOutcome,
     record_payment_verification_outcome,
 )
-from app.services.audit_helpers import log_audit_event
 from app.services.bandwidth import add_directions_to_series, bandwidth_samples
 from app.services.customer_context import (
     optional_customer_account_id,
@@ -1750,9 +1747,7 @@ def customer_update_profile(
         )
     if subscriber_id:
         try:
-            enforce_biodata = location_capture.service_location_requirement_enabled(
-                db
-            )
+            enforce_biodata = location_capture.service_location_requirement_enabled(db)
             finish_read_transaction(db)
             portal_profile_commands.update_customer_profile(
                 db,
