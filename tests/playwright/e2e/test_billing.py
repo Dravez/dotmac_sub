@@ -80,24 +80,24 @@ class TestInvoicesList:
         page.goto()
         page.expect_loaded()
         status_filter = admin_page.locator("select[name='status']")
-        invoice_table = admin_page.locator("#invoices-table")
+        invoice_page = admin_page.locator("#invoices-table [data-invoice-page]")
 
         page.filter_by_status("unpaid")
-        expect(invoice_table).to_have_attribute(
+        expect(invoice_page).to_have_attribute(
             "data-list-url", re.compile(r"status=unpaid")
         )
         expect(admin_page).to_have_url(re.compile(r"[?&]status=unpaid"))
         expect(status_filter).to_have_value("unpaid")
 
         page.filter_by_status("")
-        expect(invoice_table).to_have_attribute(
+        expect(invoice_page).to_have_attribute(
             "data-list-url", re.compile(r"^(?!.*[?&]status=unpaid).*$")
         )
         expect(admin_page).to_have_url(re.compile(r"^(?!.*[?&]status=unpaid).*$"))
         expect(status_filter).to_have_value("")
 
         page.filter_by_status("paid")
-        expect(invoice_table).to_have_attribute(
+        expect(invoice_page).to_have_attribute(
             "data-list-url", re.compile(r"[?&]status=paid(?:&|$)")
         )
         expect(admin_page).to_have_url(re.compile(r"[?&]status=paid(?:&|$)"))
