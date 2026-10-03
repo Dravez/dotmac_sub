@@ -154,3 +154,20 @@ The profile owner validates the values server-side: DOB must be a valid
 non-future date, gender cannot be unknown, and NIN must contain exactly 11
 ASCII digits. Business, government, and NGO subscriber categories are not
 subject to this individual biodata gate.
+
+## Customer profile contact-address capture
+
+The Contact Address card on `/portal/profile` edits the legacy Subscriber
+contact-address fields through the typed
+`customer.portal_profile_commands` boundary; it does not move an approved
+service-location pin. Country selection uses the
+checked-in ISO 3166-1 alpha-2 catalog. When Nigeria is selected, the State /
+Region typeahead uses the NCC state/FCT catalog and the LGA typeahead is rebuilt
+from the selected state. Other countries retain a free-text Region field and do
+not accept a Nigerian LGA.
+
+The browser controls are guidance only. The command owner validates the country
+code, canonicalizes Nigerian state and LGA values, and rejects mismatched pairs.
+`Abuja Municipal Area Council` and `AMAC` are admitted FCT-only aliases for the
+canonical stored value `Municipal Area Council`. Address lines, City, and Postal
+Code remain ordinary contact-address fields.

@@ -112,17 +112,20 @@ def test_profile_email_change_rearms_verification(
     db_session.commit()
 
     new_email = f"changed-{uuid.uuid4().hex[:8]}@example.com"
-    updated = web_customer_actions.update_customer_profile(
+    outcome = web_customer_actions.update_customer_profile(
         db_session,
-        subscriber_id=str(subscriber.id),
-        first_name="Test",
-        last_name="User",
-        email=new_email,
-        phone=None,
-        billing_notifications=False,
-        sms_updates=False,
+        command=web_customer_actions.UpdateCustomerProfileCommand(
+            subscriber_id=subscriber.id,
+            first_name="Test",
+            last_name="User",
+            email=new_email,
+            phone=None,
+            billing_notifications=False,
+            sms_updates=False,
+        ),
     )
-    assert updated is not None
+    assert outcome is not None
+    updated = outcome.subscriber
     assert updated.email == new_email
     assert updated.email_verified is False
 
@@ -138,17 +141,20 @@ def test_profile_same_email_does_not_resend(
     subscriber.email_verified = True
     db_session.commit()
 
-    updated = web_customer_actions.update_customer_profile(
+    outcome = web_customer_actions.update_customer_profile(
         db_session,
-        subscriber_id=str(subscriber.id),
-        first_name="Test",
-        last_name="User",
-        email=subscriber.email,
-        phone=None,
-        billing_notifications=False,
-        sms_updates=False,
+        command=web_customer_actions.UpdateCustomerProfileCommand(
+            subscriber_id=subscriber.id,
+            first_name="Test",
+            last_name="User",
+            email=subscriber.email,
+            phone=None,
+            billing_notifications=False,
+            sms_updates=False,
+        ),
     )
-    assert updated is not None
+    assert outcome is not None
+    updated = outcome.subscriber
     assert updated.email_verified is True
     assert _capture_email == []
 

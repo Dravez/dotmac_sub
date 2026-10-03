@@ -887,9 +887,125 @@ DOMAIN = DomainSOT(
                 "person edits and form category controls must not change "
                 "the customer account type. Approved legacy Subscriber "
                 "name corrections remain here until explicit Party cutover. "
+                "Customer portal profile writes are owned by "
+                "customer.portal_profile_commands. "
                 "AI-collected DOB/gender candidates are validated and saved "
                 "only through this owner after direct residential-customer "
                 "eligibility is rechecked."
+            ),
+        ),
+        SOTService(
+            name="customer.portal_profile_commands",
+            module="app.services.customer_portal_profile_commands",
+            owns=("customer portal profile and contact-address edits",),
+            depends_on=(
+                "customer.accounts",
+                "customer.identity_scope",
+                "events.dispatcher",
+                "observability.audit_log",
+                "gis.spatial_sync",
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="customer portal profile update",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed authenticated customer profile command",
+                            "locked canonical Subscriber account",
+                        ),
+                        canonical_writer="customer.portal_profile_commands",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed authenticated customer profile command",
+                        owner="customer.portal_profile_commands",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "validated portal form values, authenticated subscriber "
+                            "scope, actor, and command correlation context"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="locked canonical Subscriber account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Subscriber row selected FOR UPDATE",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "execute_owner_command commits profile, identity index, "
+                        "event, and audit evidence atomically; geocoding is a "
+                        "best-effort spatial consequence."
+                    ),
+                    locking="The target Subscriber is selected FOR UPDATE before validation and mutation.",
+                    idempotency=(
+                        "Applying the same typed profile values converges to the "
+                        "same Subscriber state; verification dispatch occurs only "
+                        "after the command transaction commits."
+                    ),
+                    retries="Retry the complete owner command after rollback using the same command context.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        *owner_command_boundary_error_codes(
+                            "customer.portal_profile_commands"
+                        ),
+                        "customer.portal_profile_commands.invalid_scope",
+                        "customer.portal_profile_commands.invalid_country",
+                        "customer.portal_profile_commands.invalid_region",
+                        "customer.portal_profile_commands.invalid_lga",
+                        "customer.portal_profile_commands.invalid_profile",
+                        "customer.portal_profile_commands.subscriber_not_found",
+                        "customer.portal_profile_commands.invalid_biodata",
+                    ),
+                    mapping_owner="customer portal profile route",
+                    fail_closed_on=(
+                        "subscriber outside authenticated scope",
+                        "unknown country code",
+                        "invalid Nigerian state or FCT/LGA pairing",
+                        "invalid profile or required biodata",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The event names the Subscriber, changed field names, "
+                        "and command correlation IDs without profile values."
+                    ),
+                    replay=(
+                        "The event is staged in the owner transaction and is "
+                        "replayed through the durable dispatcher after commit."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.CUTOVER_READY,
+                    old_owner="customer.profile_commands portal update helper",
+                    new_owner="customer.portal_profile_commands",
+                    verification=(
+                        "tests/test_customer_profile_location.py and "
+                        "tests/test_customer_portal_gaps.py"
+                    ),
+                    cutover_gate="The profile POST route calls the typed owner directly.",
+                    fallback_retirement=(
+                        "The legacy profile helper no longer handles portal writes."
+                    ),
+                ),
+                steward="customer operations",
+                design_refs=(
+                    "docs/designs/SUBSCRIBER_SERVICE_LOCATION_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=(
+                    "tests/test_customer_profile_location.py",
+                    "tests/test_customer_portal_gaps.py",
+                ),
             ),
         ),
         SOTService(

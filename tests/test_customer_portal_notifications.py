@@ -549,27 +549,33 @@ class TestCustomerProfileNotifications:
         self, db_session, subscriber
     ) -> None:
         from app.services.events.types import EventType
-        from app.services.web_customer_actions import update_customer_profile
+        from app.services.web_customer_actions import (
+            UpdateCustomerProfileCommand,
+            update_customer_profile,
+        )
 
         with patch("app.services.subscriber.emit_event") as emit_event_mock:
-            updated = update_customer_profile(
+            outcome = update_customer_profile(
                 db_session,
-                subscriber_id=str(subscriber.id),
-                first_name="Updated",
-                last_name="Customer",
-                email="updated@example.com",
-                phone="+2348000000012",
-                billing_notifications=False,
-                sms_updates=True,
-                push_notifications=False,
-                service_notifications=False,
-                account_notifications=True,
-                usage_notifications=False,
-                general_notifications=True,
-                locale="en-NG",
+                command=UpdateCustomerProfileCommand(
+                    subscriber_id=subscriber.id,
+                    first_name="Updated",
+                    last_name="Customer",
+                    email="updated@example.com",
+                    phone="+2348000000012",
+                    billing_notifications=False,
+                    sms_updates=True,
+                    push_notifications=False,
+                    service_notifications=False,
+                    account_notifications=True,
+                    usage_notifications=False,
+                    general_notifications=True,
+                    locale="en-NG",
+                ),
             )
 
-        assert updated is not None
+        assert outcome is not None
+        updated = outcome.subscriber
         assert updated.email == "updated@example.com"
         assert updated.phone == "+2348000000012"
         assert (updated.metadata_ or {}).get("billing_notifications") is False
@@ -586,7 +592,7 @@ class TestCustomerProfileNotifications:
         from app.web.customer.routes import customer_update_profile
 
         request = MagicMock()
-        customer = {"subscriber_id": "sub-1"}
+        customer = {"subscriber_id": "00000000-0000-0000-0000-000000000001"}
 
         with (
             patch(
@@ -615,10 +621,10 @@ class TestCustomerProfileNotifications:
             )
 
         assert response.status_code == 303
-        kwargs = update_mock.call_args.kwargs
-        assert kwargs["billing_notifications"] is False
-        assert kwargs["sms_updates"] is True
-        assert kwargs["push_notifications"] is False
-        assert kwargs["service_notifications"] is False
-        assert kwargs["usage_notifications"] is False
-        assert kwargs["locale"] == "en-NG"
+        command = update_mock.call_args.kwargs["command"]
+        assert command.billing_notifications is False
+        assert command.sms_updates is True
+        assert command.push_notifications is False
+        assert command.service_notifications is False
+        assert command.usage_notifications is False
+        assert command.locale == "en-NG"
