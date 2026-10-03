@@ -28,7 +28,7 @@ parameter or variable, a construction, a ``db.get(Subscriber, ...)``, or a
 A name allowlist was tried first and is the wrong instrument. Half this
 codebase's receivers are generic — ``target``, ``existing``, ``record``,
 ``account`` — and each names a different model in a different module. Trusting
-them reported twelve subscriber-metadata writers when there are seven, counting
+them reported twelve subscriber-metadata writers when there are nine, counting
 ``brand_profiles`` writing ``semantic_colors`` (a ``BrandProfile`` blob) and
 ``team_inbox_commands`` writing ``lead_capture`` (a conversation blob). A name
 is not a type.
@@ -39,7 +39,7 @@ behind an unresolvable binding is exactly what this census exists to find.
 
 ## What counts as an access
 
-Four shapes, because the seven writers use all four:
+Four shapes, because the current writers use all four:
 
 1. ``subscriber.metadata_ = {...}`` — a dict literal, keys read from it.
 2. ``meta = dict(subscriber.metadata_ or {})`` then ``meta["k"] = v`` — the

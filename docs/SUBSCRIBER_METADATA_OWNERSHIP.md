@@ -22,27 +22,31 @@ compatibility projection, and nothing decides anything from it.
 
 | | |
 |---|---|
-| Direct writer modules | **8** |
-| Read-only modules | **14** |
-| Distinct keys | **34** |
+| Direct writer modules | **9** |
+| Read-only modules | **15** |
+| Distinct keys | **36** |
 | Keys written by more than one module | 1 (`subscriber_category`) |
 | Keys any admin can invent at runtime | **unbounded** — see the wildcard below |
 
-### The count was seven, and seven was wrong
+### The measured writer set has grown
 
-`docs/ISP_COHORT1_SOURCE_OWNERSHIP.md` recorded seven writers. The key-level
-census finds **eight**, and the difference is not a tightening of definitions:
+`docs/ISP_COHORT1_SOURCE_OWNERSHIP.md` recorded fewer writers than the current
+key-level census, which finds **nine**:
 
 - **`app/services/subscriber.py` was missing.** The column's own declared
   owner service writes four `restricted_*` keys into it.
-- **`app/services/web_customer_actions.py` was missing.** It writes seven
-  notification-preference keys and carries the wildcard.
+- **`app/services/web_customer_actions.py` was missing.** It writes the
+  `subscriber_category` and `send_billing_notifications` projections and still
+  carries the admin metadata wildcard.
+- **`app/services/customer_portal_profile_commands.py` now writes the seven
+  closed notification-preference keys** inside the registered typed profile
+  command.
 - **`app/services/web_customer_details.py` was counted and does not write.**
   It only reads `nin_verified` and `nin_last_checked_at`.
 
 A file-level census cannot see any of that. It answers "does this file mutate
 the column", which is the right question for a retirement ratchet and the wrong
-one for ownership. The ratchet in this document therefore starts at **8**.
+one for ownership. The current membership ratchet therefore starts at **9**.
 
 ## The wildcard, which blocks everything else
 
@@ -86,29 +90,25 @@ Facts nothing else records. Losing them loses the fact.
 | `account_deletion_requested_at` | `account_deletion` | `customer.account_lifecycle` | timestamp |
 | `account_deletion_reason` | `account_deletion` | `customer.account_lifecycle` | free text |
 | `portal_read_notification_keys` | `customer_portal_notifications` | **`customer.portal_notifications`** | unbounded list — see below |
-| 7 × `*_notifications`, `sms_updates` | `web_customer_actions` | **`customer.notification_policy`** (exists) | booleans |
+| 7 × `*_notifications`, `sms_updates` | `customer_portal_profile_commands` | **`customer.notification_policy`** (exists) | booleans |
 
-Customer profile saves pass notification preferences through the typed
-`SubscriberNotificationPreferencesUpdate` patch. `customer.accounts` merges only
-that closed set of declared keys; it does not resubmit or silently remove unrelated
-historical metadata while the preference facts await extraction to
-`customer.notification_policy`.
+Customer portal profile saves validate notification preferences as typed command
+fields and persist only their seven declared keys inside the registered
+`customer.portal_profile_commands` transaction. The keys remain in Subscriber
+metadata as a compatibility projection until extraction to
+`customer.notification_policy`; the command preserves unrelated historical
+metadata when it updates those preference values.
 
-The merge is staged in the existing subscriber update payload, not written to
-an ORM row before validation. Lifecycle and billing-approval refusals leave the
-row clean even before rollback. An explicitly supplied `metadata_` replacement
-still passes the closed-key guard and keeps its replacement semantics; the typed
-preference values are applied over that replacement in the same update. An
-absent or null preference patch leaves existing metadata unchanged.
+The command validates preference booleans before opening its owner-managed
+transaction, then updates only the explicit registered keys on the locked
+Subscriber. It preserves unrelated historical metadata. Validation or scope
+refusals leave the row unchanged.
 
-The optional `SubscriberUpdate.notification_preferences` API field is additive.
-Its seven boolean fields reject extra keys. Regenerate the OpenAPI contract
-manifest with `python scripts/update_openapi_contract.py` to record this
-intentional shape; no route or existing required field changes. Regression
-coverage lives in `test_subscriber_metadata_key_closure.py`
-and `test_customer_portal_notifications.py`; the exact frozen import-key fixture
-is retained in the existing `test_crm_portal_services.py` compatibility surface.
-The cohort writer-site and vocabulary-freeze baselines are unchanged.
+The seven typed profile command fields reject unknown preference keys. The
+registered owner and behavior coverage are recorded in
+`customer.portal_profile_commands` and `test_customer_portal_notifications.py`.
+The exact frozen import-key fixture remains in `test_crm_portal_services.py` for
+its compatibility surface.
 
 **Two deletion lineages, one lifecycle.** `account_deletion` writes
 `account_deletion_*`; `web_system_restore_tool` writes `recovery_deleted_*`.
@@ -192,7 +192,7 @@ gap is still a gap** — the census now resolves literal `getattr`, and
 [`tests/architecture/subscriber_metadata_writers_baseline.txt`](../tests/architecture/subscriber_metadata_writers_baseline.txt),
 enforced by
 [`test_subscriber_metadata_ownership.py`](../tests/architecture/test_subscriber_metadata_ownership.py).
-Membership only, two-directional, starting at **8** and targeting zero.
+Membership only, two-directional, starting at **9** and targeting zero.
 
 Membership rather than magnitude is deliberate. A module either writes this
 column or it does not; how many lines it takes says nothing about ownership, and
@@ -204,7 +204,7 @@ behind a receiver the census cannot resolve escapes every other check, so an
 unresolvable `<name>.metadata_` fails the build. Resolution is by binding —
 annotation, construction, `db.get`, a query terminal, a loop over a query, or a
 function's return annotation — **never by variable name**. Trusting names
-reported twelve writers where there are eight, counting a `BrandProfile` blob
+reported twelve writers where there are nine, counting a `BrandProfile` blob
 and an inbox conversation as subscriber facts, because half this codebase's
 receivers are called `target`, `existing` or `record`.
 
@@ -212,7 +212,7 @@ receivers are called `target`, `existing` or `record`.
 
 1. **Close the wildcard.** Nothing else holds while it is open.
 2. **Extract account recovery** — the highest-risk writer, both deletion
-   lineages, `recovery_snapshot`, and the purge sweep. Lower the ratchet 8 → 7
+   lineages, `recovery_snapshot`, and the purge sweep. Lower the ratchet 9 → 8
    in the same change.
 3. `portal_read_notification_keys` → a real table.
 4. Notification preferences → `customer.notification_policy`, which exists.
