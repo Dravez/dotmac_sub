@@ -30,7 +30,15 @@ the isolated, digest-pinned runtime and typed owner adapter are ready.
 
 Published client scripts run only on forms marked for their registered target.
 They receive a frozen field snapshot and the small `api` surface documented by
-the Center; they cannot call the database, arbitrary HTTP APIs, or the DOM.
+the Center; they execute in an opaque-origin browser sandbox and cannot call the
+database, arbitrary HTTP APIs, or the parent DOM. Never place secrets in client
+source because published source is delivered to the browser.
+
+Open a script to inspect its active source and hash. Editing creates or replaces
+one unpublished draft version, so the current behavior remains active until a
+reviewer publishes the draft. Pause a published script when execution must stop
+immediately; resume only after the behavior is understood, and retire scripts
+that must never run again.
 
 Server scripts are observational unless they return the typed `actions`
 result contract: an array of registered `action_key` values with their declared

@@ -79,13 +79,16 @@ stored separately from the script identity. The target declaration, not the
 editor, owns allowed events, read/write permissions, payload shape, and the
 typed owner command boundary.
 
-The initial language is JavaScript, but the application never evaluates it
-in-process. Client scripts are delivered only to an approved browser form
-adapter on declared module forms. The adapter fetches only the published
-target/event bundle, verifies each immutable SHA-256 source hash, and exposes a
-frozen field snapshot plus `get`, `set`, `error`, `clearError`, and
-`preventDefault` helpers. Client scripts cannot fetch, access the DOM directly,
-or issue database/API writes. Server scripts are submitted to the existing external OCI runner
+The initial language is JavaScript, but the application never evaluates it in
+the application or worker process. Client scripts are delivered only to an
+approved browser form adapter on declared module forms. The adapter fetches
+only the published target/event bundle, verifies each immutable SHA-256 source
+hash, and executes each source in an opaque-origin iframe with
+`sandbox="allow-scripts"` and a `connect-src 'none'` policy. The frame receives
+only a frozen field snapshot plus `get`, `set`, `error`, `clearError`, and
+`preventDefault` helpers; the parent applies only typed field updates and
+validation results. Client scripts cannot access the parent DOM, network,
+database, or API clients. Server scripts are submitted to the existing external OCI runner
 boundary using a digest-pinned runtime image, read-only filesystem, dropped
 capabilities, bounded memory/processes, and default-deny network. Missing or
 ambiguous runtime configuration blocks publication. A server-script result is
@@ -171,8 +174,10 @@ current owners until a separate migration is approved.
 Event schema 4 explicitly remains compatible with schema 3 rules because their
 priority and customer conditions retain the same meaning.
 
-Editing creates or replaces a draft version; activating it changes only future
-event decisions. Pausing prevents new runs, while already claimed runs finish.
+Editing creates or replaces one unpublished draft version; activating it changes
+only future event decisions. Published source versions remain immutable and are
+shown in the script detail workspace. Pausing prevents new runs, while already
+claimed runs finish. Retiring is terminal and prevents later publication.
 
 Before publishing, the rule owner reads active legacy Ticket assignment and
 Ticket-creation automation rules, then checks other active Automation Center

@@ -37,12 +37,15 @@ class FakeControl {
     setCustomValidity(message) {
         this.validationMessage = message;
     }
+
+    dispatchEvent() {}
 }
 
 class FakeForm {
     constructor(valid = true) {
         this.dataset = {automationTarget: "sales.quote"};
         this.elements = [new FakeControl()];
+        this.elements.namedItem = (name) => this.elements.find((element) => element.name === name);
         this.noValidate = false;
         this.valid = valid;
         this.listeners = new Map();
@@ -82,13 +85,61 @@ class FakeForm {
     }
 }
 
+class FakeFrame {
+    constructor(context, responder) {
+        this.context = context;
+        this.responder = responder;
+        this.listeners = new Map();
+        this.attributes = new Map();
+        this.contentWindow = {
+            postMessage: (message) => {
+                setImmediate(() => {
+                    const data = this.responder(message);
+                    this.context.windowMessage({source: this.contentWindow, data});
+                });
+            },
+        };
+    }
+
+    setAttribute(name, value) {
+        this.attributes.set(name, value);
+    }
+
+    addEventListener(type, listener) {
+        this.listeners.set(type, listener);
+    }
+
+    set srcdoc(value) {
+        void value;
+        setImmediate(() => this.listeners.get("load")?.());
+    }
+
+    remove() {}
+}
+
 const installRuntime = (form, fetchImpl = async () => ({
     ok: true,
     status: 200,
     json: async () => ({scripts: []}),
+}), sandboxResponder = () => ({
+    type: "automation.result",
+    requestId: "unused",
+    ok: true,
+    errors: [],
+    sets: [],
+    prevented: false,
 })) => {
+    let vmContext;
     const document = {
         documentElement: {},
+        body: {
+            append() {},
+        },
+        createElement() {
+            const frame = new FakeFrame(vmContext, sandboxResponder);
+            form.sandboxFrame = frame;
+            return frame;
+        },
         addEventListener(type, listener) {
             if (type === "DOMContentLoaded") this.ready = listener;
         },
@@ -105,7 +156,15 @@ const installRuntime = (form, fetchImpl = async () => ({
             observe() {}
         },
         fetch: fetchImpl,
+        crypto: require("node:crypto").webcrypto,
+        TextEncoder,
+        setTimeout,
+        clearTimeout,
+        addEventListener(type, listener) {
+            if (type === "message") this.windowMessage = listener;
+        },
     };
+    vmContext = context;
     vm.runInNewContext(source, context);
     document.ready();
 };
@@ -123,6 +182,43 @@ test("invalid forms never reach page submit handlers", async () => {
     assert.equal(form.bubbleSubmitCalls, 0);
     assert.equal(form.requestSubmitCalls, 0);
     assert.equal(form.reportValidityCalls, 1);
+});
+
+test("published scripts run through the sandbox bridge and return typed form effects", async () => {
+    const form = new FakeForm(true);
+    form.addEventListener("submit", () => {
+        form.bubbleSubmitCalls += 1;
+    });
+    const scriptSource = "api.error('sandbox blocked'); api.set('lead_id', 'updated'); api.preventDefault();";
+    const digest = await require("node:crypto").webcrypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(scriptSource),
+    );
+    const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    installRuntime(form, async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({scripts: [{key: "test", source_code: scriptSource, content_sha256: hash}]}),
+    }), (message) => {
+        void message;
+        return {
+            type: "automation.result",
+            requestId: message.requestId,
+            ok: true,
+            errors: message.context.eventName === "form.validate" ? ["sandbox blocked"] : [],
+            sets: message.context.eventName === "form.validate" ? [{name: "lead_id", value: "updated"}] : [],
+            prevented: message.context.eventName === "form.validate",
+        };
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    form.dispatch("submit", new FakeEvent("submit"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(form.bubbleSubmitCalls, 0);
+    assert.equal(form.requestSubmitCalls, 0);
+    assert.equal(form.elements[0].value, "updated");
+    assert.equal(form.elements[0].validationMessage, "sandbox blocked");
+    assert.equal(form.sandboxFrame.attributes.get("sandbox"), "allow-scripts");
 });
 
 test("valid forms retry through the normal submit handler after automation", async () => {
