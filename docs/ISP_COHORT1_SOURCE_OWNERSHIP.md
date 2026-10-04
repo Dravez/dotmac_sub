@@ -354,16 +354,17 @@ account rows belong to cohort 1.
 | `app/services/customer_canonical_profile_patch.py` | `customer.canonical_profile_patch` | 20 |
 | `app/services/subscriber.py` | `customer.accounts` | 14 |
 | `app/services/gis_sync.py` | `gis.spatial_sync` | 3 |
-| `app/services/web_customer_actions.py` | `customer.profile_commands` | 7 |
+| `app/services/customer_portal_profile_commands.py` | `customer.portal_profile_commands` | 2 |
+| `app/services/web_customer_actions.py` | `customer.profile_commands` | 1 |
 | `app/services/brand_profiles.py` | `customer.branding` | 2 |
 | `app/services/subscriber_profile_cleanup.py` | `customer.profile_cleanup` | 2 |
 | `app/services/crm_customer_name_repair.py` | `customer.name_remediation` | 1 |
 
-`web_customer_actions.py` is named like a presenter and declared as an owner.
-It stays in the `web_presenter` family because that is where a reader will
-find it, and it is classified as an owner because the registry says so. Family
-is location; classification is authority. Conflating them is how a real owner
-gets mistaken for a stray adapter — or the reverse.
+`web_customer_actions.py` remains the declared owner for admin profile edits;
+customer portal profile POSTs now use the separately registered
+`customer.portal_profile_commands` owner. Both stay in the `web_presenter`
+family because that is where a reader will find them. Family is location;
+classification is authority.
 
 ### Derived projections written onto cohort rows
 

@@ -1296,21 +1296,29 @@ class TestCustomerProfileNotifications:
         self, db_session, subscriber
     ) -> None:
         from app.services.events.types import EventType
-        from app.services.web_customer_actions import update_customer_profile
+        from app.services.web_customer_actions import (
+            UpdateCustomerProfileCommand,
+            update_customer_profile,
+        )
 
-        with patch("app.services.subscriber.emit_event") as emit_event_mock:
-            updated = update_customer_profile(
+        with patch(
+            "app.services.customer_portal_profile_commands.emit_event"
+        ) as emit_event_mock:
+            outcome = update_customer_profile(
                 db_session,
-                subscriber_id=str(subscriber.id),
-                first_name="Updated",
-                last_name="Customer",
-                email="updated@example.com",
-                phone="+2348000000012",
-                billing_notifications=False,
-                sms_updates=True,
+                command=UpdateCustomerProfileCommand(
+                    subscriber_id=subscriber.id,
+                    first_name="Updated",
+                    last_name="Customer",
+                    email="updated@example.com",
+                    phone="+2348000000012",
+                    billing_notifications=False,
+                    sms_updates=True,
+                ),
             )
 
-        assert updated is not None
+        assert outcome is not None
+        updated = outcome.subscriber
         assert updated.email == "updated@example.com"
         assert updated.phone == "+2348000000012"
         assert (updated.metadata_ or {}).get("billing_notifications") is False

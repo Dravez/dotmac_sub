@@ -404,6 +404,7 @@ Edit the owning domain shard and regenerate; do not hand-edit these rows.
 | `customer.crm_subscriber_provisioning` | authenticated CRM Subscriber provisioning coordination | `application_coordinator` | authenticated CRM provisioning command evidence ← `customer.crm_subscriber_provisioning`<br>retained exact CRM Subscriber provenance ← `customer.crm_subscriber_provisioning`<br>canonical Subscriber account state ← `customer.accounts` | `coordinator_managed` | `cutover_ready` | customer operations | `docs/PARTY_CUSTOMER_LIFECYCLE.md`<br>`docs/SOT_RELATIONSHIP_MAP.md`<br>`docs/CODING_STANDARD.md`<br>`tests/test_crm_subscriber_provisioning.py`<br>`tests/test_crm_api.py`<br>`tests/architecture/test_crm_customer_boundary.py` |
 | `customer.billing_approval` | atomic account billing-approval and lifecycle transition | `application_coordinator` | account billing-approval command evidence ← `customer.billing_approval`<br>canonical account billing-approval fact ← `customer.billing_approval`<br>canonical account lifecycle state ← `access.subscription_lifecycle`<br>canonical subscription lifecycle state ← `access.subscription_lifecycle` | `coordinator_managed` | `complete` | customer and billing operations | `docs/SOT_RELATIONSHIP_MAP.md`<br>`docs/FINANCIAL_ACCESS_ENFORCEMENT.md`<br>`docs/adr/0003-permanent-customer-financial-lifecycle.md`<br>`tests/test_account_billing_approval.py`<br>`tests/architecture/test_account_billing_approval_boundary.py` |
 | `customer.billing_approval` | account billing-approval drift reconciliation | `application_coordinator` | account billing-approval command evidence ← `customer.billing_approval`<br>canonical account billing-approval fact ← `customer.billing_approval`<br>canonical account lifecycle state ← `access.subscription_lifecycle`<br>canonical subscription lifecycle state ← `access.subscription_lifecycle`<br>effective subscription billing treatment ← `financial.subscription_billing_treatments`<br>canonical customer chargeability ← `financial.customer_chargeability` | `coordinator_managed` | `complete` | customer and billing operations | `docs/SOT_RELATIONSHIP_MAP.md`<br>`docs/FINANCIAL_ACCESS_ENFORCEMENT.md`<br>`docs/adr/0003-permanent-customer-financial-lifecycle.md`<br>`tests/test_account_billing_approval.py`<br>`tests/architecture/test_account_billing_approval_boundary.py` |
+| `customer.portal_profile_commands` | customer portal profile update | `command_writer` | typed authenticated customer profile command ← `customer.portal_profile_commands`<br>locked canonical Subscriber account ← `customer.accounts` | `owner_managed` | `cutover_ready` | customer operations | `docs/designs/SUBSCRIBER_SERVICE_LOCATION_SOT.md`<br>`docs/SOT_RELATIONSHIP_MAP.md`<br>`docs/UI_INFORMATION_AND_ACTION_STANDARD.md`<br>`tests/test_customer_profile_location.py`<br>`tests/test_customer_portal_gaps.py` |
 | `customer.name_remediation` | July 20 CRM name remediation manifest execution | `command_writer` | CRM identity-change audit evidence ← `observability.audit_log`<br>legacy Subscriber name state ← `customer.accounts` | `owner_managed` | `complete` | customer operations | `docs/PARTY_CUSTOMER_LIFECYCLE.md`<br>`tests/test_crm_customer_name_repair.py` |
 | `customer.name_remediation` | PII-free CRM name repair manifest generation | `command_writer` | CRM identity-change audit evidence ← `observability.audit_log`<br>legacy Subscriber name state ← `customer.accounts` | `owner_managed` | `complete` | customer operations | `docs/PARTY_CUSTOMER_LIFECYCLE.md`<br>`tests/test_crm_customer_name_repair.py` |
 | `customer.name_repairs` | evidence-bound legacy Subscriber name repair | `command_writer` | approved customer-name repair manifest ← `customer.name_repairs`<br>canonical legacy Subscriber name state ← `customer.accounts`<br>immutable CRM overwrite audit evidence ← `observability.audit_log`<br>canonical Party identity binding ← `party.registry` | `owner_managed` | `complete` | customer operations | `docs/PARTY_CUSTOMER_LIFECYCLE.md`<br>`docs/SOT_RELATIONSHIP_MAP.md`<br>`docs/adr/0002-owner-command-transaction-boundary.md`<br>`tests/test_restore_crm_placeholder_identity.py`<br>`tests/architecture/test_crm_customer_boundary.py` |
@@ -3001,14 +3002,18 @@ Tax-accounting migration record:
 network summary composition.
 4. Customer network context owns the raw customer-to-network footprint.
 5. Network access path owns the customer service path.
-6. `customer.profile_commands` owns admin customer profile edits, explicit
+6. `customer.profile_commands` owns admin profile edits, explicit
    person-to-business customer conversion, and governed NCC profile cleanup
-   writes for AI-collected DOB/gender candidates. Normal person edit submission
-   must not mutate account type; conversion and AI cleanup are dedicated
-   commands with their own validation and audit trails. `customer.name_repairs`
-   separately owns exact, audit-evidenced legacy Subscriber name remediation
-   until Party name projection cutover; no webhook, CLI, or generic profile
-   helper writes it.
+   writes for AI-collected DOB/gender candidates. `customer.portal_profile_commands`
+   owns customer-portal profile edits through one typed, owner-managed command.
+   Country codes are admitted from the checked-in ISO
+   catalog; Nigerian state and LGA values are canonicalized through
+   `app.services.ncc_location`, including customer-facing aliases that resolve
+   to one canonical filing value. Normal person edit submission must not mutate
+   account type; conversion and AI cleanup are dedicated commands with their own
+   validation and audit trails. `customer.name_repairs` separately owns exact,
+   audit-evidenced legacy Subscriber name remediation until Party name
+   projection cutover; no webhook, CLI, or generic profile helper writes it.
 7. `customer.account_status_actions` owns reviewed administrative account
    lifecycle previews and confirmations. Its `unsuspend` action is distinct
    from broad activation: it clears only an explicit suspended override,

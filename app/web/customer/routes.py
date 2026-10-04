@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from app.db import finish_read_transaction, get_db
-from app.models.subscriber import Subscriber
 from app.services import auth_flow as auth_flow_service
 from app.services import autopay as autopay_service
 from app.services import billing_payment_receipts as payment_receipts_service
@@ -40,6 +39,7 @@ from app.services import chat_session as chat_session_service
 from app.services import (
     crm_portal,
     customer_portal,
+    customer_profile_location,
     location_capture,
     payment_intent_management,
     portal_ticket_deflection,
@@ -51,8 +51,8 @@ from app.services import customer_portal_bandwidth as customer_portal_bandwidth_
 from app.services import customer_portal_contacts as customer_portal_contacts_service
 from app.services import customer_portal_flow_payment_methods as customer_cards
 from app.services import customer_portal_notifications as customer_notifications_service
+from app.services import customer_portal_profile_commands as portal_profile_commands
 from app.services import payment_proofs as payment_proofs_service
-from app.services import service_address as service_address_service
 from app.services import web_customer_actions as customer_profile_service
 from app.services import web_customer_auth as web_customer_auth_service
 from app.services import web_network_speedtests as web_network_speedtests_service
@@ -61,7 +61,6 @@ from app.services.application_exception_observability import (
     PaymentVerificationOutcome,
     record_payment_verification_outcome,
 )
-from app.services.audit_helpers import log_audit_event
 from app.services.bandwidth import add_directions_to_series, bandwidth_samples
 from app.services.customer_context import (
     optional_customer_account_id,
@@ -78,7 +77,6 @@ from app.services.customer_portal_context import (
 from app.services.customer_portal_flow_payments import GatewayPaymentIncomplete
 from app.services.domain_errors import DomainError
 from app.services.file_storage import build_content_disposition, file_uploads
-from app.services.nin_matching import mask_nin
 from app.services.object_storage import ObjectNotFoundError
 from app.services.owner_commands import CommandContext
 from app.services.prepaid_funding_reconstruction import (
@@ -236,50 +234,6 @@ def _format_bps(value: float | int | None) -> str:
     return f"{amount:.{precision}f} {units[unit_index]}"
 
 
-def _profile_value(value):
-    enum_value = getattr(value, "value", None)
-    if isinstance(enum_value, str):
-        return enum_value
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
-
-
-def _profile_audit_snapshot(subscriber: Subscriber) -> dict[str, object]:
-    metadata = dict(getattr(subscriber, "metadata_", None) or {})
-    nin_value = getattr(subscriber, "nin", None)
-    masked_nin = (
-        mask_nin(nin_value) if isinstance(nin_value, str) and nin_value else None
-    )
-    parts = service_address_service.address_parts(subscriber)
-    return {
-        "first_name": subscriber.first_name,
-        "last_name": subscriber.last_name,
-        "display_name": subscriber.display_name,
-        "email": subscriber.email,
-        "phone": subscriber.phone,
-        "nin": masked_nin,
-        "date_of_birth": _profile_value(subscriber.date_of_birth),
-        "gender": _profile_value(subscriber.gender),
-        "preferred_contact_method": _profile_value(subscriber.preferred_contact_method),
-        "address_line1": parts.address_line1,
-        "address_line2": parts.address_line2,
-        "city": parts.city,
-        "region": parts.region,
-        "postal_code": parts.postal_code,
-        "country_code": parts.country_code,
-        "billing_notifications": bool(metadata.get("billing_notifications", True)),
-        "sms_updates": bool(metadata.get("sms_updates", True)),
-        "push_notifications": bool(metadata.get("push_notifications", True)),
-        "service_notifications": bool(metadata.get("service_notifications", True)),
-        "account_notifications": bool(metadata.get("account_notifications", True)),
-        "usage_notifications": bool(metadata.get("usage_notifications", True)),
-        "general_notifications": bool(metadata.get("general_notifications", True)),
-        "locale": subscriber.locale,
-        "email_verified": subscriber.email_verified,
-    }
-
-
 def _profile_completion(subscriber) -> dict[str, object]:
     completion = customer_profile_service.evaluate_individual_biodata(subscriber)
     if completion.applicable:
@@ -299,14 +253,6 @@ def _profile_completion(subscriber) -> dict[str, object]:
         "completed_count": sum(1 for value in required.values() if value),
         "total_count": len(required),
     }
-
-
-def _profile_audit_changes(before: dict, after: dict) -> dict[str, dict[str, object]]:
-    changes: dict[str, dict[str, object]] = {}
-    for key in sorted(set(before) | set(after)):
-        if before.get(key) != after.get(key):
-            changes[key] = {"from": before.get(key), "to": after.get(key)}
-    return changes
 
 
 def _load_initial_bandwidth_stats(
@@ -1635,6 +1581,7 @@ def _profile_context(
     sessions: str | None = None,
     error: str | None = None,
     biodata_required: str | None = None,
+    profile_address_form: dict[str, str] | None = None,
 ) -> dict[str, object]:
     from app.models.subscriber import Subscriber as _Subscriber
 
@@ -1662,6 +1609,21 @@ def _profile_context(
     elif saved:
         success = "Profile updated successfully"
     profile_completion = _profile_completion(subscriber) if subscriber else None
+    location_catalog = customer_profile_location.location_catalog()
+    stored_country_code = (
+        str(subscriber.country_code or "") if subscriber is not None else ""
+    )
+    address_form = {
+        "address_line1": str(subscriber.address_line1 or "") if subscriber else "",
+        "address_line2": str(subscriber.address_line2 or "") if subscriber else "",
+        "city": str(subscriber.city or "") if subscriber else "",
+        "region": str(subscriber.region or "") if subscriber else "",
+        "lga": str(subscriber.lga or "") if subscriber else "",
+        "postal_code": str(subscriber.postal_code or "") if subscriber else "",
+        "country_code": stored_country_code or "NG",
+    }
+    if profile_address_form is not None:
+        address_form.update(profile_address_form)
     return {
         "request": request,
         "customer": customer,
@@ -1680,6 +1642,8 @@ def _profile_context(
         "error": error,
         "verify_sent": verify_sent,
         "profile_completion": profile_completion,
+        "profile_address_form": address_form,
+        "profile_location_catalog": location_catalog.as_template_value(),
     }
 
 
@@ -1750,6 +1714,7 @@ def customer_update_profile(
     address_line2: str = Form(None),
     city: str = Form(None),
     region: str = Form(None),
+    lga: str = Form(None),
     postal_code: str = Form(None),
     country_code: str = Form(None),
     billing_notifications: bool = Form(False),
@@ -1781,46 +1746,48 @@ def customer_update_profile(
             status_code=404,
         )
     if subscriber_id:
-        from app.models.subscriber import Subscriber
-        from app.services.web_customer_actions import update_customer_profile
-
-        subscriber_before = db.get(Subscriber, subscriber_id)
-        before_snapshot = (
-            _profile_audit_snapshot(subscriber_before) if subscriber_before else {}
-        )
         try:
-            updated = update_customer_profile(
+            enforce_biodata = location_capture.service_location_requirement_enabled(db)
+            finish_read_transaction(db)
+            portal_profile_commands.update_customer_profile(
                 db,
-                subscriber_id=subscriber_id,
-                first_name=first_name,
-                last_name=last_name,
-                display_name=display_name,
-                email=email,
-                phone=phone,
-                nin=nin,
-                date_of_birth=date_of_birth,
-                gender=gender,
-                preferred_contact_method=preferred_contact_method,
-                address_line1=address_line1,
-                address_line2=address_line2,
-                city=city,
-                region=region,
-                postal_code=postal_code,
-                country_code=country_code,
-                billing_notifications=billing_notifications,
-                sms_updates=sms_updates,
-                push_notifications=push_notifications,
-                service_notifications=service_notifications,
-                account_notifications=account_notifications,
-                usage_notifications=usage_notifications,
-                general_notifications=general_notifications,
-                locale=locale,
-                enforce_biodata=location_capture.service_location_requirement_enabled(
-                    db
+                command=portal_profile_commands.UpdateCustomerProfileCommand(
+                    context=CommandContext(
+                        command_id=uuid4(),
+                        correlation_id=uuid4(),
+                        actor=str(customer.get("id") or subscriber_id),
+                        scope=portal_profile_commands.PORTAL_PROFILE_WRITE_SCOPE,
+                        reason="customer portal profile submission",
+                    ),
+                    subscriber_id=UUID(str(subscriber_id)),
+                    first_name=first_name,
+                    last_name=last_name,
+                    display_name=display_name,
+                    email=email,
+                    phone=phone,
+                    nin=nin,
+                    date_of_birth=date_of_birth,
+                    gender=gender,
+                    preferred_contact_method=preferred_contact_method,
+                    address_line1=address_line1,
+                    address_line2=address_line2,
+                    city=city,
+                    region=region,
+                    lga=lga,
+                    postal_code=postal_code,
+                    country_code=country_code,
+                    billing_notifications=billing_notifications,
+                    sms_updates=sms_updates,
+                    push_notifications=push_notifications,
+                    service_notifications=service_notifications,
+                    account_notifications=account_notifications,
+                    usage_notifications=usage_notifications,
+                    general_notifications=general_notifications,
+                    locale=locale,
+                    enforce_biodata=enforce_biodata,
                 ),
             )
-        except (ValueError, IntegrityError) as exc:
-            db.rollback()
+        except (DomainError, ValueError, IntegrityError) as exc:
             logger.info("customer_profile_update_rejected", exc_info=True)
             return templates.TemplateResponse(
                 "customer/profile/index.html",
@@ -1828,12 +1795,24 @@ def customer_update_profile(
                     request,
                     db,
                     customer,
-                    error=str(exc) or "We could not save those profile changes.",
+                    error=(
+                        exc.message
+                        if isinstance(exc, DomainError)
+                        else str(exc) or "We could not save those profile changes."
+                    ),
+                    profile_address_form={
+                        "address_line1": address_line1 or "",
+                        "address_line2": address_line2 or "",
+                        "city": city or "",
+                        "region": region or "",
+                        "lga": lga or "",
+                        "postal_code": postal_code or "",
+                        "country_code": country_code or "",
+                    },
                 ),
                 status_code=400,
             )
         except Exception:
-            db.rollback()
             logger.exception("customer_profile_update_failed")
             return templates.TemplateResponse(
                 "customer/profile/index.html",
@@ -1845,38 +1824,6 @@ def customer_update_profile(
                 ),
                 status_code=500,
             )
-        if updated is None:
-            return templates.TemplateResponse(
-                "customer/profile/index.html",
-                _profile_context(
-                    request,
-                    db,
-                    customer,
-                    error="We could not find your customer account. Please contact support.",
-                ),
-                status_code=404,
-            )
-        if updated is not None:
-            after_snapshot = _profile_audit_snapshot(updated)
-            changes = _profile_audit_changes(before_snapshot, after_snapshot)
-            if changes:
-                try:
-                    log_audit_event(
-                        db=db,
-                        request=request,
-                        action="portal_profile_update",
-                        entity_type="subscriber",
-                        entity_id=str(subscriber_id),
-                        actor_id=str(subscriber_id),
-                        metadata={"changes": changes, "source": "customer_portal"},
-                    )
-                except Exception:
-                    db.rollback()
-                    logger.exception(
-                        "Unable to log customer portal profile audit for %s",
-                        subscriber_id,
-                    )
-
     # POST-Redirect-GET: bounce to the profile page with a success flag so a
     # browser refresh after save can't accidentally resubmit the form.
     return RedirectResponse(url="/portal/profile?saved=1", status_code=303)

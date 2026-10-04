@@ -653,6 +653,27 @@ COHORT_SURFACES: Final[tuple[SourceSurface, ...]] = (
         ),
     ),
     SourceSurface(
+        path="app/services/customer_portal_profile_commands.py",
+        family=EntryPointFamily.SERVICE,
+        authority=AuthorityRole.DECLARED_OWNER,
+        boundary=BoundaryRole.PERSISTS,
+        reachability=Reachability.ONLINE_REQUEST,
+        disposition=Disposition.RETIRE_AFTER_CUTOVER,
+        entity_types=(
+            CohortEntityType.CUSTOMER_ACCOUNT,
+            CohortEntityType.CUSTOMER_ADDRESS,
+        ),
+        owning_service="customer.portal_profile_commands",
+        registry_declared=True,
+        open_question=None,
+        note=(
+            "The registered typed portal profile command persists validated "
+            "customer-profile values and the closed notification-preference keys "
+            "on the locked Subscriber. This owner is retired as cohort customer "
+            "state moves to its target application."
+        ),
+    ),
+    SourceSurface(
         path="app/services/mrr_snapshot.py",
         family=EntryPointFamily.SERVICE,
         authority=AuthorityRole.PROJECTION_WRITER,
