@@ -323,4 +323,3 @@ def _has_open_infrastructure_down_ticket(session, subscriber_id: object) -> bool
         session,
         {subscriber_id},
     )
-

@@ -412,7 +412,6 @@ class TestCollectionsTask:
         assert expire_subscriptions.retry_backoff_max == 60
         assert expire_subscriptions.retry_kwargs["max_retries"] == 3
 
-
     def test_run_billing_enforcement_success(self):
         """Unified enforcement run returns the real run metrics."""
         from datetime import UTC, datetime
