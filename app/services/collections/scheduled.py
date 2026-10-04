@@ -43,11 +43,17 @@ def run_billing_enforcement() -> dict[str, int | str]:
             "credit_settlement_errors": int(result.credit_settlement_errors),
             "credit_applied": str(result.credit_applied),
         }
+        outcome = (
+            OperationalOutcome.COMPLETED_WITH_FAILURES
+            if int(summary["dunning_errors"])
+            or int(summary["credit_settlement_errors"])
+            else OperationalOutcome.COMPLETED
+        )
         log_operational_event(
             logger,
             OperationalLogEvent(
                 name=OperationalEventName.BILLING_ENFORCEMENT_COMPLETED,
-                outcome=OperationalOutcome.COMPLETED,
+                outcome=outcome,
                 component="collections",
                 counters={
                     "accounts_scanned": int(summary["accounts_scanned"]),
@@ -55,6 +61,12 @@ def run_billing_enforcement() -> dict[str, int | str]:
                     "actions_created": int(summary["actions_created"]),
                     "skipped": int(summary["skipped"]),
                     "dunning_errors": int(summary["dunning_errors"]),
+                    "credit_accounts_scanned": int(summary["credit_accounts_scanned"]),
+                    "credit_accounts_settled": int(summary["credit_accounts_settled"]),
+                    "credit_invoices_touched": int(summary["credit_invoices_touched"]),
+                    "credit_settlement_errors": int(
+                        summary["credit_settlement_errors"]
+                    ),
                 },
             ),
         )
