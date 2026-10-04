@@ -668,4 +668,3 @@ def run_prepaid_balance_sweep() -> dict[str, int | str]:
         raise
     finally:
         session.close()
-

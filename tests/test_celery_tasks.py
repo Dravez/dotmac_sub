@@ -496,7 +496,6 @@ class TestCollectionsTask:
         assert event.counters["credit_invoices_touched"] == 3
         assert event.counters["credit_settlement_errors"] == 1
 
-
     def test_run_billing_enforcement_exception_closes_session(self):
         """Test exception still closes session."""
         mock_session = MagicMock()
