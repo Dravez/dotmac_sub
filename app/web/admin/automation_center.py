@@ -290,6 +290,9 @@ def _script_form_context(
     target_type: str = "",
     event_name: str = "",
     source_code: str = "",
+    script_id: UUID | None = None,
+    source_version: int | None = None,
+    return_to: str | None = None,
 ) -> dict[str, object]:
     target_groups = tuple(
         {
@@ -362,8 +365,17 @@ def _script_form_context(
         "target_type": selected_target,
         "event_name": selected_event,
         "source_code": source_code,
+        "script_id": script_id,
+        "edit_mode": script_id is not None,
+        "source_version": source_version,
+        "script_action": (
+            f"/admin/automation/scripts/{script_id}/versions"
+            if script_id is not None
+            else "/admin/automation/scripts"
+        ),
         "command_token": str(uuid4()),
-        "return_to": (
+        "return_to": return_to
+        or (
             "/admin/automation/client-scripts/manage"
             if kind is AutomationScriptKind.client
             else "/admin/automation/server-scripts"
@@ -528,6 +540,9 @@ def automation_center_index(
         ),
         can_publish_scripts=has_permission(
             auth, db, automation_scripts.SCRIPT_PUBLISH_PERMISSION
+        ),
+        can_update_scripts=has_permission(
+            auth, db, automation_scripts.SCRIPT_UPDATE_PERMISSION
         ),
         can_read_runs=has_permission(auth, db, RUN_READ_PERMISSION),
         can_create_rules=has_permission(auth, db, RULE_CREATE_PERMISSION),
@@ -707,6 +722,9 @@ def _script_workspace(
             ),
             "can_publish_scripts": has_permission(
                 auth, db, automation_scripts.SCRIPT_PUBLISH_PERMISSION
+            ),
+            "can_update_scripts": has_permission(
+                auth, db, automation_scripts.SCRIPT_UPDATE_PERMISSION
             ),
             "server_script_runtime_state": automation_script_runtime.runtime_state().value,
             "return_to": (
@@ -1061,6 +1079,87 @@ def new_automation_script(
     )
 
 
+@router.get(
+    "/scripts/{script_id}",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+    ],
+)
+def automation_script_detail(
+    script_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    auth: dict = Depends(require_permission("automation:hub:read")),
+):
+    """Show the active and editable draft source for one script."""
+
+    detail = automation_scripts.get_script(
+        db, tenant_id=OPERATOR_TENANT_ID, script_id=script_id
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Script not found")
+    return templates.TemplateResponse(
+        "admin/automation/script_detail.html",
+        {
+            **_base_context(request, db),
+            "detail": detail,
+            "can_update_scripts": has_permission(
+                auth, db, automation_scripts.SCRIPT_UPDATE_PERMISSION
+            ),
+            "can_publish_scripts": has_permission(
+                auth, db, automation_scripts.SCRIPT_PUBLISH_PERMISSION
+            ),
+            "return_to": f"/admin/automation/scripts/{script_id}",
+            "page_error": request.query_params.get("error"),
+            "page_notice": request.query_params.get("notice"),
+        },
+    )
+
+
+@router.get(
+    "/scripts/{script_id}/edit",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+        Depends(require_permission(automation_scripts.SCRIPT_UPDATE_PERMISSION)),
+    ],
+)
+def edit_automation_script(
+    script_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Render an editable draft backed by a published script's immutable identity."""
+
+    detail = automation_scripts.get_script(
+        db, tenant_id=OPERATOR_TENANT_ID, script_id=script_id
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Script not found")
+    return templates.TemplateResponse(
+        "admin/automation/script_builder.html",
+        _script_form_context(
+            request,
+            db,
+            kind=detail.kind,
+            name=detail.name,
+            key=detail.key,
+            description=detail.description or "",
+            target_type=detail.target_type,
+            event_name=detail.event_name,
+            source_code=detail.draft_source_code
+            if detail.draft_source_code is not None
+            else detail.active_source_code or "",
+            script_id=detail.script_id,
+            source_version=detail.draft_version or detail.active_version,
+            return_to=f"/admin/automation/scripts/{script_id}",
+        ),
+    )
+
+
 @router.post(
     "/scripts",
     response_class=HTMLResponse,
@@ -1143,6 +1242,132 @@ def create_automation_script_draft(
     return _automation_redirect(
         path=return_to,
         notice=f"Script draft {outcome.script_id} saved",
+    )
+
+
+@router.post(
+    "/scripts/{script_id}/versions",
+    response_class=HTMLResponse,
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+        Depends(require_permission(automation_scripts.SCRIPT_UPDATE_PERMISSION)),
+    ],
+)
+def update_automation_script_draft(
+    script_id: UUID,
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(default=""),
+    source_code: str = Form(...),
+    command_token: str = Form(...),
+    return_to: str = Form(default=""),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(
+        require_permission(automation_scripts.SCRIPT_UPDATE_PERMISSION)
+    ),
+):
+    """Create or replace a draft while leaving the active version untouched."""
+
+    detail = automation_scripts.get_script(
+        db, tenant_id=OPERATOR_TENANT_ID, script_id=script_id
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Script not found")
+    target = return_to or f"/admin/automation/scripts/{script_id}"
+    try:
+        token = UUID(command_token)
+        db_session_adapter.release_read_transaction(db)
+        outcome = automation_scripts.create_script_version(
+            db,
+            automation_scripts.CreateAutomationScriptVersionCommand(
+                tenant_id=OPERATOR_TENANT_ID,
+                script_id=script_id,
+                name=name,
+                description=description,
+                source_code=source_code,
+                permission_keys=frozenset(auth.get("permission_keys") or ()),
+                context=CommandContext.system(
+                    actor=_actor(request),
+                    scope="automation:script:update",
+                    reason="Administrator saved an Automation Center script draft",
+                    idempotency_key=f"automation-script-edit:{script_id}:{token}",
+                ),
+            ),
+        )
+    except (DomainError, ValueError) as exc:
+        return templates.TemplateResponse(
+            "admin/automation/script_builder.html",
+            _script_form_context(
+                request,
+                db,
+                kind=detail.kind,
+                error=str(exc),
+                name=name,
+                key=detail.key,
+                description=description,
+                target_type=detail.target_type,
+                event_name=detail.event_name,
+                source_code=source_code,
+                script_id=detail.script_id,
+                source_version=detail.draft_version or detail.active_version,
+                return_to=f"/admin/automation/scripts/{script_id}",
+            ),
+            status_code=400,
+        )
+    return _automation_redirect(
+        path=target,
+        notice=f"Script draft v{outcome.version} saved; publish it to activate the change",
+    )
+
+
+@router.post(
+    "/scripts/{script_id}/status",
+    dependencies=[
+        Depends(require_permission("automation:hub:read")),
+        Depends(require_permission(automation_scripts.SCRIPT_READ_PERMISSION)),
+        Depends(require_permission(automation_scripts.SCRIPT_UPDATE_PERMISSION)),
+    ],
+)
+def update_automation_script_status(
+    script_id: UUID,
+    request: Request,
+    status: str = Form(...),
+    command_token: str = Form(...),
+    return_to: str = Form(default=""),
+    db: Session = Depends(get_db),
+    auth: dict = Depends(
+        require_permission(automation_scripts.SCRIPT_UPDATE_PERMISSION)
+    ),
+):
+    """Pause, resume, or retire a script without changing its source."""
+
+    try:
+        requested_status = automation_scripts.AutomationScriptStatus(status)
+        token = UUID(command_token)
+        db_session_adapter.release_read_transaction(db)
+        outcome = automation_scripts.set_script_status(
+            db,
+            automation_scripts.SetAutomationScriptStatusCommand(
+                tenant_id=OPERATOR_TENANT_ID,
+                script_id=script_id,
+                status=requested_status,
+                permission_keys=frozenset(auth.get("permission_keys") or ()),
+                context=CommandContext.system(
+                    actor=_actor(request),
+                    scope="automation:script:update",
+                    reason=f"Administrator changed an Automation Center script to {requested_status.value}",
+                    idempotency_key=f"automation-script-status:{script_id}:{requested_status.value}:{token}",
+                ),
+            ),
+        )
+    except (DomainError, ValueError) as exc:
+        return _automation_redirect(
+            path=return_to or f"/admin/automation/scripts/{script_id}", error=str(exc)
+        )
+    return _automation_redirect(
+        path=return_to or f"/admin/automation/scripts/{script_id}",
+        notice=f"Script {outcome.script_id} is now {outcome.status.value}",
     )
 
 

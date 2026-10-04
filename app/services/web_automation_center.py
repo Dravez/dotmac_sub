@@ -110,6 +110,7 @@ def build_automation_center_data(
     permission_keys: frozenset[str],
     can_read_scripts: bool = False,
     can_create_scripts: bool = False,
+    can_update_scripts: bool = False,
     can_publish_scripts: bool = False,
 ) -> dict[str, object]:
     """Build one permission-aware, tenant-scoped hub projection."""
@@ -220,6 +221,7 @@ def build_automation_center_data(
         "scripts": scripts,
         "can_read_scripts": can_read_scripts,
         "can_create_scripts": can_create_scripts,
+        "can_update_scripts": can_update_scripts,
         "can_publish_scripts": can_publish_scripts,
         "runs": runs,
         "legacy_surfaces": legacy_surfaces,

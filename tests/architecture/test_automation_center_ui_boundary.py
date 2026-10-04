@@ -124,6 +124,14 @@ def test_hub_exposes_all_mechanisms_and_target_readiness() -> None:
     assert "content_sha256" in client_runtime
     assert "data-automation-target" in client_runtime
     assert "database/write client" in client_runtime
+    assert 'sandbox", "allow-scripts"' in client_runtime
+    assert "connect-src 'none'" in client_runtime
+    assert "opaque-origin" in client_runtime
+    assert '"/scripts/{script_id}"' in route
+    assert '"/scripts/{script_id}/edit"' in route
+    assert '"/scripts/{script_id}/versions"' in route
+    assert '"/scripts/{script_id}/status"' in route
+    assert "create_script_version" in _source("app/services/automation_scripts.py")
     assert '_DEFAULT_TRIGGER = ""' in route
     assert "ticket-sla-suspension" not in route
 
