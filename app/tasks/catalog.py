@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from sqlalchemy.exc import OperationalError
+
 from app.celery_app import celery_app
 from app.services.catalog import subscriptions as subscriptions_service
 
@@ -43,7 +45,14 @@ class ExpiryReminderCandidate:
     source: str
 
 
-@celery_app.task(name="app.tasks.catalog.expire_subscriptions")
+@celery_app.task(
+    name="app.tasks.catalog.expire_subscriptions",
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
 def expire_subscriptions() -> dict:
     """Expire subscriptions that have passed their end_at date."""
     logger.info("Starting expire_subscriptions")
@@ -314,3 +323,4 @@ def _has_open_infrastructure_down_ticket(session, subscriber_id: object) -> bool
         session,
         {subscriber_id},
     )
+
