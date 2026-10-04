@@ -402,6 +402,16 @@ class TestOltProfileSyncTask:
 class TestCollectionsTask:
     """Tests for collections billing-enforcement tasks."""
 
+    def test_expire_subscriptions_retries_transient_database_failures(self):
+        from sqlalchemy.exc import OperationalError
+
+        from app.tasks.catalog import expire_subscriptions
+
+        assert OperationalError in expire_subscriptions.autoretry_for
+        assert expire_subscriptions.retry_backoff is True
+        assert expire_subscriptions.retry_backoff_max == 60
+        assert expire_subscriptions.retry_kwargs["max_retries"] == 3
+
     def test_run_billing_enforcement_success(self):
         """Unified enforcement run returns the real run metrics."""
         from datetime import UTC, datetime

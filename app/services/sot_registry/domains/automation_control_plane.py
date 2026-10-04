@@ -524,7 +524,7 @@ DOMAIN = DomainSOT(
                         name="typed script lifecycle command",
                         owner="automation.script_definitions",
                         kind=AuthorityKind.CONTROL_INPUT,
-                        source="typed create-draft and publish commands with actor, permission, target, event, runtime, and source-hash evidence",
+                        source="typed create-draft, edit-draft, publish, and lifecycle commands with actor, permission, target, event, runtime, and source-hash evidence",
                     ),
                     AuthorityInput(
                         name="declared script targets",
@@ -555,7 +555,7 @@ DOMAIN = DomainSOT(
                     mode=TransactionMode.OWNER_MANAGED,
                     boundary="each script lifecycle command enters execute_owner_command once; ORM writes are flush-only inside the command",
                     locking="tenant/key identity and the selected script version are locked before mutation",
-                    idempotency="tenant and script key uniqueness rejects ambiguous creation; publish selects one immutable version and retains its source hash",
+                    idempotency="tenant and script key uniqueness rejects ambiguous creation; edit preserves one draft, and publish selects that immutable version while retaining its source hash",
                     retries="retry the complete lifecycle command after rollback",
                 ),
                 errors=ErrorContract(
@@ -571,6 +571,8 @@ DOMAIN = DomainSOT(
                         "automation.script_definitions.not_found",
                         "automation.script_definitions.retired",
                         "automation.script_definitions.version_missing",
+                        "automation.script_definitions.active_version_missing",
+                        "automation.script_definitions.invalid_transition",
                         "automation.script_definitions.runtime_unavailable",
                         "automation.script_definitions.run_not_found",
                         *owner_command_boundary_error_codes(

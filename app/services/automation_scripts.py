@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.models.automation_scripts import (
@@ -66,6 +66,11 @@ _PUBLISH = OwnerCommandDefinition(
     concern="automation script definitions and immutable versions",
     name="publish_automation_script",
 )
+_UPDATE = OwnerCommandDefinition(
+    owner=OWNER,
+    concern="automation script definitions and immutable versions",
+    name="update_automation_script",
+)
 _SCRIPT_RUN = OwnerCommandDefinition(
     owner=OWNER,
     concern="automation script execution evidence",
@@ -101,6 +106,26 @@ class PublishAutomationScriptCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateAutomationScriptVersionCommand:
+    tenant_id: UUID
+    script_id: UUID
+    name: str
+    description: str | None
+    source_code: str
+    permission_keys: frozenset[str]
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
+class SetAutomationScriptStatusCommand:
+    tenant_id: UUID
+    script_id: UUID
+    status: AutomationScriptStatus
+    permission_keys: frozenset[str]
+    context: CommandContext
+
+
+@dataclass(frozen=True, slots=True)
 class AutomationScriptOutcome:
     script_id: UUID
     version_id: UUID
@@ -118,6 +143,28 @@ class AutomationScriptSummary:
     event_name: str
     status: AutomationScriptStatus
     version: int
+    active_version: int | None
+    draft_version: int | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationScriptDetail:
+    script_id: UUID
+    key: str
+    name: str
+    description: str | None
+    kind: AutomationScriptKind
+    language: AutomationScriptLanguage
+    target_type: str
+    event_name: str
+    status: AutomationScriptStatus
+    active_version: int | None
+    draft_version: int | None
+    active_source_code: str | None
+    draft_source_code: str | None
+    active_content_sha256: str | None
+    draft_content_sha256: str | None
     updated_at: datetime
 
 
@@ -344,8 +391,9 @@ def publish_script(
             .where(
                 AutomationScriptVersion.tenant_id == command.tenant_id,
                 AutomationScriptVersion.script_id == script.id,
-                AutomationScriptVersion.version == 1,
+                AutomationScriptVersion.published_at.is_(None),
             )
+            .order_by(desc(AutomationScriptVersion.version))
             .with_for_update()
         )
         if version is None:
@@ -373,6 +421,179 @@ def publish_script(
 
     return execute_owner_command(
         db, definition=_PUBLISH, context=command.context, operation=operation
+    )
+
+
+def create_script_version(
+    db: Session, command: CreateAutomationScriptVersionCommand
+) -> AutomationScriptOutcome:
+    """Create or replace the editable draft without changing the active version."""
+
+    def operation() -> AutomationScriptOutcome:
+        _require_permission(command.permission_keys, SCRIPT_UPDATE_PERMISSION)
+        script = db.scalar(
+            select(AutomationScript)
+            .where(
+                AutomationScript.tenant_id == command.tenant_id,
+                AutomationScript.id == command.script_id,
+            )
+            .with_for_update()
+        )
+        if script is None:
+            raise _error("not_found", "The script was not found.")
+        if script.status == AutomationScriptStatus.retired.value:
+            raise _error("retired", "A retired script cannot be edited.")
+        target = _target(
+            AutomationScriptKind(script.kind), script.target_type, script.event_name
+        )
+        _require_permission(command.permission_keys, target.read_permission)
+        _require_permission(command.permission_keys, target.write_permission)
+        name = command.name.strip()
+        if not name:
+            raise _error("identity_invalid", "Script name is required.")
+        source = _validate_source(command.source_code)
+        now = datetime.now(UTC)
+        draft = db.scalar(
+            select(AutomationScriptVersion)
+            .where(
+                AutomationScriptVersion.tenant_id == command.tenant_id,
+                AutomationScriptVersion.script_id == script.id,
+                AutomationScriptVersion.published_at.is_(None),
+            )
+            .order_by(desc(AutomationScriptVersion.version))
+            .with_for_update()
+        )
+        if draft is None:
+            latest_version = (
+                db.scalar(
+                    select(func.max(AutomationScriptVersion.version)).where(
+                        AutomationScriptVersion.tenant_id == command.tenant_id,
+                        AutomationScriptVersion.script_id == script.id,
+                    )
+                )
+                or 0
+            )
+            draft = AutomationScriptVersion(
+                tenant_id=command.tenant_id,
+                script_id=script.id,
+                version=latest_version + 1,
+                source_code=source,
+                content_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                api_version=1,
+                limits={"max_source_bytes": _MAX_SOURCE_LENGTH, "network": "none"},
+                created_by=command.context.actor,
+            )
+            db.add(draft)
+            change = "draft_created"
+        else:
+            draft.source_code = source
+            draft.content_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            draft.created_by = command.context.actor
+            draft.created_at = now
+            change = "draft_replaced"
+        script.name = name
+        script.description = (command.description or "").strip() or None
+        script.updated_at = now
+        db.flush()
+        _emit_change(db, script=script, version=draft, change=change)
+        return AutomationScriptOutcome(
+            script.id, draft.id, draft.version, AutomationScriptStatus(script.status)
+        )
+
+    return execute_owner_command(
+        db, definition=_UPDATE, context=command.context, operation=operation
+    )
+
+
+def set_script_status(
+    db: Session, command: SetAutomationScriptStatusCommand
+) -> AutomationScriptOutcome:
+    """Pause, resume, or retire a script through the owner boundary."""
+
+    def operation() -> AutomationScriptOutcome:
+        _require_permission(command.permission_keys, SCRIPT_UPDATE_PERMISSION)
+        if command.status is AutomationScriptStatus.draft:
+            raise _error(
+                "invalid_transition", "A script cannot be moved to draft status."
+            )
+        script = db.scalar(
+            select(AutomationScript)
+            .where(
+                AutomationScript.tenant_id == command.tenant_id,
+                AutomationScript.id == command.script_id,
+            )
+            .with_for_update()
+        )
+        if script is None:
+            raise _error("not_found", "The script was not found.")
+        current = AutomationScriptStatus(script.status)
+        if current is AutomationScriptStatus.retired:
+            raise _error("retired", "A retired script cannot change status.")
+        target = _target(
+            AutomationScriptKind(script.kind), script.target_type, script.event_name
+        )
+        _require_permission(command.permission_keys, target.read_permission)
+        _require_permission(command.permission_keys, target.write_permission)
+        if (
+            command.status is AutomationScriptStatus.published
+            and script.active_version_id is None
+        ):
+            raise _error(
+                "active_version_missing",
+                "The script has no published version to resume.",
+            )
+        if (
+            command.status is AutomationScriptStatus.paused
+            and current is not AutomationScriptStatus.published
+        ):
+            raise _error("invalid_transition", "Only a published script can be paused.")
+        if (
+            command.status is AutomationScriptStatus.published
+            and current is not AutomationScriptStatus.paused
+        ):
+            raise _error("invalid_transition", "Only a paused script can be resumed.")
+        if command.status is AutomationScriptStatus.retired and current not in {
+            AutomationScriptStatus.draft,
+            AutomationScriptStatus.published,
+            AutomationScriptStatus.paused,
+        }:
+            raise _error(
+                "invalid_transition",
+                "The script cannot be retired from its current state.",
+            )
+        version = db.scalar(
+            select(AutomationScriptVersion).where(
+                AutomationScriptVersion.tenant_id == command.tenant_id,
+                AutomationScriptVersion.script_id == script.id,
+                AutomationScriptVersion.id
+                == (
+                    script.active_version_id
+                    if script.active_version_id is not None
+                    else select(AutomationScriptVersion.id)
+                    .where(
+                        AutomationScriptVersion.tenant_id == command.tenant_id,
+                        AutomationScriptVersion.script_id == script.id,
+                    )
+                    .order_by(desc(AutomationScriptVersion.version))
+                    .limit(1)
+                    .scalar_subquery()
+                ),
+            )
+        )
+        if version is None:
+            raise _error(
+                "version_missing", "The script has no version to record this change."
+            )
+        script.status = command.status.value
+        script.updated_at = datetime.now(UTC)
+        db.flush()
+        _emit_change(db, script=script, version=version, change=command.status.value)
+        return AutomationScriptOutcome(
+            script.id, version.id, version.version, command.status
+        )
+
+    return execute_owner_command(
+        db, definition=_UPDATE, context=command.context, operation=operation
     )
 
 
@@ -442,16 +663,32 @@ def finish_script_run(db: Session, command: FinishAutomationScriptRunCommand) ->
 def list_scripts(
     db: Session, *, tenant_id: UUID
 ) -> tuple[AutomationScriptSummary, ...]:
+    draft_version = (
+        select(AutomationScriptVersion.version)
+        .where(
+            AutomationScriptVersion.tenant_id == tenant_id,
+            AutomationScriptVersion.script_id == AutomationScript.id,
+            AutomationScriptVersion.published_at.is_(None),
+        )
+        .order_by(desc(AutomationScriptVersion.version))
+        .limit(1)
+        .correlate(AutomationScript)
+        .scalar_subquery()
+    )
     rows = db.execute(
-        select(AutomationScript, AutomationScriptVersion)
+        select(
+            AutomationScript,
+            AutomationScriptVersion,
+            draft_version.label("draft_version"),
+        )
         .join(
             AutomationScriptVersion,
-            (AutomationScriptVersion.script_id == AutomationScript.id)
+            (AutomationScriptVersion.id == AutomationScript.active_version_id)
             & (AutomationScriptVersion.tenant_id == AutomationScript.tenant_id),
+            isouter=True,
         )
         .where(
             AutomationScript.tenant_id == tenant_id,
-            AutomationScriptVersion.tenant_id == tenant_id,
         )
         .order_by(AutomationScript.updated_at.desc(), AutomationScript.key.asc())
     ).all()
@@ -464,10 +701,59 @@ def list_scripts(
             target_type=script.target_type,
             event_name=script.event_name,
             status=AutomationScriptStatus(script.status),
-            version=version.version,
+            version=draft_version_value or (version.version if version else 0),
+            active_version=version.version if version else None,
+            draft_version=draft_version_value,
             updated_at=script.updated_at,
         )
-        for script, version in rows
+        for script, version, draft_version_value in rows
+    )
+
+
+def get_script(
+    db: Session, *, tenant_id: UUID, script_id: UUID
+) -> AutomationScriptDetail | None:
+    """Return one permission-gated detail projection, including source versions."""
+
+    script = db.scalar(
+        select(AutomationScript).where(
+            AutomationScript.tenant_id == tenant_id,
+            AutomationScript.id == script_id,
+        )
+    )
+    if script is None:
+        return None
+    versions = tuple(
+        db.scalars(
+            select(AutomationScriptVersion)
+            .where(
+                AutomationScriptVersion.tenant_id == tenant_id,
+                AutomationScriptVersion.script_id == script.id,
+            )
+            .order_by(desc(AutomationScriptVersion.version))
+        ).all()
+    )
+    active = next(
+        (item for item in versions if item.id == script.active_version_id), None
+    )
+    draft = next((item for item in versions if item.published_at is None), None)
+    return AutomationScriptDetail(
+        script_id=script.id,
+        key=script.key,
+        name=script.name,
+        description=script.description,
+        kind=AutomationScriptKind(script.kind),
+        language=AutomationScriptLanguage(script.language),
+        target_type=script.target_type,
+        event_name=script.event_name,
+        status=AutomationScriptStatus(script.status),
+        active_version=active.version if active else None,
+        draft_version=draft.version if draft else None,
+        active_source_code=active.source_code if active else None,
+        draft_source_code=draft.source_code if draft else None,
+        active_content_sha256=active.content_sha256 if active else None,
+        draft_content_sha256=draft.content_sha256 if draft else None,
+        updated_at=script.updated_at,
     )
 
 
@@ -548,24 +834,30 @@ def published_client_scripts(
 
 __all__ = [
     "AutomationScriptError",
+    "AutomationScriptDetail",
     "AutomationScriptOutcome",
     "AutomationScriptRunAdmission",
     "AutomationScriptSummary",
     "CreateAutomationScriptCommand",
+    "CreateAutomationScriptVersionCommand",
     "FinishAutomationScriptRunCommand",
     "PublishedAutomationServerScript",
     "PublishedAutomationClientScript",
     "PublishAutomationScriptCommand",
+    "SetAutomationScriptStatusCommand",
     "SCRIPT_CREATE_PERMISSION",
     "SCRIPT_PUBLISH_PERMISSION",
     "SCRIPT_READ_PERMISSION",
     "SCRIPT_UPDATE_PERMISSION",
     "create_script",
+    "create_script_version",
     "finish_script_run",
     "list_scripts",
     "published_server_scripts",
     "published_client_scripts",
     "publish_script",
+    "set_script_status",
+    "get_script",
     "StartAutomationScriptRunCommand",
     "start_script_run",
 ]
