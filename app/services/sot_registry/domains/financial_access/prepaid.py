@@ -21,15 +21,132 @@ from app.services.sot_manifest import (
 
 SERVICES: tuple[SOTService, ...] = (
     SOTService(
+        name="financial.purchased_service_coverage",
+        module="app.services.purchased_service_coverage",
+        owns=("purchased service coverage protection",),
+        notes="Read-only fact boundary lets lifecycle policy consume purchase coverage without depending on settlement orchestration.",
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="purchased service coverage protection",
+                    role=OwnerRole.RESOLVER,
+                    input_names=("purchase-linked coverage facts",),
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="purchase-linked coverage facts",
+                    owner="financial.prepaid_period_purchases",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="purchase and ordered period identities, active entitlement intervals, and dependent outage decision funding links",
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.READ_ONLY,
+                boundary="Reads facts in the caller session; performs no writes.",
+                locking="The mutation caller holds its canonical account/subscription locks before rechecking.",
+                idempotency="Identical persisted facts produce identical coverage protection.",
+                retries="Read current facts again before a lifecycle transition; unresolved receipt states fail closed.",
+            ),
+            errors=ErrorContract(
+                domain_codes=(),
+                mapping_owner="lifecycle policy callers",
+                fail_closed_on=("unresolved captured purchase or protected coverage",),
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="financial.purchased_service_coverage",
+                verification="Purchase protection and lifecycle boundary tests.",
+                cutover_gate="Lifecycle and catalog callers use the typed coverage query.",
+                fallback_retirement="No mutable billing anchor substitutes for exact purchase entitlement facts.",
+            ),
+            steward="billing and service lifecycle operations",
+            design_refs=(
+                "docs/designs/PREPAID_PERIOD_PURCHASE_AND_OUTAGE_COMPENSATION.md",
+            ),
+            test_refs=(
+                "tests/architecture/test_period_purchase_safety_boundary.py",
+                "tests/test_prepaid_period_purchase_safety.py",
+            ),
+        ),
+    ),
+    SOTService(
+        name="financial.purchase_payment_recovery_state",
+        module="app.services.purchase_payment_recovery_state",
+        owns=("confirmed purchase payment recovery state",),
+        notes="Flush-only record participant consumes confirmed payment facts; it never calls the purchase settlement coordinator.",
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name="confirmed purchase payment recovery state",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=("confirmed reserved payment recovery facts",),
+                    canonical_writer="financial.purchase_payment_recovery_state",
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="confirmed reserved payment recovery facts",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="reserved receipt identity, confirmed refund/reversal status, original purchase payment link, and completed period evidence",
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.PARTICIPANT,
+                boundary="Participates in the payment owner transaction and only flushes.",
+                locking="The payment owner holds the canonical account and payment locks.",
+                idempotency="Reapplying the same confirmed payment state makes the same purchase recovery state.",
+                retries="The payment owner retries its complete transaction; unconfirmed cash movement never releases a purchase hold.",
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    "financial.purchase_payment_recovery_state.recovery_evidence_invalid",
+                ),
+                mapping_owner="payment refund/reversal owner adapters",
+                fail_closed_on=("missing or unconfirmed refund/reversal evidence",),
+            ),
+            events=EventContract(
+                event_types=("payment.refunded", "payment.reversed"),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility="The payment owner retains its existing funding-change events.",
+                replay="Replay confirmed payment state.",
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="financial.purchase_payment_recovery_state",
+                verification="Confirmed refund and additional-capture recovery state tests.",
+                cutover_gate="Payment refund/reversal transactions compose this typed record participant.",
+                fallback_retirement="No repair changes purchase state from an actor label or an assumed refund.",
+            ),
+            steward="billing and finance operations",
+            design_refs=(
+                "docs/designs/PREPAID_PERIOD_PURCHASE_AND_OUTAGE_COMPENSATION.md",
+            ),
+            test_refs=(
+                "tests/architecture/test_period_purchase_safety_boundary.py",
+                "tests/test_prepaid_period_purchase_safety.py",
+            ),
+        ),
+    ),
+    SOTService(
         name="financial.outage_compensation",
         module="app.services.outage_compensation",
-        owns=("finalized outage service-period compensation",),
+        owns=(
+            "finalized outage service-period compensation",
+            "reviewed outage compensation recovery",
+            "outage compensation funding retraction",
+        ),
         depends_on=(
             "access.subscription_lifecycle",
             "control.settings_spec",
             "events.owner_outputs",
             "financial.prepaid_service_renewals",
             "network.customer_outage_accrual",
+            "service_intent.subscription_lifecycle",
+            "auth.permission_gate",
+            "observability.audit_log",
         ),
         notes=(
             "Consumes each finalized customer-outage interval exactly once, "
@@ -51,8 +168,40 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     canonical_writer="financial.outage_compensation",
                 ),
+                ConcernContract(
+                    name="reviewed outage compensation recovery",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "finalized customer outage intervals",
+                        "funded prepaid coverage intervals",
+                        "prior compensation and funding reversal evidence",
+                        "staff repair permission",
+                    ),
+                    canonical_writer="financial.outage_compensation",
+                ),
+                ConcernContract(
+                    name="outage compensation funding retraction",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "funded prepaid coverage intervals",
+                        "prior compensation and funding reversal evidence",
+                    ),
+                    canonical_writer="financial.outage_compensation",
+                ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="prior compensation and funding reversal evidence",
+                    owner="financial.outage_compensation",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="durable decision credited ranges, funding dependencies, unresolved reviews, and reversed source entitlements",
+                ),
+                AuthorityInput(
+                    name="staff repair permission",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source="active staff principal and billing:prepaid_reconciliation:repair RBAC grant",
+                ),
                 AuthorityInput(
                     name="receipted outage lifecycle output",
                     owner="events.owner_outputs",
@@ -106,7 +255,9 @@ SERVICES: tuple[SOTService, ...] = (
                 locking=(
                     "The canonical account lock serializes coverage-tail changes; "
                     "a unique interval-consumption key prevents two decisions from "
-                    "using the same outage evidence."
+                    "consuming the same evidence twice. Connected history includes previously "
+                    "consumed intervals but awards only funded ranges not previously "
+                    "credited. Schedule rebasing requires the previous reviewed lifecycle head."
                 ),
                 idempotency=(
                     "A required idempotency key replays the same preview fingerprint; "
@@ -125,6 +276,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.outage_compensation.idempotency_required",
                     "financial.outage_compensation.no_finalized_outage",
                     "financial.outage_compensation.review_required",
+                    "financial.outage_compensation.review_invalid",
+                    "financial.outage_compensation.repair_permission_required",
                     "financial.outage_compensation.stale_preview",
                     "financial.outage_compensation.subscription_not_found",
                     *owner_command_boundary_error_codes(
@@ -172,7 +325,11 @@ SERVICES: tuple[SOTService, ...] = (
                 "docs/designs/OUTAGE_SLA_SPINE.md",
                 "docs/SOT_RELATIONSHIP_MAP.md",
             ),
-            test_refs=("tests/test_outage_compensation.py",),
+            test_refs=(
+                "tests/test_outage_compensation.py",
+                "tests/test_outage_compensation_safety.py",
+                "tests/architecture/test_period_purchase_safety_boundary.py",
+            ),
         ),
     ),
     SOTService(
@@ -3425,8 +3582,10 @@ SERVICES: tuple[SOTService, ...] = (
             "fingerprint-approved missed renewal execution",
             "reviewed legacy prepaid renewal tax-invoice correction",
             "reviewed unused prepaid renewal correction",
+            "suspension-aware prepaid renewal eligibility",
         ),
         depends_on=(
+            "access.subscription_lifecycle",
             "billing.contracts",
             "customer.accounts",
             "financial.account_adjustments",
@@ -3510,7 +3669,13 @@ SERVICES: tuple[SOTService, ...] = (
             "renewal correction accepts only one exact un-invoiced adjustment "
             "and linked active entitlement: it reverses the historical ledger "
             "debit and entitlement atomically, restoring verified prepaid funding "
-            "without creating money, service access, or a replacement period."
+            "without creating money, service access, or a replacement period. "
+            "Routine and scheduled renewal exclude suspended subscriptions. A "
+            "settlement-triggered recovery may admit a suspended subscription only "
+            "when an active prepaid enforcement lock proves the financial cause; "
+            "the same transaction funds the new period and restores that lock. An "
+            "administrative suspension is never renewed by scheduled billing or an "
+            "unrelated account-credit event."
         ),
         contract=ServiceContract(
             concerns=(
@@ -3519,6 +3684,7 @@ SERVICES: tuple[SOTService, ...] = (
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "effective compatibility tax treatment",
                         "settled payment evidence",
                         "verified customer funding position",
@@ -3532,6 +3698,7 @@ SERVICES: tuple[SOTService, ...] = (
                     role=OwnerRole.RESOLVER,
                     input_names=(
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "effective compatibility tax treatment",
                         "verified customer funding position",
                         "funded service entitlement evidence",
@@ -3543,6 +3710,7 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "settled payment evidence",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                     ),
                 ),
                 ConcernContract(
@@ -3649,6 +3817,7 @@ SERVICES: tuple[SOTService, ...] = (
                         "settled payment evidence",
                         "verified customer funding position",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
@@ -3659,9 +3828,18 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "verified customer funding position",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
+                ),
+                ConcernContract(
+                    name="suspension-aware prepaid renewal eligibility",
+                    role=OwnerRole.POLICY,
+                    input_names=(
+                        "canonical subscription lifecycle state",
+                        "settled payment evidence",
+                    ),
                 ),
                 ConcernContract(
                     name="fingerprint-approved missed renewal execution",
@@ -3699,6 +3877,17 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical subscription lifecycle state",
+                    owner="access.subscription_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "Subscription.status plus the exact active EnforcementLock "
+                        "reason: active and blocked admit routine renewal; suspended "
+                        "admits only settlement-triggered recovery when an active "
+                        "prepaid lock proves the financial cause"
+                    ),
+                ),
                 AuthorityInput(
                     name="reviewed service calendar query",
                     owner="financial.prepaid_service_renewals",
@@ -4161,6 +4350,7 @@ SERVICES: tuple[SOTService, ...] = (
         owns=(
             "prepaid service-period purchase quote persistence",
             "verified prepaid service-period purchase settlement",
+            "reviewed prepaid purchase receipt recovery",
         ),
         depends_on=(
             "access.subscription_lifecycle",
@@ -4172,6 +4362,11 @@ SERVICES: tuple[SOTService, ...] = (
             "financial.prepaid_service_renewals",
             "financial.topup_intents",
             "network.outage_lifecycle",
+            "financial.outage_compensation",
+            "financial.billing_tax_resolution",
+            "service_intent.subscription_lifecycle",
+            "auth.permission_gate",
+            "observability.audit_log",
         ),
         notes=(
             "Creates a time-limited quote for one to twelve monthly prepaid "
@@ -4204,8 +4399,30 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     canonical_writer=("financial.prepaid_period_purchases"),
                 ),
+                ConcernContract(
+                    name="reviewed prepaid purchase receipt recovery",
+                    role=OwnerRole.COMMAND_WRITER,
+                    input_names=(
+                        "persisted period-purchase quote",
+                        "verified selected-payment evidence",
+                        "staff repair permission",
+                    ),
+                    canonical_writer="financial.prepaid_period_purchases",
+                ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="purchase-linked coverage and review decisions",
+                    owner="financial.prepaid_period_purchases",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source="active purchase-linked entitlements, dependent outage grants, and unresolved checkout state",
+                ),
+                AuthorityInput(
+                    name="staff repair permission",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source="active staff principal and billing:prepaid_reconciliation:repair RBAC grant",
+                ),
                 AuthorityInput(
                     name="prepaid period-purchase policy",
                     owner="control.settings_spec",
@@ -4281,12 +4498,16 @@ SERVICES: tuple[SOTService, ...] = (
                 boundary=(
                     "Quote persistence and verified settlement each enter "
                     "execute_owner_command once on a transaction-free session. "
-                    "All purchase, invoice, allocation, entitlement, anchor, and "
-                    "intent-completion writes commit or roll back together."
+                    "Confirmed cash and its purchase reservation are staged first. "
+                    "Only the invoice, allocation, entitlement, anchor, and intent "
+                    "consequence uses execute_owner_savepoint. A domain rejection "
+                    "rolls back that consequence and persists a held receipt, "
+                    "review_required purchase, and audit evidence outside the savepoint."
                 ),
                 locking=(
                     "The account is locked before quote idempotency resolution and "
-                    "again before settlement. Exact invoice-line keys, purchase "
+                    "then the subscription before settlement. A partial unique live-checkout "
+                    "constraint prevents different keys selling the same dates. Exact invoice-line keys, purchase "
                     "status, and payment-allocation checks prevent duplicate funding."
                 ),
                 idempotency=(
@@ -4298,7 +4519,9 @@ SERVICES: tuple[SOTService, ...] = (
                 retries=(
                     "Retry the whole owner command with the same command and "
                     "idempotency evidence; stale quotes and mismatched provider "
-                    "evidence require a fresh customer action."
+                    "evidence require receipt review or a confirmed refund. A reviewed "
+                    "retry binds its fingerprint and key to the completed receipt; "
+                    "it never recharges the customer."
                 ),
             ),
             errors=ErrorContract(
@@ -4307,6 +4530,17 @@ SERVICES: tuple[SOTService, ...] = (
                         "financial.prepaid_period_purchases"
                     ),
                     "financial.prepaid_period_purchases.active_outage",
+                    "financial.prepaid_period_purchases.additional_capture_review",
+                    "financial.prepaid_period_purchases.checkout_in_progress",
+                    "financial.prepaid_period_purchases.coverage_overlap",
+                    "financial.prepaid_period_purchases.currency_unsupported",
+                    "financial.prepaid_period_purchases.explicit_end",
+                    "financial.prepaid_period_purchases.payment_time_invalid",
+                    "financial.prepaid_period_purchases.pending_lifecycle",
+                    "financial.prepaid_period_purchases.recovery_evidence_invalid",
+                    "financial.prepaid_period_purchases.repair_permission_required",
+                    "financial.prepaid_period_purchases.tax_snapshot_missing",
+                    "financial.prepaid_period_purchases.usage_allowance_unsupported",
                     "financial.prepaid_period_purchases.billing_mode_ineligible",
                     "financial.prepaid_period_purchases.command_invalid",
                     "financial.prepaid_period_purchases.configuration_invalid",
@@ -4385,6 +4619,9 @@ SERVICES: tuple[SOTService, ...] = (
             ),
             test_refs=(
                 "tests/test_prepaid_period_purchases.py",
+                "tests/test_prepaid_period_purchase_safety.py",
+                "tests/architecture/test_period_purchase_safety_boundary.py",
+                "tests/integration/test_period_purchase_concurrency_pg.py",
                 "tests/test_gateway_topup_intents.py",
             ),
         ),

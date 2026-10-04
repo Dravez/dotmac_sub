@@ -1375,6 +1375,11 @@ class Payment(Base):
     auto_allocate_on_settlement: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"
     )
+    reserved_for_purchase_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("prepaid_period_purchases.id", ondelete="RESTRICT"),
+        index=True,
+    )
     creation_preview_fingerprint: Mapped[str | None] = mapped_column(String(64))
     # Set only when a durable apply run proves that it created this payment.
     # Reused idempotent rows keep the original/null owner and cannot be claimed

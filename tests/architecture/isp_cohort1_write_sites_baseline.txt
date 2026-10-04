@@ -25,6 +25,11 @@
 # 20 explicit Customer/profile write sites and `party.registry` adds two
 # explicit canonical Party synchronization sites. These are the registered
 # owners used by Inbox completion, not parallel adapter writers.
+#
+# 2026-10-03 — the registered `customer.portal_profile_commands` owner adds
+# two direct Subscriber writes: email verification reset and the declared
+# notification preference projection. Profile values are saved in its one
+# owner-managed transaction; the portal adapter has no parallel writer.
 
 2 cli_script|scripts/migration/backfill_crm_subscriber_links.py
 2 cli_script|scripts/migration/backfill_party_status.py
@@ -47,6 +52,7 @@
 1 service|app/services/customer_location_requests.py
 1 service|app/services/customer_portal_contacts.py
 1 service|app/services/customer_portal_notifications.py
+2 service|app/services/customer_portal_profile_commands.py
 3 service|app/services/gis_sync.py
 1 service|app/services/mrr_snapshot.py
 1 service|app/services/network_subscriber_bridge.py
@@ -60,4 +66,4 @@
 1 web_presenter|app/services/web_customer_details.py
 1 web_presenter|app/services/web_system_import_wizard.py
 3 web_presenter|app/services/web_system_restore_tool.py
-TOTAL 120
+TOTAL 122

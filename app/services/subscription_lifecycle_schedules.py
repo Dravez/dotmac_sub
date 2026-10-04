@@ -32,6 +32,8 @@ _STATUS_COMMANDS = frozenset(
     {
         SubscriptionCommandKind.activate,
         SubscriptionCommandKind.suspend,
+        SubscriptionCommandKind.pause,
+        SubscriptionCommandKind.resume_pause,
         SubscriptionCommandKind.disable,
         SubscriptionCommandKind.restore,
         SubscriptionCommandKind.cancel,
@@ -132,6 +134,7 @@ def stage_rebase_funded_tail_termination_schedules(
     previous_tail: datetime,
     extended_tail: datetime,
     evidence_ref: str,
+    expected_previous_head: str,
 ) -> int:
     """Move only next-cycle termination commands that target a funded tail.
 
@@ -179,7 +182,10 @@ def stage_rebase_funded_tail_termination_schedules(
     reviewed_head = resolve_subscription_lifecycle(
         db, str(coerce_uuid(subscription_id))
     ).head
+    rebased = 0
     for schedule in schedules:
+        if schedule.reviewed_head != expected_previous_head:
+            continue
         schedule.effective_at = extended
         schedule.next_attempt_at = extended
         schedule.reviewed_head = reviewed_head
@@ -187,8 +193,9 @@ def stage_rebase_funded_tail_termination_schedules(
             f"Rebased from {previous.isoformat()} to {extended.isoformat()} "
             f"by {evidence_ref}"
         )
+        rebased += 1
     db.flush()
-    return len(schedules)
+    return rebased
 
 
 def apply_due_subscription_status_commands(

@@ -21,9 +21,10 @@ from typing import TYPE_CHECKING, NoReturn
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.audit import AuditActorType
 from app.models.billing import (
@@ -66,6 +67,7 @@ from app.models.catalog import (
     UsageAllowance,
     UsageAllowanceResetBasis,
 )
+from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.idempotency import IdempotencyKey
 from app.models.prepaid_funding import PrepaidOpeningFundingConsumption
 from app.models.service_extension import (
@@ -105,7 +107,10 @@ from app.services.billing.invoices import (
     InvoiceOwnerError,
     Invoices,
 )
-from app.services.billing_tax_resolution import resolve_subscription_taxes
+from app.services.billing_tax_resolution import (
+    resolve_catalog_price_tax,
+    resolve_subscription_taxes,
+)
 from app.services.common import coerce_uuid, round_money
 from app.services.customer_financial_position import get_customer_financial_position
 from app.services.domain_errors import DomainError
@@ -171,10 +176,37 @@ PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES = frozenset(
     {
         SubscriptionStatus.active,
         SubscriptionStatus.blocked,
+    }
+)
+PREPAID_SERVICE_FUNDING_RECOVERY_STATUSES = frozenset(
+    {
+        *PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES,
         SubscriptionStatus.suspended,
     }
 )
 _MAX_AUTOMATIC_LAG = timedelta(days=2)
+
+
+def _funding_recovery_status_clause() -> ColumnElement[bool]:
+    """Admit suspension only when prepaid enforcement owns the recovery."""
+
+    active_prepaid_lock = (
+        select(EnforcementLock.id)
+        .where(
+            EnforcementLock.subscription_id == Subscription.id,
+            EnforcementLock.reason == EnforcementReason.prepaid,
+            EnforcementLock.is_active.is_(True),
+        )
+        .exists()
+    )
+    return or_(
+        Subscription.status.in_(PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES),
+        and_(
+            Subscription.status == SubscriptionStatus.suspended,
+            active_prepaid_lock,
+        ),
+    )
+
 
 # The scheduled-renewal pass summary carries plain counters plus (round-3
 # nightly-isolation correction) a list of isolated-account entries and an
@@ -1207,7 +1239,9 @@ def _resolve_prepaid_monthly_charge_details(
         if cycle != BillingCycle.monthly:
             continue
         base = _effective_unit_price(subscription, price.amount, effective_at)
-        tax_resolution = tax_resolutions[subscription.id]
+        tax_resolution = resolve_catalog_price_tax(
+            tax_resolutions[subscription.id], price.tax_application
+        )
         tax_rate_percent = tax_resolution.tax_rate_percent
         tax_application = tax_resolution.tax_application
         if (
@@ -1271,6 +1305,13 @@ def resolve_prepaid_monthly_charges(
     }
 
 
+class PrepaidRenewalEligibilityContext(enum.StrEnum):
+    """Why a renewal owner may inspect the subscription's current state."""
+
+    recurring = "recurring"
+    funding_recovery = "funding_recovery"
+
+
 @dataclass(frozen=True)
 class PrepaidServiceRenewalPreview:
     account_id: UUID
@@ -1286,6 +1327,9 @@ class PrepaidServiceRenewalPreview:
     fingerprint: str
     idempotency_key: str
     origin_ref: str
+    eligibility_context: PrepaidRenewalEligibilityContext = (
+        PrepaidRenewalEligibilityContext.recurring
+    )
     replayed: bool = False
 
 
@@ -1406,6 +1450,7 @@ class FundingChangeEvaluationDisposition(enum.StrEnum):
 
     evaluated = "evaluated"
     consolidated_invoice_allocation = "consolidated_invoice_allocation"
+    purchase_settlement = "purchase_settlement"
 
 
 @dataclass(frozen=True)
@@ -1878,6 +1923,11 @@ def evaluate_prepaid_service_after_settlement(
             event_account_id=str(account_id),
             payment_account_id=str(payment.account_id),
         )
+    if payment.reserved_for_purchase_id is not None:
+        return FundingChangeEvaluation(
+            payment_id=payment.id,
+            disposition=FundingChangeEvaluationDisposition.purchase_settlement,
+        )
     if payment.status != PaymentStatus.succeeded or not payment.is_active:
         _error(
             "payment_not_settled",
@@ -2068,6 +2118,10 @@ def execute_prepaid_service_after_settlement(
 def _subscription_for_request(
     db: Session,
     subscription_id: object,
+    *,
+    eligibility_context: PrepaidRenewalEligibilityContext = (
+        PrepaidRenewalEligibilityContext.recurring
+    ),
 ) -> Subscription:
     subscription = db.get(Subscription, coerce_uuid(subscription_id))
     if subscription is None:
@@ -2077,11 +2131,35 @@ def _subscription_for_request(
             "ineligible_billing_mode",
             "Only a prepaid subscription can receive a funded service cycle.",
         )
-    if subscription.status not in PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES:
+    eligible_statuses = (
+        PREPAID_SERVICE_FUNDING_RECOVERY_STATUSES
+        if eligibility_context is PrepaidRenewalEligibilityContext.funding_recovery
+        else PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES
+    )
+    if subscription.status not in eligible_statuses:
         _error(
             "ineligible_status",
             "Subscription is not eligible for prepaid service renewal.",
         )
+    if subscription.status is SubscriptionStatus.suspended:
+        active_prepaid_lock = db.scalar(
+            select(EnforcementLock.id)
+            .where(
+                EnforcementLock.subscription_id == subscription.id,
+                EnforcementLock.reason == EnforcementReason.prepaid,
+                EnforcementLock.is_active.is_(True),
+            )
+            .limit(1)
+        )
+        if (
+            eligibility_context is not PrepaidRenewalEligibilityContext.funding_recovery
+            or active_prepaid_lock is None
+        ):
+            _error(
+                "ineligible_status",
+                "Suspended service can renew only from verified funding recovery "
+                "with an active prepaid enforcement lock.",
+            )
     return subscription
 
 
@@ -2264,8 +2342,15 @@ def preview_prepaid_service_renewal(
     ends_at: datetime,
     amount: Decimal,
     currency: str = "NGN",
+    eligibility_context: PrepaidRenewalEligibilityContext = (
+        PrepaidRenewalEligibilityContext.recurring
+    ),
 ) -> PrepaidServiceRenewalPreview:
-    subscription = _subscription_for_request(db, subscription_id)
+    subscription = _subscription_for_request(
+        db,
+        subscription_id,
+        eligibility_context=eligibility_context,
+    )
     period_start = _utc(starts_at)
     period_end = _utc(ends_at)
     if period_end <= period_start:
@@ -2303,6 +2388,7 @@ def preview_prepaid_service_renewal(
             fingerprint=invoice_evidence.preview_fingerprint,
             idempotency_key=idempotency_key,
             origin_ref=origin_ref,
+            eligibility_context=eligibility_context,
             replayed=True,
         )
     overlap = _existing_period_entitlement(
@@ -2346,6 +2432,7 @@ def preview_prepaid_service_renewal(
                 fingerprint=existing_adjustment.preview_fingerprint,
                 idempotency_key=idempotency_key,
                 origin_ref=origin_ref,
+                eligibility_context=eligibility_context,
                 replayed=True,
             )
         _error(
@@ -2388,6 +2475,7 @@ def preview_prepaid_service_renewal(
         fingerprint=adjustment_preview.fingerprint,
         idempotency_key=idempotency_key,
         origin_ref=origin_ref,
+        eligibility_context=eligibility_context,
     )
 
 
@@ -2411,7 +2499,11 @@ def confirm_prepaid_service_renewal(
     # first committed and failed with a stale fingerprint instead of returning
     # the already-recorded renewal.
     lock_account(db, str(preview.account_id))
-    subscription = _subscription_for_request(db, preview.subscription_id)
+    subscription = _subscription_for_request(
+        db,
+        preview.subscription_id,
+        eligibility_context=preview.eligibility_context,
+    )
     invoice_evidence = _invoice_backed_renewal_evidence(
         db,
         subscription=subscription,
@@ -2517,6 +2609,7 @@ def confirm_prepaid_service_renewal(
         ends_at=preview.ends_at,
         amount=preview.amount,
         currency=preview.currency,
+        eligibility_context=preview.eligibility_context,
     )
     if current.fingerprint != preview.fingerprint:
         _error(
@@ -5110,7 +5203,7 @@ def apply_due_prepaid_service_after_funding_change(
         .where(
             Subscription.subscriber_id == account_id,
             Subscription.billing_mode == BillingMode.prepaid,
-            Subscription.status.in_(PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES),
+            _funding_recovery_status_clause(),
             Subscription.next_billing_at.isnot(None),
             Subscription.next_billing_at <= evaluated_at,
             CatalogOffer.billing_cycle == BillingCycle.monthly,
@@ -5263,6 +5356,7 @@ def apply_due_prepaid_service_after_funding_change(
             ends_at=period_end,
             amount=amount,
             currency=charge_currency,
+            eligibility_context=PrepaidRenewalEligibilityContext.funding_recovery,
         )
         if not preview.allowed:
             unfunded += 1
@@ -6002,10 +6096,12 @@ __all__ = [
     "UnusedPrepaidRenewalCorrectionQuery",
     "UnusedPrepaidRenewalCorrectionPreview",
     "UnusedPrepaidRenewalCorrectionResult",
+    "PREPAID_SERVICE_FUNDING_RECOVERY_STATUSES",
     "PREPAID_SERVICE_RENEWAL_ELIGIBLE_STATUSES",
     "PREPAID_RENEWAL_ISOLATABLE_ERRORS",
     "PrepaidFundingSubscriptionDecision",
     "PrepaidMonthlyChargeDetail",
+    "PrepaidRenewalEligibilityContext",
     "PrepaidOpeningLaneUnavailableError",
     "PrepaidRecurringChargePreview",
     "PrepaidRenewalAmbiguousEvidenceError",

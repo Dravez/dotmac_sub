@@ -321,6 +321,7 @@ class _SettlementObservation:
     # `refunded`/`reversed` observed statuses, so leaving it unset is a loud
     # failure (`financial_effect_required`), not a silent one.
     financial_effect: PaymentProviderEventFinancialEffect | None = None
+    provider_paid_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,6 +493,8 @@ def _settlement_observation(
             return None
 
         if event_type in _PAYSTACK_SETTLEMENT_EVENT_TYPES:
+            from app.services.payment_gateway_adapter import parse_provider_paid_at
+
             metadata = data.get("metadata")
             return _SettlementObservation(
                 status=PaymentStatus.succeeded,
@@ -504,6 +507,9 @@ def _settlement_observation(
                 currency=_currency(data.get("currency")),
                 reference=str(data.get("reference") or "").strip() or None,
                 metadata=metadata if isinstance(metadata, Mapping) else {},
+                provider_paid_at=parse_provider_paid_at(
+                    data.get("paid_at") or data.get("paidAt")
+                ),
             )
 
         if event_type in _PAYSTACK_REFUND_EVENT_TYPES:
@@ -934,6 +940,7 @@ def _stage_period_purchase_settlement(
                 provider_fee=settlement.provider_fee,
                 currency=settlement.currency or intent.currency,
                 effective_at=datetime.now(UTC),
+                provider_paid_at=settlement.provider_paid_at,
             ),
             context=context,
         )
@@ -946,7 +953,12 @@ def _stage_period_purchase_settlement(
         ) from exc
     return replace(
         prepared,
-        ingest=replace(prepared.ingest, payment_id=result.payment_id),
+        ingest=replace(
+            prepared.ingest,
+            payment_id=result.payment_id,
+            invoice_id=None,
+            net_amount=settlement.amount,
+        ),
     )
 
 

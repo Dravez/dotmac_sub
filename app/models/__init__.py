@@ -397,6 +397,7 @@ from app.models.fiber_topology_identity import (  # noqa: F401
     FiberTopologyIdentityProposalBatch,
 )
 from app.models.fiber_topology_staging import (  # noqa: F401
+    FiberTopologyFeatureClassificationReview,
     FiberTopologySourceBatch,
     FiberTopologyStagedFeature,
 )
@@ -771,6 +772,11 @@ from app.models.payment_arrangement import (  # noqa: F401
     PaymentArrangement,
     PaymentArrangementInstallment,
     PaymentFrequency,
+)
+from app.models.payment_email import (  # noqa: F401
+    PaymentEmailCutover,
+    PaymentEmailEpisode,
+    PaymentEmailPart,
 )
 from app.models.payment_proof import (  # noqa: F401
     PaymentProof,

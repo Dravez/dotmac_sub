@@ -17,6 +17,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -27,6 +28,7 @@ from app.db import Base
 class PrepaidPeriodPurchaseStatus(enum.Enum):
     quoted = "quoted"
     payment_pending = "payment_pending"
+    review_required = "review_required"
     completed = "completed"
     expired = "expired"
     canceled = "canceled"
@@ -50,6 +52,13 @@ class PrepaidPeriodPurchase(Base):
             "account_id", "idempotency_key", name="uq_prepaid_period_purchase_key"
         ),
         UniqueConstraint("topup_intent_id", name="uq_prepaid_period_purchase_intent"),
+        Index(
+            "uq_prepaid_period_purchase_live_subscription",
+            "subscription_id",
+            unique=True,
+            postgresql_where=text("status IN ('quoted', 'payment_pending')"),
+            sqlite_where=text("status IN ('quoted', 'payment_pending')"),
+        ),
         CheckConstraint(
             "period_count >= 1 AND period_count <= 12",
             name="ck_prepaid_period_purchase_count",
@@ -109,6 +118,7 @@ class PrepaidPeriodPurchase(Base):
         DateTime(timezone=True), nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
@@ -231,6 +241,10 @@ class OutageCompensationDecision(Base):
     funded_overlap_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     tail_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     tail_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("outage_compensation_decisions.id", ondelete="RESTRICT"),
+    )
     entitlement_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("service_entitlements.id", ondelete="RESTRICT")
     )

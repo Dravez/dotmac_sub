@@ -433,6 +433,37 @@ def _create_customer_gateway_topup_intent(
                 "purchase_not_found",
                 "Service-period purchase was not found for this account",
             )
+        if purchase.topup_intent_id is not None:
+            existing = lock_for_update(db, TopupIntent, purchase.topup_intent_id)
+            if (
+                existing is None
+                or existing.account_id != command.account_id
+                or existing.provider_id != command.provider_id
+                or existing.provider_type != command.provider_type
+                or existing.capability_binding_id != command.capability_binding_id
+                or (existing.metadata_ or {}).get("payment_method_id")
+                != (
+                    str(command.payment_method_id)
+                    if command.payment_method_id
+                    else None
+                )
+                or command.expected_preview_fingerprint != purchase.preview_fingerprint
+            ):
+                raise _error(
+                    "purchase_intent_conflict",
+                    "Purchase already names a different checkout.",
+                )
+            return _result(
+                intent=existing,
+                payment_flow=command.flow.value,
+                preview_fingerprint=purchase.preview_fingerprint,
+                replayed=True,
+            )
+        if _utc(purchase.expires_at) < datetime.now(UTC):
+            raise _error(
+                "purchase_not_payable",
+                "Purchase quote has expired; review a new quote.",
+            )
         if purchase.status not in {
             PrepaidPeriodPurchaseStatus.quoted,
             PrepaidPeriodPurchaseStatus.payment_pending,

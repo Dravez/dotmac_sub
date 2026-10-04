@@ -9,24 +9,43 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.audit import AuditActorType
 from app.models.billing import ServiceEntitlement, ServiceEntitlementStatus
-from app.models.catalog import Subscription
+from app.models.catalog import BillingMode, Subscription, SubscriptionStatus
 from app.models.network_monitoring import CustomerOutageInterval
 from app.models.service_period_purchase import (
     OutageCompensationDecision,
     OutageCompensationDecisionInterval,
     OutageCompensationDecisionStatus,
 )
+from app.models.subscription_change import (
+    SubscriptionChangeRequest,
+    SubscriptionChangeStatus,
+)
+from app.models.subscription_lifecycle_schedule import (
+    SubscriptionLifecycleSchedule,
+    SubscriptionLifecycleScheduleStatus,
+)
+from app.schemas.audit import AuditEventCreate
 from app.services.account_lifecycle import (
     BillingAnchorProjectionCommand,
     BillingAnchorProjectionSource,
     stage_subscription_billing_anchor,
 )
+from app.services.audit import AuditEvents
 from app.services.billing._common import lock_account
 from app.services.domain_errors import DomainError
+from app.services.outage_interval_algebra import (
+    TimeInterval,
+    intersect_intervals,
+    intersect_seconds,
+    interval_seconds,
+    merge_intervals,
+    subtract_intervals,
+)
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -38,7 +57,13 @@ from app.services.service_period_policy import (
 )
 
 _OWNER = "financial.outage_compensation"
-_POLICY_VERSION = 1
+_POLICY_VERSION = 2
+OUTAGE_REPAIR_SCOPE = "billing:prepaid_reconciliation:repair"
+_REVIEW_COMMAND = OwnerCommandDefinition(
+    owner=_OWNER,
+    concern="reviewed outage compensation recovery",
+    name="review_outage_compensation",
+)
 _APPLY_COMMAND = OwnerCommandDefinition(
     owner=_OWNER,
     concern="finalized outage service-period compensation",
@@ -66,12 +91,6 @@ def _utc(value: datetime) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class TimeInterval:
-    starts_at: datetime
-    ends_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class OutageCompensationPreview:
     account_id: UUID
     subscription_id: UUID
@@ -93,6 +112,7 @@ class ApplyOutageCompensationCommand:
     idempotency_key: str
     effective_at: datetime
     context: CommandContext
+    review_decision_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,49 +125,66 @@ class OutageCompensationResult:
     replayed: bool
 
 
-def merge_intervals(intervals: list[TimeInterval]) -> tuple[TimeInterval, ...]:
-    ordered = sorted(
-        (
-            TimeInterval(_utc(item.starts_at), _utc(item.ends_at))
-            for item in intervals
-            if item.ends_at > item.starts_at
-        ),
-        key=lambda item: (item.starts_at, item.ends_at),
-    )
-    merged: list[TimeInterval] = []
-    for item in ordered:
-        if not merged or item.starts_at > merged[-1].ends_at:
-            merged.append(item)
-            continue
-        previous = merged[-1]
-        merged[-1] = TimeInterval(
-            previous.starts_at, max(previous.ends_at, item.ends_at)
+@dataclass(frozen=True, slots=True)
+class ReviewOutageCompensationCommand:
+    subscription_id: UUID
+    review_decision_id: UUID
+    expected_fingerprint: str
+    effective_at: datetime
+    permission_granted: bool
+    actor_system_user_id: UUID
+
+
+def review_outage_compensation(
+    db: Session,
+    command: ReviewOutageCompensationCommand,
+    *,
+    context: CommandContext,
+) -> OutageCompensationResult:
+    def operation() -> OutageCompensationResult:
+        if not command.permission_granted or context.scope != OUTAGE_REPAIR_SCOPE:
+            raise _error(
+                "repair_permission_required",
+                "Prepaid reconciliation permission is required.",
+            )
+        if not context.idempotency_key or not context.reason.strip():
+            raise _error(
+                "idempotency_required", "A recovery key and reason are required."
+            )
+        result = _stage_outage_compensation(
+            db,
+            ApplyOutageCompensationCommand(
+                subscription_id=command.subscription_id,
+                expected_fingerprint=command.expected_fingerprint,
+                idempotency_key=context.idempotency_key,
+                effective_at=command.effective_at,
+                context=context,
+                review_decision_id=command.review_decision_id,
+            ),
         )
-    return tuple(merged)
+        if not result.replayed:
+            AuditEvents.stage(
+                db,
+                AuditEventCreate(
+                    actor_type=AuditActorType.user,
+                    actor_id=str(command.actor_system_user_id),
+                    actor_label=context.actor,
+                    action="outage_compensation.review_recovery",
+                    entity_type="outage_compensation_decision",
+                    entity_id=str(result.decision_id),
+                    metadata_={
+                        "review_decision_id": str(command.review_decision_id),
+                        "preview_fingerprint": command.expected_fingerprint,
+                        "reason": context.reason,
+                        "status": result.status.value,
+                    },
+                ),
+            )
+        return result
 
-
-def interval_seconds(intervals: tuple[TimeInterval, ...]) -> int:
-    return sum(
-        int((item.ends_at - item.starts_at).total_seconds()) for item in intervals
+    return execute_owner_command(
+        db, definition=_REVIEW_COMMAND, context=context, operation=operation
     )
-
-
-def intersect_seconds(
-    left: tuple[TimeInterval, ...], right: tuple[TimeInterval, ...]
-) -> int:
-    total = 0
-    left_index = 0
-    right_index = 0
-    while left_index < len(left) and right_index < len(right):
-        start = max(left[left_index].starts_at, right[right_index].starts_at)
-        end = min(left[left_index].ends_at, right[right_index].ends_at)
-        if end > start:
-            total += int((end - start).total_seconds())
-        if left[left_index].ends_at <= right[right_index].ends_at:
-            left_index += 1
-        else:
-            right_index += 1
-    return total
 
 
 def _policy(db: Session) -> OutageCompensationPolicy:
@@ -158,13 +195,14 @@ def _policy(db: Session) -> OutageCompensationPolicy:
 
 
 def _pending_cluster(
-    db: Session, subscription_id: UUID
+    db: Session, subscription_id: UUID, *, review_decision_id: UUID | None = None
 ) -> tuple[CustomerOutageInterval, ...]:
-    consumed = exists(
-        select(OutageCompensationDecisionInterval.id).where(
-            OutageCompensationDecisionInterval.customer_outage_interval_id
-            == CustomerOutageInterval.id
-        )
+    consumed = set(
+        db.scalars(
+            select(OutageCompensationDecisionInterval.customer_outage_interval_id)
+            .join(OutageCompensationDecision)
+            .where(OutageCompensationDecision.subscription_id == subscription_id)
+        ).all()
     )
     rows = list(
         db.scalars(
@@ -174,27 +212,54 @@ def _pending_cluster(
                 CustomerOutageInterval.state == "confirmed_unavailable",
                 CustomerOutageInterval.ended_at.is_not(None),
                 CustomerOutageInterval.finalized_at.is_not(None),
-                ~consumed,
             )
             .order_by(CustomerOutageInterval.started_at, CustomerOutageInterval.id)
         ).all()
     )
-    if not rows:
+    if review_decision_id is not None:
+        review = db.get(OutageCompensationDecision, review_decision_id)
+        if (
+            review is None
+            or review.subscription_id != subscription_id
+            or review.status is not OutageCompensationDecisionStatus.review_required
+            or review.resolved_by_decision_id is not None
+        ):
+            raise _error(
+                "review_invalid",
+                "An unresolved review decision for this service is required.",
+            )
+        review_ids = {item.customer_outage_interval_id for item in review.intervals}
+        pending = [row for row in rows if row.id in review_ids]
+    else:
+        pending = [row for row in rows if row.id not in consumed]
+    if not pending:
         return ()
-    cluster = [rows[0]]
-    cluster_end = _utc(rows[0].ended_at)  # type: ignore[arg-type]
-    for row in rows[1:]:
-        start = _utc(row.started_at)
-        if start > cluster_end:
-            break
-        cluster.append(row)
+    seed = pending[0]
+    if seed.exclusion_candidate is not None:
+        return (seed,)
+    # Include already decided evidence: a later source can bridge a previous
+    # below-threshold component or overlap seconds already compensated.
+    cluster: list[CustomerOutageInterval] = []
+    cluster_end: datetime | None = None
+    for row in rows:
+        if row.exclusion_candidate is not None:
+            continue
         assert row.ended_at is not None
-        cluster_end = max(cluster_end, _utc(row.ended_at))
+        if cluster_end is not None and _utc(row.started_at) > cluster_end:
+            if seed in cluster:
+                return tuple(cluster)
+            cluster = []
+        cluster.append(row)
+        cluster_end = max(_utc(item.ended_at) for item in cluster if item.ended_at)
     return tuple(cluster)
 
 
 def preview_outage_compensation(
-    db: Session, *, subscription_id: UUID, effective_at: datetime
+    db: Session,
+    *,
+    subscription_id: UUID,
+    effective_at: datetime,
+    review_decision_id: UUID | None = None,
 ) -> OutageCompensationPreview:
     policy = _policy(db)
     if not policy.enabled:
@@ -202,7 +267,7 @@ def preview_outage_compensation(
     subscription = db.get(Subscription, subscription_id)
     if subscription is None:
         raise _error("subscription_not_found", "Subscription was not found.")
-    rows = _pending_cluster(db, subscription_id)
+    rows = _pending_cluster(db, subscription_id, review_decision_id=review_decision_id)
     if not rows:
         raise _error("no_finalized_outage", "No finalized outage awaits a decision.")
     threshold = policy.minimum_seconds
@@ -228,7 +293,26 @@ def preview_outage_compensation(
     funded = merge_intervals(
         [TimeInterval(row.starts_at, row.ends_at) for row in funded_rows]
     )
-    funded_overlap = intersect_seconds(eligible, funded)
+    previous = list(
+        db.scalars(
+            select(OutageCompensationDecision).where(
+                OutageCompensationDecision.subscription_id == subscription_id,
+                OutageCompensationDecision.status
+                == OutageCompensationDecisionStatus.compensated,
+            )
+        ).all()
+    )
+    credited = merge_intervals(
+        [
+            TimeInterval(
+                datetime.fromisoformat(item[0]), datetime.fromisoformat(item[1])
+            )
+            for decision in previous
+            for item in (decision.policy_snapshot or {}).get("compensated_ranges", [])
+        ]
+    )
+    newly_funded = subtract_intervals(intersect_intervals(eligible, funded), credited)
+    funded_overlap = interval_seconds(newly_funded)
     tail_before = max((item.ends_at for item in funded), default=None)
     status = OutageCompensationDecisionStatus.compensated
     if not eligible:
@@ -242,18 +326,111 @@ def preview_outage_compensation(
         and _utc(subscription.next_billing_at) > tail_before
     ):
         status = OutageCompensationDecisionStatus.review_required
+    if (
+        subscription.billing_mode is not BillingMode.prepaid
+        or subscription.status is not SubscriptionStatus.active
+        or (tail_before is not None and tail_before <= _utc(effective_at))
+        or not any(
+            item.starts_at <= _utc(effective_at) < item.ends_at for item in funded
+        )
+        or any(
+            "compensated_ranges" not in (item.policy_snapshot or {})
+            for item in previous
+        )
+        or any(
+            row.quality != "exact" for row in rows if row.exclusion_candidate is None
+        )
+        or any(
+            row.ended_at is None
+            or _utc(row.ended_at) > _utc(effective_at)
+            or _utc(row.ended_at) <= _utc(row.started_at)
+            for row in rows
+        )
+    ):
+        status = OutageCompensationDecisionStatus.review_required
     tail_after = (
         tail_before + timedelta(seconds=funded_overlap)
         if status is OutageCompensationDecisionStatus.compensated
         and tail_before is not None
         else tail_before
     )
+    if (
+        subscription.end_at is not None
+        and tail_after is not None
+        and _utc(subscription.end_at) < tail_after
+    ):
+        status = OutageCompensationDecisionStatus.review_required
+        tail_after = tail_before
+    if tail_after is not None and (
+        db.scalar(
+            select(SubscriptionChangeRequest.id)
+            .where(
+                SubscriptionChangeRequest.subscription_id == subscription.id,
+                SubscriptionChangeRequest.is_active.is_(True),
+                SubscriptionChangeRequest.status.in_(
+                    [
+                        SubscriptionChangeStatus.pending,
+                        SubscriptionChangeStatus.approved,
+                    ]
+                ),
+                SubscriptionChangeRequest.effective_date <= tail_after.date(),
+            )
+            .limit(1)
+        )
+        is not None
+        or db.scalar(
+            select(SubscriptionLifecycleSchedule.id)
+            .where(
+                SubscriptionLifecycleSchedule.subscription_id == subscription.id,
+                SubscriptionLifecycleSchedule.status.in_(
+                    [
+                        SubscriptionLifecycleScheduleStatus.pending,
+                        SubscriptionLifecycleScheduleStatus.processing,
+                    ]
+                ),
+                SubscriptionLifecycleSchedule.effective_timing != "next_cycle",
+                SubscriptionLifecycleSchedule.effective_at < tail_after,
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        status = OutageCompensationDecisionStatus.review_required
+        tail_after = tail_before
+    consumed_ids = set(
+        db.scalars(
+            select(
+                OutageCompensationDecisionInterval.customer_outage_interval_id
+            ).where(
+                OutageCompensationDecisionInterval.customer_outage_interval_id.in_(
+                    [row.id for row in rows]
+                )
+            )
+        ).all()
+    )
     policy_snapshot: dict[str, object] = {
         "threshold_seconds": threshold,
+        "review_decision_id": str(review_decision_id) if review_decision_id else None,
         "duration_unit": "exact_seconds",
         "funding_cap": "outage_intersection_with_active_entitlements",
         "planned_maintenance": "exclude_explicit_candidates",
         "evaluated_at": _utc(effective_at).isoformat(),
+        "source_interval_ids": [str(row.id) for row in rows],
+        "funded_entitlement_ids": [
+            str(row.id)
+            for row in funded_rows
+            if _utc(row.ends_at) == tail_before
+            or intersect_seconds(
+                eligible, (TimeInterval(_utc(row.starts_at), _utc(row.ends_at)),)
+            )
+            > 0
+        ],
+        "compensated_ranges": [
+            [item.starts_at.isoformat(), item.ends_at.isoformat()]
+            for item in newly_funded
+        ]
+        if status is OutageCompensationDecisionStatus.compensated
+        else [],
     }
     payload = {
         "subscription_id": str(subscription_id),
@@ -280,7 +457,11 @@ def preview_outage_compensation(
         "funded_overlap_seconds": funded_overlap,
         "tail_before": tail_before.isoformat() if tail_before else None,
         "tail_after": tail_after.isoformat() if tail_after else None,
-        "policy": policy_snapshot,
+        "policy": {
+            key: value
+            for key, value in policy_snapshot.items()
+            if key != "evaluated_at"
+        },
         "policy_version": _POLICY_VERSION,
     }
     fingerprint = hashlib.sha256(
@@ -289,7 +470,7 @@ def preview_outage_compensation(
     return OutageCompensationPreview(
         account_id=subscription.subscriber_id,
         subscription_id=subscription.id,
-        interval_ids=tuple(row.id for row in rows),
+        interval_ids=tuple(row.id for row in rows if row.id not in consumed_ids),
         status=status,
         threshold_seconds=threshold,
         eligible_seconds=eligible_seconds,
@@ -322,6 +503,7 @@ def _stage_outage_compensation(
     if subscription is None:
         raise _error("subscription_not_found", "Subscription was not found.")
     lock_account(db, str(subscription.subscriber_id))
+    db.refresh(subscription, with_for_update=True)
     existing = db.scalar(
         select(OutageCompensationDecision).where(
             OutageCompensationDecision.idempotency_key == key
@@ -334,14 +516,19 @@ def _stage_outage_compensation(
             decision_id=existing.id,
             status=existing.status,
             entitlement_id=existing.entitlement_id,
-            compensated_seconds=existing.funded_overlap_seconds,
+            compensated_seconds=(
+                existing.funded_overlap_seconds
+                if existing.status is OutageCompensationDecisionStatus.compensated
+                else 0
+            ),
             tail_after=existing.tail_after,
             replayed=True,
         )
     preview = preview_outage_compensation(
         db,
         subscription_id=subscription.id,
-        effective_at=command.effective_at,
+        effective_at=max(_utc(command.effective_at), datetime.now(UTC)),
+        review_decision_id=command.review_decision_id,
     )
     if preview.fingerprint != command.expected_fingerprint:
         raise _error("stale_preview", "Outage evidence changed before application.")
@@ -430,6 +617,9 @@ def _stage_outage_compensation(
         db.flush()
         entitlement_id = entitlement.id
         decision.entitlement_id = entitlement.id
+        from app.services.subscription_lifecycle import resolve_subscription_lifecycle
+
+        previous_head = resolve_subscription_lifecycle(db, str(subscription.id)).head
         stage_subscription_billing_anchor(
             db,
             subscription,
@@ -451,16 +641,100 @@ def _stage_outage_compensation(
             previous_tail=preview.tail_before,
             extended_tail=preview.tail_after,
             evidence_ref=f"outage-compensation:{decision.id}",
+            expected_previous_head=previous_head,
         )
     db.flush()
+    if (
+        command.review_decision_id is not None
+        and decision.status is not OutageCompensationDecisionStatus.review_required
+    ):
+        original = db.get(OutageCompensationDecision, command.review_decision_id)
+        assert original is not None
+        original.resolved_by_decision_id = decision.id
+        db.flush()
     return OutageCompensationResult(
         decision_id=decision.id,
         status=decision.status,
         entitlement_id=entitlement_id,
-        compensated_seconds=decision.funded_overlap_seconds,
+        compensated_seconds=(
+            decision.funded_overlap_seconds
+            if decision.status is OutageCompensationDecisionStatus.compensated
+            else 0
+        ),
         tail_after=decision.tail_after,
         replayed=False,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RevokeOutageCompensationFundingCommand:
+    source_entitlement_ids: tuple[UUID, ...]
+    evidence_ref: str
+
+
+def stage_revoke_outage_compensation_funding(
+    db: Session, command: RevokeOutageCompensationFundingCommand
+) -> tuple[UUID, ...]:
+    """Retract dependent grants when the entitlement owner retracts funding."""
+    lost = {str(item) for item in command.source_entitlement_ids}
+    revoked: list[UUID] = []
+    if not lost:
+        return ()
+    if not command.evidence_ref.strip():
+        raise _error("review_invalid", "Funding-retraction evidence is required.")
+    reversed_sources = tuple(
+        db.scalars(
+            select(ServiceEntitlement)
+            .where(
+                ServiceEntitlement.id.in_(command.source_entitlement_ids),
+            )
+            .with_for_update()
+        ).all()
+    )
+    if len(reversed_sources) != len(set(command.source_entitlement_ids)) or any(
+        row.status is not ServiceEntitlementStatus.reversed for row in reversed_sources
+    ):
+        raise _error(
+            "review_invalid",
+            "Only confirmed reversed funding can retract compensation.",
+        )
+    subscription_ids = tuple(row.subscription_id for row in reversed_sources)
+    grants = list(
+        db.scalars(
+            select(ServiceEntitlement).where(
+                ServiceEntitlement.subscription_id.in_(subscription_ids),
+                ServiceEntitlement.status == ServiceEntitlementStatus.active,
+                ServiceEntitlement.source_outage_compensation_id.is_not(None),
+            )
+        ).all()
+    )
+    while True:
+        changed = False
+        for grant in grants:
+            if str(grant.id) in lost:
+                continue
+            decision = db.get(
+                OutageCompensationDecision, grant.source_outage_compensation_id
+            )
+            sources = (
+                set((decision.policy_snapshot or {}).get("funded_entitlement_ids", []))
+                if decision
+                else set()
+            )
+            if not sources or sources & lost:
+                grant.status = ServiceEntitlementStatus.reversed
+                grant.metadata_ = {
+                    **(grant.metadata_ or {}),
+                    "revoked_reason": "compensation_source_funding_retracted",
+                    "revoked_evidence_ref": command.evidence_ref,
+                }
+                revoked.append(grant.id)
+                lost.add(str(grant.id))
+                changed = True
+        if not changed:
+            break
+    db.flush()
+    return tuple(revoked)
 
 
 def consume_outage_compensation_event(
@@ -490,12 +764,6 @@ def consume_outage_compensation_event(
                     if exc.code == f"{_OWNER}.no_finalized_outage":
                         break
                     raise
-                if preview.status is OutageCompensationDecisionStatus.review_required:
-                    raise _error(
-                        "review_required",
-                        "Outage compensation cannot move an unresolved billing anchor.",
-                        subscription_id=str(subscription_id),
-                    )
                 result = _stage_outage_compensation(
                     db,
                     ApplyOutageCompensationCommand(
@@ -532,6 +800,8 @@ def consume_outage_compensation_event(
 
 
 __all__ = [
+    "ReviewOutageCompensationCommand",
+    "review_outage_compensation",
     "ApplyOutageCompensationCommand",
     "OutageCompensationError",
     "OutageCompensationPreview",
@@ -542,4 +812,6 @@ __all__ = [
     "intersect_seconds",
     "merge_intervals",
     "preview_outage_compensation",
+    "RevokeOutageCompensationFundingCommand",
+    "stage_revoke_outage_compensation_funding",
 ]

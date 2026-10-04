@@ -12,11 +12,10 @@ from app.models.catalog import (
     PriceBasis,
     ServiceType,
     Subscription,
-    SubscriptionStatus,
 )
 from app.models.network import OntAssignment, OntUnit
 from app.models.network_monitoring import CustomerOutageInterval
-from app.models.subscriber import Subscriber
+from app.models.subscriber import Reseller, Subscriber
 from app.services import customer_portal_flow_services
 from app.services.customer_device_commands import (
     CustomerDeviceCommandError,
@@ -27,13 +26,18 @@ from app.services.customer_device_commands import (
 from app.services.customer_portal_flow_services import get_service_detail
 from app.services.owner_commands import CommandContext
 from app.web.customer.branding import get_customer_templates
+from tests.subscription_fixture_helpers import activate_test_subscription
 
 
 def _active_subscription_with_ont(db_session):
+    reseller = Reseller(name="Portal test reseller")
+    db_session.add(reseller)
+    db_session.flush()
     subscriber = Subscriber(
         first_name="Portal",
         last_name="User",
         email="portal-device@example.com",
+        reseller_id=reseller.id,
     )
     offer = CatalogOffer(
         name="Portal Fiber",
@@ -48,7 +52,6 @@ def _active_subscription_with_ont(db_session):
     subscription = Subscription(
         subscriber_id=subscriber.id,
         offer_id=offer.id,
-        status=SubscriptionStatus.active,
     )
     ont = OntUnit(
         serial_number="PORTAL-ONT-001",
@@ -57,6 +60,7 @@ def _active_subscription_with_ont(db_session):
     )
     db_session.add_all([subscription, ont])
     db_session.flush()
+    activate_test_subscription(db_session, subscription)
     db_session.add(
         OntAssignment(
             ont_unit_id=ont.id,

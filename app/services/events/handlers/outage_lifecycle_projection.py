@@ -16,7 +16,7 @@ failed and retryable instead of a warning log.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -151,12 +151,7 @@ class OutageLifecycleProjectionHandler:
             )
             db_session_adapter.release_read_transaction(read_db)
 
-        resolved_at = event.payload.get("resolved_at")
-        effective_at = (
-            datetime.fromisoformat(str(resolved_at))
-            if resolved_at
-            else event.occurred_at
-        )
+        effective_at = datetime.now(UTC)
         for subscription_id in subscription_ids:
             context = CommandContext.system(
                 actor=str(event.actor or "system:outage_lifecycle_projection"),

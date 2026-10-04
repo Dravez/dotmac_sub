@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from starlette.datastructures import FormData
 
 from app.models.audit import AuditActorType
-from app.models.billing import InvoiceDueDateBasis, InvoiceStatus, TaxRate
+from app.models.billing import (
+    InvoiceDueDateBasis,
+    InvoiceStatus,
+    TaxApplication,
+    TaxRate,
+)
 from app.models.catalog import (
     AccessCredential,
     AddOn,
@@ -38,7 +43,6 @@ from app.models.catalog import (
     billing_cycle_suffix,
 )
 from app.models.domain_settings import DomainSetting, SettingDomain
-from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.event_store import EventStore
 from app.models.network import (
     IPAssignment,
@@ -84,7 +88,10 @@ from app.services.billing_adapter import (
     billing_adapter,
 )
 from app.services.billing_settings import resolve_payment_due_days
-from app.services.billing_tax_resolution import resolve_subscription_tax
+from app.services.billing_tax_resolution import (
+    resolve_catalog_price_tax,
+    resolve_subscription_tax,
+)
 from app.services.credential_crypto import decrypt_credential
 from app.services.ip_assignment_lifecycle import (
     IPv4ServedProjectionDecision,
@@ -104,6 +111,7 @@ from app.services.subscription_ipv4_projection import (
     SubscriptionServiceIPv4,
     resolve_subscription_service_ipv4,
 )
+from app.services.subscription_lifecycle import resolve_subscription_pause_detail
 from app.timezone import APP_TIMEZONE_NAME, format_in_app_timezone
 
 logger = logging.getLogger(__name__)
@@ -3296,13 +3304,17 @@ def create_invoice_for_subscription(db: Session, created: Subscription) -> None:
     offer = catalog_service.offers.get(db=db, offer_id=str(created.offer_id))
     line_amount = Decimal("0.00")
     line_description = "Subscription"
+    price_tax_application = TaxApplication.exclusive
     if offer:
         line_description = offer.name
         if offer.prices:
             line_amount = offer.prices[0].amount or Decimal("0.00")
+            price_tax_application = offer.prices[0].tax_application
 
     subscriber = db.get(Subscriber, created.subscriber_id)
-    tax_resolution = resolve_subscription_tax(db, created)
+    tax_resolution = resolve_catalog_price_tax(
+        resolve_subscription_tax(db, created), price_tax_application
+    )
     issued_at = datetime.now(UTC)
     due_days = resolve_payment_due_days(db, subscriber=subscriber)
     billing_adapter.create_invoice_with_lines(
@@ -3727,25 +3739,45 @@ def _subscription_radius_sync_evidence(
 def _subscription_vacation_hold(
     db: Session, subscription: Subscription
 ) -> dict[str, object] | None:
-    """Get active vacation hold (customer_hold) info for a subscription.
+    """Get the active customer-vacation pause cause for a subscription.
 
     Returns None if no active vacation hold exists.
     """
-    lock = (
-        db.query(EnforcementLock)
-        .filter(EnforcementLock.subscription_id == subscription.id)
-        .filter(EnforcementLock.reason == EnforcementReason.customer_hold)
-        .filter(EnforcementLock.is_active.is_(True))
-        .first()
+    from app.models.subscription_pause import SubscriptionPauseReason
+
+    detail = resolve_subscription_pause_detail(
+        db, subscription.id, reason=SubscriptionPauseReason.customer_vacation_hold
     )
-    if not lock:
+    if detail is None:
         return None
     return {
-        "lock_id": str(lock.id),
-        "created_at": lock.created_at,
-        "resume_at": lock.resume_at,
-        "notes": lock.notes,
-        "source": lock.source,
+        "pause_cause_id": str(detail.cause_id),
+        "pause_episode_id": str(detail.episode_id),
+        "created_at": detail.effective_at,
+        "resume_at": detail.scheduled_resume_at,
+        "notes": "Customer-requested vacation hold",
+        "source": detail.source_id,
+    }
+
+
+def _subscription_administrative_pause(
+    db: Session, subscription: Subscription
+) -> dict[str, object] | None:
+    """Return the exact active administrative pause cause, when present."""
+
+    from app.models.subscription_pause import SubscriptionPauseReason
+
+    detail = resolve_subscription_pause_detail(
+        db, subscription.id, reason=SubscriptionPauseReason.administrative
+    )
+    if detail is None:
+        return None
+    return {
+        "pause_cause_id": str(detail.cause_id),
+        "pause_episode_id": str(detail.episode_id),
+        "created_at": detail.effective_at,
+        "previous_next_billing_at": detail.previous_next_billing_at,
+        "source": detail.source_id,
     }
 
 
@@ -3973,6 +4005,7 @@ def subscription_detail_context(
     enforcement_state = _subscription_enforcement_state(db, subscription)
     external_radius_rows = _subscription_external_radius_rows(db, credential)
     vacation_hold = _subscription_vacation_hold(db, subscription)
+    administrative_pause = _subscription_administrative_pause(db, subscription)
     return {
         "access_credential": credential,
         "password_sync": password_sync,
@@ -3996,6 +4029,7 @@ def subscription_detail_context(
         "enforcement_state": enforcement_state,
         "external_radius_rows": external_radius_rows,
         "vacation_hold": vacation_hold,
+        "administrative_pause": administrative_pause,
     }
 
 

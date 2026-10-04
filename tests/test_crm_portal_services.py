@@ -586,7 +586,10 @@ def test_profile_save_preserves_undeclared_historical_metadata(
     db_session: Session, subscriber: Subscriber
 ) -> None:
     """Frozen import provenance survives a live profile/preferences save."""
-    from app.services.web_customer_actions import update_customer_profile
+    from app.services.web_customer_actions import (
+        UpdateCustomerProfileCommand,
+        update_customer_profile,
+    )
 
     historical = {
         "crm_billing_snapshot": {"balance": "1200.00"},
@@ -602,18 +605,21 @@ def test_profile_save_preserves_undeclared_historical_metadata(
     subscriber.metadata_ = dict(historical)
     db_session.commit()
 
-    updated = update_customer_profile(
+    outcome = update_customer_profile(
         db_session,
-        subscriber_id=str(subscriber.id),
-        first_name="Updated",
-        last_name="Customer",
-        email=subscriber.email,
-        phone="+2348000000012",
-        billing_notifications=False,
-        sms_updates=True,
+        command=UpdateCustomerProfileCommand(
+            subscriber_id=subscriber.id,
+            first_name="Updated",
+            last_name="Customer",
+            email=subscriber.email,
+            phone="+2348000000012",
+            billing_notifications=False,
+            sms_updates=True,
+        ),
     )
 
-    assert updated is not None
+    assert outcome is not None
+    updated = outcome.subscriber
     assert updated.first_name == "Updated"
     assert updated.phone == "+2348000000012"
     assert {key: (updated.metadata_ or {}).get(key) for key in historical} == historical

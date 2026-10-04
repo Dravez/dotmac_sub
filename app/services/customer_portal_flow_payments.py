@@ -1943,18 +1943,6 @@ def create_service_period_purchase_intent(
         provider_type=route.provider_type.value,
         capability_binding_id=route.capability_binding_id,
     )
-    reservation: IdempotencyKey | None = None
-    if selected_method is not None:
-        reservation, replayed = _reserve_charge_idempotency_key(
-            db,
-            scope=_PERIOD_PURCHASE_CHARGE_IDEMPOTENCY_SCOPE,
-            key=key,
-            account_id=account_id,
-            replay=lambda ref_id: _topup_intent_replay(db, ref_id),
-        )
-        if replayed is not None:
-            return replayed
-    reservation_id = reservation.id if reservation else None
     db_session_adapter.release_read_transaction(db)
     intent_result = gateway_topup_intents.create_customer_gateway_topup_intent(
         db,
@@ -1977,41 +1965,32 @@ def create_service_period_purchase_intent(
             idempotency_key=key,
         ),
     )
+    if intent_result.replayed:
+        replay = _topup_intent_replay(db, str(intent_result.intent_id))
+        if replay is None:
+            raise ValueError("Existing purchase checkout requires billing review")
+        return {
+            **replay,
+            "purchase_id": str(purchase.id),
+            "verification_required": True,
+        }
     checkout_metadata = {"topup_intent_id": str(intent_result.intent_id)}
     charged = False
     if selected_method is not None:
-        try:
-            payment_capability.charge_authorization(
-                db,
-                authorization_code=selected_token,
-                email=customer_email,
-                amount_kobo=payment_capability.amount_to_kobo(
-                    intent_result.requested_amount
-                ),
-                reference=intent_result.reference,
-                metadata=checkout_metadata,
-                checkout_binding_id=route.capability_binding_id,
-            )
-        except Exception:
-            db_session_adapter.release_read_transaction(db)
-            gateway_topup_intents.fail_saved_card_charge(
-                db,
-                gateway_topup_intents.FailSavedCardChargeCommand(
-                    intent_id=intent_result.intent_id,
-                    reservation_id=reservation_id,
-                    reservation_scope=(
-                        gateway_topup_intents.SavedCardChargeScope.prepaid_period_purchase
-                    ),
-                ),
-                context=CommandContext.system(
-                    actor=f"customer:{created_by}",
-                    scope=gateway_topup_intents.FAIL_SAVED_CARD_SCOPE,
-                    reason="Record failed saved-card period purchase charge",
-                ),
-            )
-            raise
+        # The durable intent exists before the external call. A timeout remains
+        # unknown and retry routes to verification, never a second card charge.
+        payment_capability.charge_authorization(
+            db,
+            authorization_code=selected_token,
+            email=customer_email,
+            amount_kobo=payment_capability.amount_to_kobo(
+                intent_result.requested_amount
+            ),
+            reference=intent_result.reference,
+            metadata=checkout_metadata,
+            checkout_binding_id=route.capability_binding_id,
+        )
         charged = True
-        _commit_charge_idempotency_ref(db, reservation, str(intent_result.intent_id))
     checkout_url = None
     if not charged:
         checkout_url = initialize_hosted_checkout(
@@ -2073,6 +2052,7 @@ def verify_and_settle_service_period_purchase(
             currency=tx.currency,
             effective_at=datetime.now(UTC),
             completion_source=TopupIntentCompletionSource.customer_period_purchase_verify,
+            provider_paid_at=tx.paid_at,
         ),
         context=CommandContext.system(
             actor=f"customer:{account_id}",
@@ -2089,6 +2069,8 @@ def verify_and_settle_service_period_purchase(
         "invoice_ids": settlement.invoice_ids,
         "entitlement_ids": settlement.entitlement_ids,
         "coverage_ends_at": settlement.coverage_ends_at,
+        "settlement_status": settlement.status.value,
+        "failure_code": settlement.failure_code,
         "already_recorded": settlement.replayed,
         "provider_type": provider_type,
         "reference": reference,

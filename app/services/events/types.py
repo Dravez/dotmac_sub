@@ -80,6 +80,11 @@ class EventType(enum.Enum):
     invoice_created = "invoice.created"
     invoice_sent = "invoice.sent"
     invoice_paid = "invoice.paid"
+    communication_intent_planned = "communication_intent.planned"
+    payment_template_published = "payment_template.published"
+    payment_email_cutover_activated = "payment_email_cutover.activated"
+    payment_email_composition_paused = "payment_email_composition.paused"
+    payment_email_source_collected = "payment_email_source.collected"
     invoice_overdue = "invoice.overdue"
     invoice_discount_applied = "invoice.discount_applied"
     invoice_discount_changed = "invoice.discount_changed"
@@ -325,6 +330,7 @@ class EventType(enum.Enum):
     network_map_asset_change_applied = "network_map_asset_change.applied"
     network_map_asset_change_rejected = "network_map_asset_change.rejected"
     network_map_kmz_import_staged = "network_map.kmz_import_staged"
+    network_map_kmz_classification_reviewed = "network_map.kmz_classification_reviewed"
 
     # OLT events (3)
     olt_created = "olt.created"

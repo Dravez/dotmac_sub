@@ -342,8 +342,12 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Open or update a ticket when the issue needs tracked follow-up or field work.",
         "For a shared outage, open Network → Outages and select Create infrastructure ticket on the open outage row before issuing field work.",
         "The infrastructure ticket has no subscriber and is linked to the outage; use the linked ticket and the outage row Resolve action for canonical follow-up.",
+        "On Network Map, use Import Map to stage a KML or KMZ file for review, or Export Map to download the permitted layers; staging does not change the canonical map.",
+        "Review each staged feature's name, geometry, suggested asset type, and blocker; correct classifications before submission.",
+        "Submit eligible new point assets into the existing proposal review. Route geometry and other blocked features stay staged until their separate review is complete.",
         notes=(
             "Billing locks and lifecycle state can also affect access; check Service and Billing as well.",
+            "Map imports accept optional asset IDs when available and keep unsupported or sensitive features blocked for review.",
         ),
         route_templates=("/admin/network",),
     ),
@@ -656,8 +660,12 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         ("/admin/billing/payment-proofs",),
         "Compare the receipt and claimed transfer with bank evidence and duplicate warnings.",
         "Verify and record the confirmed amount, or reject with a clear reason.",
+        "Verified customer payments are automatically applied to the oldest eligible issued, partially paid, or overdue invoices; reviewers cannot keep usable credit unapplied while eligible debt remains.",
         "Check the resulting proof, payment, invoice, and Billing tab.",
-        notes=("Never verify a transfer from the image alone.",),
+        notes=(
+            "Never verify a transfer from the image alone.",
+            "Paying historical prepaid debt settles that receivable without moving its recorded period or restoring current service; current renewals retain their normal service effects.",
+        ),
     ),
     _guide(
         "payment-reconciliation",
@@ -992,6 +1000,12 @@ HELP_ONLY_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Review delivery failure evidence before retrying or canceling a queued notification.",
         "Before a controlled payment email adoption, review the receipt and invoice-paid comparison report, including both template IDs, purpose, conditions, and active state.",
         "An authorized operator can copy both reviewed payment email templates once, then rerun the comparison. Resolve conflicts before retrying; customer delivery uses the current templates until the separate cutover.",
+        notes=(
+            "After the reviewed payment email cutover, Template Studio's published versions own receipt and invoice-paid email wording. The old email content is sealed; notification purpose, conditions, and active routing remain in Sub.",
+            "Payment email publication is an authorized operator API operation, not a control on this page. It requires the expected published version; reload and review the current version if another publication changed it.",
+            "One eligible receipt and invoice-paid notice proved to come from the same payment may share one email. Collection can wait up to 60 seconds and delivery still observes quiet hours. The receipt reference and link remain in the email; payment SMS is sent individually.",
+            "The authorized one-way composition pause stops new pairing and its invoice-paid producer. Already queued payment emails finish with their frozen content and source coverage. Template Studio remains the email content owner, old content stays sealed, and pause does not restore or resume the legacy email path.",
+        ),
     ),
     _guide(
         "provisioning",
@@ -1170,6 +1184,19 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             "Confirm infrastructure ticket follow-up",
             3,
             permission="support:ticket:create",
+        ),
+        _action("transfer-network-map", "Import or export a Network Map file", 4),
+        _action(
+            "review-network-map-import",
+            "Review staged map features",
+            5,
+            permission="network:fiber:import",
+        ),
+        _action(
+            "submit-network-map-import",
+            "Submit eligible point proposals",
+            6,
+            permission="network:fiber:import",
         ),
     ),
     "olt-operational-health": (
@@ -1404,9 +1431,10 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             "decide-payment-proof",
             "Verify or reject payment proof",
             1,
+            2,
             permission="billing:proof:verify",
         ),
-        _action("verify-proof-result", "Verify the resulting records", 2),
+        _action("verify-proof-result", "Verify the resulting records", 3),
     ),
     "payment-reconciliation": (
         _action("filter-reconciliation", "Filter reconciliation evidence", 0),

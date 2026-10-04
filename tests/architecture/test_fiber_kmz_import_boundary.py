@@ -136,6 +136,68 @@ def test_staging_owner_cannot_construct_or_delete_canonical_assets() -> None:
 
     assert "FiberTopologySourceBatch(" in source
     assert "FiberTopologyStagedFeature(" in source
+    assert '"mixed_network_map": FiberSourceProfile(' in source
+    assert "_MIXED_GEOMETRY_TYPES" in source
+    assert "_MIXED_SAFE_PROPERTY_KEYS" in source
+
+
+def test_mixed_network_map_import_is_staging_evidence_only() -> None:
+    source = STAGING_OWNER.read_text(encoding="utf-8")
+    transfer = (
+        PROJECT_ROOT / "app" / "services" / "network_map_transfer.py"
+    ).read_text(encoding="utf-8")
+
+    assert "preview_uploaded_fiber_source(" in transfer
+    assert "persist_fiber_preview(" in transfer
+    assert "_stage_network_map_kmz" in transfer
+    assert 'suffix not in {".kml", ".kmz"}' in transfer
+    assert "_external_icon_url" in source
+    assert "urlsplit(" in source
+    for network_fetch in (
+        "requests.get(",
+        "httpx.get(",
+        "urlopen(",
+        "create_connection(",
+        "getaddrinfo(",
+    ):
+        assert network_fetch not in source
+    for constructor in (
+        "FdhCabinet(",
+        "FiberAccessPoint(",
+        "FiberSegment(",
+        "FiberSpliceClosure(",
+        "ServiceBuilding(",
+    ):
+        assert constructor not in source
+        assert constructor not in transfer
+
+
+def test_import_classification_is_append_only_and_handoff_uses_review_api() -> None:
+    model = (PROJECT_ROOT / "app" / "models" / "fiber_topology_staging.py").read_text(
+        encoding="utf-8"
+    )
+    migration = (
+        PROJECT_ROOT
+        / "alembic"
+        / "versions"
+        / "642_network_map_import_feature_classification.py"
+    ).read_text(encoding="utf-8")
+    transfer_ui = (
+        PROJECT_ROOT / "static" / "js" / "admin" / "network_map_transfer.js"
+    ).read_text(encoding="utf-8")
+    transfer_owner = (
+        PROJECT_ROOT / "app" / "services" / "network_map_transfer.py"
+    ).read_text(encoding="utf-8")
+
+    assert "class FiberTopologyFeatureClassificationReview" in model
+    assert "fiber_topology_feature_classification_reviews" in migration
+    assert "BEFORE UPDATE OR DELETE" in migration
+    assert "network-map-import-apply" in transfer_ui
+    assert "network/map-v2/proposals" in transfer_ui
+    assert "proposal_eligibility === 'eligible'" in transfer_ui
+    assert 'if feature.geometry_type != "Point":' in transfer_owner
+    assert 'if plan.match_status != "new":' in transfer_owner
+    assert "currentFeatures" in transfer_ui
 
 
 def test_identity_owner_projects_creates_through_fiber_change_requests() -> None:

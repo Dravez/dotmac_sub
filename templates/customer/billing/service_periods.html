@@ -54,11 +54,19 @@
 <script>
 (() => {
     let quote = null;
+    let idempotencyKey = null;
+    let paymentPending = false;
     const error = document.getElementById('period-error');
     const showError = message => { error.textContent = message; error.classList.remove('hidden'); };
     const payload = () => ({
         subscription_id: document.getElementById('subscription-id').value,
         period_count: Number(document.getElementById('period-count').value),
+    });
+    ['subscription-id', 'period-count', 'provider', 'payment-method-id'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            quote = null;
+            document.getElementById('period-preview').classList.add('hidden');
+        });
     });
     document.getElementById('preview-button').addEventListener('click', async () => {
         error.classList.add('hidden');
@@ -67,6 +75,13 @@
         });
         const data = await response.json();
         if (!response.ok) return showError(data.detail || 'Unable to prepare quote.');
+        const storageKey = `dotmac-period-purchase:${payload().subscription_id}:${data.preview_fingerprint}`;
+        try {
+            idempotencyKey = sessionStorage.getItem(storageKey) || crypto.randomUUID();
+            sessionStorage.setItem(storageKey, idempotencyKey);
+        } catch (error) {
+            if (!quote || quote.preview_fingerprint !== data.preview_fingerprint) idempotencyKey = crypto.randomUUID();
+        }
         quote = data;
         document.getElementById('preview-subtotal').textContent = `${data.currency} ${Number(data.subtotal).toLocaleString()}`;
         document.getElementById('preview-tax').textContent = `${data.currency} ${Number(data.tax_total).toLocaleString()}`;
@@ -77,8 +92,11 @@
         document.getElementById('period-preview').classList.remove('hidden');
     });
     document.getElementById('pay-button').addEventListener('click', async () => {
-        if (!quote) return;
-        const idempotencyKey = crypto.randomUUID();
+        if (!quote || paymentPending) return;
+        paymentPending = true;
+        const payButton = document.getElementById('pay-button');
+        payButton.disabled = true;
+        try {
         const body = {...payload(), preview_fingerprint: quote.preview_fingerprint, provider: document.getElementById('provider').value, idempotency_key: idempotencyKey};
         const method = document.getElementById('payment-method-id');
         if (method && method.value) body.payment_method_id = method.value;
@@ -86,10 +104,24 @@
             method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey}, body: JSON.stringify(body)
         });
         const data = await response.json();
-        if (!response.ok) return showError(data.detail || 'Unable to start payment.');
-        if (data.charged) window.location.href = `/portal/billing/service-periods/verify?reference=${encodeURIComponent(data.reference)}&provider=${encodeURIComponent(data.provider_type)}`;
+        if (!response.ok) {
+            if (data.retry_with_new_quote) {
+                try { sessionStorage.removeItem(`dotmac-period-purchase:${body.subscription_id}:${body.preview_fingerprint}`); } catch (error) {}
+                idempotencyKey = null;
+                quote = null;
+                document.getElementById('period-preview').classList.add('hidden');
+            }
+            return showError(data.detail || 'Unable to start payment.');
+        }
+        if (data.charged || data.verification_required) window.location.href = `/portal/billing/service-periods/verify?reference=${encodeURIComponent(data.reference)}&provider=${encodeURIComponent(data.provider_type)}`;
         else if (data.checkout_url) window.location.href = data.checkout_url;
         else showError('Payment provider did not return a checkout link.');
+        } catch (error) {
+            showError('Unable to confirm checkout. Retry to check the existing payment.');
+        } finally {
+            paymentPending = false;
+            payButton.disabled = false;
+        }
     });
 })();
 </script>
