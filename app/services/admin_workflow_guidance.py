@@ -1071,14 +1071,24 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
         _action("choose-automation-event", "Choose a module and event", 2),
         _action("save-automation-workflow", "Save a workflow draft", 3),
         _action("create-automation-client-script", "Create a client script draft", 4),
-        _action("create-automation-server-script", "Create a server script draft", 5),
+        _action(
+            "inspect-automation-script",
+            "Inspect the active script and draft version",
+            5,
+        ),
+        _action(
+            "control-automation-script-lifecycle",
+            "Publish, pause, resume, or retire a script",
+            6,
+        ),
+        _action("create-automation-server-script", "Create a server script draft", 7),
         _action(
             "review-automation-runtime-boundary",
             "Review isolated runtime and owner-command limits",
-            6,
+            8,
         ),
-        _action("review-automation-runs", "Review run history and failure details", 7),
-        _action("retry-automation-run", "Continue a failed automation run", 8),
+        _action("review-automation-runs", "Review run history and failure details", 9),
+        _action("retry-automation-run", "Continue a failed automation run", 10),
     ),
     "custom-fields-center": (
         _action("review-custom-field-access", "Review custom-field access", 0),

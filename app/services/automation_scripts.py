@@ -672,6 +672,7 @@ def list_scripts(
         )
         .order_by(desc(AutomationScriptVersion.version))
         .limit(1)
+        .correlate(AutomationScript)
         .scalar_subquery()
     )
     rows = db.execute(
