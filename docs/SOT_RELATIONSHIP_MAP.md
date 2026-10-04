@@ -2371,6 +2371,13 @@ Payment creation, settlement, and allocation are one coherent owner contract:
   `financial.prepaid_service_coverage_reconciliation`, which creates missing
   entitlement evidence from an exact existing debit or paid invoice line and
   quarantines ambiguity without posting money.
+- Purchase settlement rejection boundary: `financial.prepaid_period_purchases`
+  consumes domain errors from invoice, allocation, and payment participants.
+  `finalize_invoice_application_for_owner` translates legacy HTTP validation
+  into `financial.payments.invoice_application_rejected`; infrastructure errors
+  propagate. A rejected optional consequence rolls back all period documents
+  through the owner-managed savepoint while confirmed purchase cash and review
+  evidence remain durable. Retry reuses the selected receipt.
 - Prepaid settlement calendar boundary: a calendar-month prepaid settlement
   begins after exact uninterrupted coverage; a lapsed replacement begins on
   the payment's `Africa/Lagos` calendar date, not its UTC date. A catalogue

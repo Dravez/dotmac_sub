@@ -550,6 +550,7 @@ def test_domain_sot_relationships_encode_cross_domain_dependencies():
         "financial.account_credit_deposits",
         "financial.payment_gateway_finance",
         "financial.payments",
+        "financial.prepaid_period_purchases",
         "financial.payment_provider_events",
         "financial.topup_intents",
         "observability.audit_log",

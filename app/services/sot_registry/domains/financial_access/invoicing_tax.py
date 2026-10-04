@@ -242,6 +242,14 @@ SERVICES: tuple[SOTService, ...] = (
             "financial.billing_accounts",
             "events.dispatcher",
         ),
+        notes=(
+            "The flush-only finalize_invoice_application_for_owner participant "
+            "translates legacy HTTP validation into the non-retryable domain "
+            "error financial.payments.invoice_application_rejected. Composing "
+            "owners can retain captured money while rolling back rejected "
+            "invoice consequences in an owner-managed savepoint; infrastructure "
+            "errors propagate for whole-command retry."
+        ),
     ),
     SOTService(
         name="financial.import_payment_batch_reversals",

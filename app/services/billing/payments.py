@@ -1489,6 +1489,23 @@ def finalize_invoice_application_for_owner(
 ) -> None:
     """Flush-only participant for a typed non-Payment invoice application."""
 
+    try:
+        _finalize_invoice_application(db, invoice, effective_at=effective_at)
+    except HTTPException as exc:
+        raise DomainError(
+            code="financial.payments.invoice_application_rejected",
+            message="Payment owner rejected invoice application finalization.",
+            details={"invoice_id": str(invoice.id), "reason": str(exc.detail)},
+            retryable=False,
+        ) from exc
+
+
+def _finalize_invoice_application(
+    db: Session,
+    invoice: Invoice,
+    *,
+    effective_at: datetime,
+) -> None:
     decision = resolve_payment_allocation_finalization(db, invoice)
     if decision.mode is PaymentAllocationFinalizationMode.historical_debt:
         _finalize_historical_debt_payment_effects(db, invoice)

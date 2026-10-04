@@ -13,6 +13,9 @@
   allocation, entitlement, anchor, and intent-completion consequence uses the
   owner savepoint. A rejected consequence leaves no partial service documents;
   confirmed money and a `review_required` purchase remain durable together.
+  Invoice construction, issuance, allocation, and payment finalization expose
+  typed domain errors to this owner. Legacy HTTP validation is translated at
+  the billing participant boundary before the purchase savepoint handles it.
   Infrastructure/database errors roll back the command for whole-command retry.
   The selected payment may fund only its purchase invoices.
 - Cancellation is scheduled at the final paid-through boundary. Purchased

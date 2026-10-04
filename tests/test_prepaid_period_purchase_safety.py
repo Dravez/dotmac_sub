@@ -3,9 +3,11 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib import import_module
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from app.models.billing import (
@@ -37,6 +39,8 @@ from tests.prepaid_funding_helpers import (
     ensure_test_prepaid_contract,
     materialize_test_prepaid_opening_balance,
 )
+
+payment_service = import_module("app.services.billing.payments")
 
 
 def _context() -> CommandContext:
@@ -208,6 +212,81 @@ def test_intent_completion_failure_holds_cash_and_rolls_back_all_periods(
     assert db_session.scalar(select(func.count(Invoice.id))) == 0
     assert db_session.scalar(select(func.count(ServiceEntitlement.id))) == 0
     assert db_session.get(TopupIntent, command.intent_id).status == "pending"
+
+
+@pytest.mark.parametrize(
+    ("participant", "method", "failure_code"),
+    [
+        (
+            purchases.Invoices,
+            "stage_system_invoice",
+            "financial.prepaid_period_purchases.settlement_rejected",
+        ),
+        (
+            purchases.InvoiceLines,
+            "stage_system_line",
+            "financial.prepaid_period_purchases.settlement_rejected",
+        ),
+        (
+            purchases.Invoices,
+            "issue_draft_system",
+            "financial.prepaid_period_purchases.settlement_rejected",
+        ),
+        (
+            payment_service,
+            "_finalize_invoice_application",
+            "financial.payments.invoice_application_rejected",
+        ),
+    ],
+    ids=["invoice", "line", "issuance", "payment-finalization"],
+)
+def test_legacy_participant_rejection_preserves_cash_and_allows_exact_retry(
+    db_session, purchase_setup, monkeypatch, participant, method, failure_code
+):
+    purchase_id, _, command = purchase_setup
+    original = getattr(participant, method)
+    calls = 0
+
+    def reject_second_period(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise HTTPException(status_code=409, detail="Legacy billing validation")
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(participant, method, reject_second_period)
+        held = purchases.settle_verified_prepaid_period_purchase(
+            db_session, command, context=_context()
+        )
+    assert calls == 2
+    assert held.status is PrepaidPeriodPurchaseStatus.review_required
+    assert held.failure_code == failure_code
+    # The first period was fully staged before rejection of the second. Verify
+    # the committed result from a new transaction, not the identity map alone.
+    db_session.rollback()
+    purchase = db_session.get(PrepaidPeriodPurchase, purchase_id)
+    assert purchase.payment_id == held.payment_id
+    assert purchase.failure_code == failure_code
+    assert db_session.scalar(select(func.count(Payment.id))) == 1
+    assert db_session.scalar(select(func.count(Invoice.id))) == 0
+    assert db_session.scalar(select(func.count(ServiceEntitlement.id))) == 0
+    assert db_session.get(TopupIntent, command.intent_id).status == "pending"
+    assert (
+        get_reserved_purchase_credit_balance(db_session, purchase.account_id)
+        == command.amount
+    )
+    assert get_spendable_account_credit_balance(
+        db_session, str(purchase.account_id)
+    ) == Decimal("0.00")
+    db_session.rollback()
+    completed = purchases.settle_verified_prepaid_period_purchase(
+        db_session, command, context=_context()
+    )
+    assert completed.status is PrepaidPeriodPurchaseStatus.completed
+    assert completed.payment_id == held.payment_id
+    assert len(completed.invoice_ids) == len(completed.entitlement_ids) == 2
+    assert db_session.scalar(select(func.count(Payment.id))) == 1
 
 
 def test_purchase_settles_exactly_once_and_rounds_each_invoice(

@@ -11,7 +11,6 @@ from enum import StrEnum
 from typing import TypedDict
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -1020,14 +1019,10 @@ def stage_verified_prepaid_period_purchase(
 
     try:
         settlement = execute_owner_savepoint(db, settle_and_complete)
-    except (DomainError, HTTPException) as exc:
+    except DomainError as exc:
         db.refresh(purchase)
         purchase.status = PrepaidPeriodPurchaseStatus.review_required
-        failure_code = (
-            exc.code
-            if isinstance(exc, DomainError)
-            else f"{_OWNER}.settlement_rejected"
-        )
+        failure_code = exc.code
         purchase.failure_code = failure_code
         AuditEvents.stage(
             db,
