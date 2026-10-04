@@ -449,6 +449,54 @@ class TestCollectionsTask:
                     "credit_applied": "0.00",
                 }
 
+    def test_run_billing_enforcement_marks_credit_failures_in_operational_event(self):
+        from datetime import UTC, datetime
+
+        from app.schemas.collections import BillingEnforcementRunResponse
+        from app.services.operational_logging import OperationalOutcome
+
+        mock_session = MagicMock()
+
+        with (
+            patch(
+                "app.services.collections.scheduled.SessionLocal",
+                return_value=mock_session,
+            ),
+            patch(
+                "app.services.collections.scheduled.billing_enforcement_reconciler.run",
+                return_value=BillingEnforcementRunResponse(
+                    run_at=datetime.now(UTC),
+                    accounts_scanned=7,
+                    cases_created=3,
+                    actions_created=2,
+                    skipped=1,
+                    dunning_accounts_scanned=7,
+                    dunning_cases_created=3,
+                    dunning_actions_created=2,
+                    dunning_skipped=1,
+                    credit_accounts_scanned=4,
+                    credit_accounts_settled=2,
+                    credit_invoices_touched=3,
+                    credit_settlement_errors=1,
+                    credit_applied="10.00",
+                ),
+            ),
+            patch(
+                "app.services.collections.scheduled.log_operational_event"
+            ) as log_event,
+        ):
+            from app.tasks.collections import run_billing_enforcement
+
+            run_billing_enforcement()
+
+        event = log_event.call_args.args[1]
+        assert event.outcome == OperationalOutcome.COMPLETED_WITH_FAILURES
+        assert event.counters["credit_accounts_scanned"] == 4
+        assert event.counters["credit_accounts_settled"] == 2
+        assert event.counters["credit_invoices_touched"] == 3
+        assert event.counters["credit_settlement_errors"] == 1
+
+
     def test_run_billing_enforcement_exception_closes_session(self):
         """Test exception still closes session."""
         mock_session = MagicMock()
