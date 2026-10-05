@@ -35,7 +35,6 @@ from app.services.sot_registry.domains.sales_referrals.referrals import (
 )
 from app.services.sot_registry.model import DomainSOT
 
-
 _LEAD_STATUS_VALUES = (
     "new",
     "contacted",
@@ -106,6 +105,7 @@ def _decimal_field(key: str, label: str) -> AutomationConditionField:
             AutomationOperator.less_than_or_equal,
         ),
     )
+
 
 DOMAIN = DomainSOT(
     domain="sales_referrals",
@@ -331,9 +331,7 @@ DOMAIN = DomainSOT(
                     _enum_field(
                         "from_status", "Previous order status", _ORDER_STATUS_VALUES
                     ),
-                    _enum_field(
-                        "to_status", "New order status", _ORDER_STATUS_VALUES
-                    ),
+                    _enum_field("to_status", "New order status", _ORDER_STATUS_VALUES),
                     _uuid_field("cx_handoff_id", "Customer-experience handoff"),
                 ),
                 author_permission="crm:sales_order:read",
@@ -366,7 +364,11 @@ DOMAIN = DomainSOT(
                 entity_id_field="quote_id",
                 fields=(
                     _enum_field("status", "Quote status", _QUOTE_STATUS_VALUES),
-                    _enum_field("payment_review_status", "Payment review status", _PAYMENT_REVIEW_VALUES),
+                    _enum_field(
+                        "payment_review_status",
+                        "Payment review status",
+                        _PAYMENT_REVIEW_VALUES,
+                    ),
                 ),
                 author_permission="crm:quote:read",
                 runtime_enabled=True,
@@ -383,7 +385,11 @@ DOMAIN = DomainSOT(
                 entity_id_field="sales_order_id",
                 fields=(
                     _enum_field("status", "Sales order status", _ORDER_STATUS_VALUES),
-                    _enum_field("payment_status", "Payment status", ("pending", "partial", "paid", "waived")),
+                    _enum_field(
+                        "payment_status",
+                        "Payment status",
+                        ("pending", "partial", "paid", "waived"),
+                    ),
                 ),
                 author_permission="crm:sales_order:read",
                 runtime_enabled=True,

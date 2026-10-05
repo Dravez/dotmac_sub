@@ -2280,13 +2280,19 @@ DOMAIN = DomainSOT(
                         key="ticket_type",
                         label="Ticket type",
                         value_type=AutomationValueType.string,
-                        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+                        operators=(
+                            AutomationOperator.equals,
+                            AutomationOperator.not_equals,
+                        ),
                     ),
                     AutomationConditionField(
                         key="region",
                         label="Region",
                         value_type=AutomationValueType.string,
-                        operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+                        operators=(
+                            AutomationOperator.equals,
+                            AutomationOperator.not_equals,
+                        ),
                     ),
                 ),
                 author_permission="support:ticket:read",

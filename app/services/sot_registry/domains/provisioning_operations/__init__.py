@@ -25,7 +25,6 @@ from app.services.sot_registry.domains.provisioning_operations.vendor_identity i
 )
 from app.services.sot_registry.model import DomainSOT
 
-
 _PROJECT_STATUS_VALUES = (
     "open",
     "planned",
@@ -116,6 +115,7 @@ def _uuid_field(key: str, label: str) -> AutomationConditionField:
         operators=(AutomationOperator.equals, AutomationOperator.not_equals),
     )
 
+
 DOMAIN = DomainSOT(
     domain="provisioning_operations",
     setting_domains=(
@@ -183,7 +183,10 @@ DOMAIN = DomainSOT(
                 entity_type="operations.project",
                 tenant_id_field="tenant_id",
                 entity_id_field="project_id",
-                fields=(_PROJECT_STATUS_FIELD, _text_field("project_name", "Project name")),
+                fields=(
+                    _PROJECT_STATUS_FIELD,
+                    _text_field("project_name", "Project name"),
+                ),
                 author_permission="operations:project:read",
                 runtime_enabled=True,
             ),

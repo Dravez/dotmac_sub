@@ -1,9 +1,9 @@
 """Add multi-trigger and nested condition storage to automation rules."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 revision = "643_automation_multi_trigger_conditions"
 down_revision = "642_network_map_import_feature_classification"

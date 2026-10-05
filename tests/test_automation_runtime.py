@@ -114,7 +114,11 @@ def test_rule_conditions_support_nested_or_and_not_groups(
                     {
                         "group": "not",
                         "children": [
-                            {"field_key": "priority", "operator": "equals", "value": "normal"}
+                            {
+                                "field_key": "priority",
+                                "operator": "equals",
+                                "value": "normal",
+                            }
                         ],
                     },
                 ],
@@ -136,6 +140,8 @@ def test_rule_conditions_support_nested_or_and_not_groups(
         conditions=conditions,
         payload={"priority": "normal"},
     )
+
+
 def test_retry_preparation_skips_steps_that_already_succeeded() -> None:
     run_id = uuid4()
     run = AutomationRun(id=run_id)
