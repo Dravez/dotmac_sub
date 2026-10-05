@@ -1244,9 +1244,7 @@ def build_beat_schedule() -> dict:
         )
         # Reply reminders are retired; disable any existing database rows so
         # an upgrade cannot leave the old email task running.
-        _retire_scheduled_task(
-            session, "app.tasks.team_inbox.send_reply_reminders"
-        )
+        _retire_scheduled_task(session, "app.tasks.team_inbox.send_reply_reminders")
         _sync_scheduled_task(
             session,
             name="team_inbox_ai_intake_recovery",
