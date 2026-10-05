@@ -16,8 +16,14 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.automation import (
+    AutomationRule,
+    AutomationRuleVersion,
+    AutomationScheduledRun,
+)
 from app.models.project import Project
 from app.models.sales import Lead, Quote, SalesOrder
 from app.models.subscriber import Subscriber
@@ -25,6 +31,29 @@ from app.models.support import Ticket
 from app.models.work_order import WorkOrder
 
 MAX_TARGETS_PER_PROVIDER = 2000
+
+
+def claim_slot(
+    session: Session,
+    rule: AutomationRule,
+    version: AutomationRuleVersion,
+    slot: str,
+) -> bool:
+    """Claim one scheduled rule slot without allowing duplicate emissions."""
+    try:
+        with session.begin_nested():
+            session.add(
+                AutomationScheduledRun(
+                    tenant_id=rule.tenant_id,
+                    rule_id=rule.id,
+                    rule_version_id=version.id,
+                    slot_key=slot,
+                )
+            )
+            session.flush()
+    except IntegrityError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,12 +73,8 @@ def _value(value: Any) -> object:
 
 
 def _target(row: Any, entity_id_field: str, **fields: Any) -> ScheduledAutomationTarget:
-    entity_id = getattr(row, "id")
-    payload = {
-        key: _value(value)
-        for key, value in fields.items()
-        if value is not None
-    }
+    entity_id = row.id
+    payload = {key: _value(value) for key, value in fields.items() if value is not None}
     payload[entity_id_field] = str(entity_id)
     return ScheduledAutomationTarget(entity_id=entity_id, payload=payload)
 
@@ -107,7 +132,9 @@ def quotes(db: Session) -> list[ScheduledAutomationTarget]:
 
 def sales_orders(db: Session) -> list[ScheduledAutomationTarget]:
     return [
-        _target(row, "sales_order_id", status=row.status, payment_status=row.payment_status)
+        _target(
+            row, "sales_order_id", status=row.status, payment_status=row.payment_status
+        )
         for row in _active_rows(db, SalesOrder)
     ]
 
@@ -142,5 +169,7 @@ PROVIDERS: dict[str, Callable[[Session], list[ScheduledAutomationTarget]]] = {
 def targets_for(db: Session, adapter_key: str) -> list[ScheduledAutomationTarget]:
     provider = PROVIDERS.get(adapter_key)
     if provider is None:
-        raise ValueError(f"No scheduled automation provider is registered for {adapter_key!r}.")
+        raise ValueError(
+            f"No scheduled automation provider is registered for {adapter_key!r}."
+        )
     return provider(db)

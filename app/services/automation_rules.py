@@ -100,7 +100,7 @@ class AutomationConditionGroupOperator(StrEnum):
 @dataclass(frozen=True, slots=True)
 class AutomationConditionGroup:
     operator: AutomationConditionGroupOperator
-    children: tuple[AutomationCondition | "AutomationConditionGroup", ...]
+    children: tuple[AutomationCondition | AutomationConditionGroup, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +335,11 @@ def _stored_mapping_list(
 def _normalized_trigger_keys(
     primary: str, additional: tuple[str, ...] = ()
 ) -> tuple[str, ...]:
-    keys = tuple(dict.fromkeys(str(key).strip() for key in (primary, *additional) if str(key).strip()))
+    keys = tuple(
+        dict.fromkeys(
+            str(key).strip() for key in (primary, *additional) if str(key).strip()
+        )
+    )
     if not keys:
         raise _error("trigger_required", "Choose at least one event trigger.")
     return keys
@@ -346,7 +350,9 @@ def _validate_schedule_definition(
 ) -> dict[str, object] | None:
     """Normalize and validate the UI schedule contract for a rule version."""
 
-    triggers = tuple(automation_capabilities.trigger_capability(key) for key in trigger_keys)
+    triggers = tuple(
+        automation_capabilities.trigger_capability(key) for key in trigger_keys
+    )
     scheduled = tuple(trigger for trigger in triggers if trigger.scheduled)
     if not scheduled:
         if schedule:
@@ -369,13 +375,17 @@ def _validate_schedule_definition(
     try:
         ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise _error("schedule_timezone_invalid", "Choose a valid schedule time zone.") from exc
+        raise _error(
+            "schedule_timezone_invalid", "Choose a valid schedule time zone."
+        ) from exc
     normalized: dict[str, object] = {"type": schedule_type, "timezone": timezone}
     if schedule_type == "interval":
         try:
             interval_seconds = int(str(schedule.get("interval_seconds") or "0"))
         except (TypeError, ValueError) as exc:
-            raise _error("schedule_interval_invalid", "Choose a valid schedule interval.") from exc
+            raise _error(
+                "schedule_interval_invalid", "Choose a valid schedule interval."
+            ) from exc
         if interval_seconds < 60 or interval_seconds > 31_536_000:
             raise _error(
                 "schedule_interval_invalid",
@@ -489,15 +499,15 @@ def _restore_condition_tree(
     value: object, fields: Mapping[str, AutomationConditionField]
 ) -> tuple[AutomationCondition, ...] | AutomationConditionGroup:
     if isinstance(value, list):
-        return _restore_condition_tree(
-            {"group": "and", "children": value}, fields
-        )
+        return _restore_condition_tree({"group": "and", "children": value}, fields)
     if isinstance(value, Mapping) and "field_key" not in value:
         operator = AutomationConditionGroupOperator(str(value.get("group") or "and"))
         children_value = value.get("children")
         if not isinstance(children_value, list):
             raise ValueError("Stored condition group is invalid.")
-        children = tuple(_restore_condition_tree(child, fields) for child in children_value)
+        children = tuple(
+            _restore_condition_tree(child, fields) for child in children_value
+        )
         flattened = tuple(
             item
             for child in children
@@ -553,10 +563,12 @@ def _editor_state(
             fields = {
                 field.key: field
                 for trigger_key in (rule.trigger_keys or [rule.trigger_key])
-                for field in automation_capabilities.trigger_capability(trigger_key).fields
+                for field in automation_capabilities.trigger_capability(
+                    trigger_key
+                ).fields
             }
-            restored = _restore_condition_tree(version.conditions, fields)
-            conditions = restored
+            restored_conditions = _restore_condition_tree(version.conditions, fields)
+            conditions = restored_conditions
             for step in version.actions:
                 capability = automation_capabilities.action_capability(
                     str(step.get("action_key") or "")
@@ -575,12 +587,14 @@ def _editor_state(
                     )
                     raw_value = stored_input.get("value")
                     if isinstance(raw_value, list):
-                        restored: AutomationScalar | tuple[AutomationScalar, ...] = (
-                            tuple(_restore_value(field, entry) for entry in raw_value)
-                        )
+                        restored_value: (
+                            AutomationScalar | tuple[AutomationScalar, ...]
+                        ) = tuple(_restore_value(field, entry) for entry in raw_value)
                     else:
-                        restored = _restore_value(field, raw_value)
-                    action_inputs.append(AutomationActionValue(key=key, value=restored))
+                        restored_value = _restore_value(field, raw_value)
+                    action_inputs.append(
+                        AutomationActionValue(key=key, value=restored_value)
+                    )
                 actions.append(
                     AutomationActionStep(
                         action_key=capability.key,
@@ -632,13 +646,19 @@ def _restore_value(field: AutomationConditionField, value: object) -> Automation
 
 
 def _runtime_ready(
-    *, trigger_keys: tuple[str, ...], version: AutomationRuleVersion | None
+    *,
+    version: AutomationRuleVersion | None,
+    trigger_key: str | None = None,
+    trigger_keys: tuple[str, ...] = (),
 ) -> bool:
     if version is None:
         return False
+    selected_trigger_keys = trigger_keys or ((trigger_key,) if trigger_key else ())
     try:
-        for trigger_key in trigger_keys:
-            if not automation_capabilities.trigger_capability(trigger_key).runtime_enabled:
+        for selected_trigger_key in selected_trigger_keys:
+            if not automation_capabilities.trigger_capability(
+                selected_trigger_key
+            ).runtime_enabled:
                 return False
         for action in version.actions:
             capability = automation_capabilities.action_capability(
@@ -691,19 +711,34 @@ def _validate_conditions(
             }
         if not isinstance(node, AutomationConditionGroup):
             raise _error("condition_invalid", "A condition group is invalid.")
-        if node.operator is AutomationConditionGroupOperator.not_ and len(node.children) != 1:
-            raise _error("condition_group_invalid", "A NOT group must contain exactly one condition.")
-        if node.operator in {
-            AutomationConditionGroupOperator.and_,
-            AutomationConditionGroupOperator.or_,
-        } and not node.children:
-            raise _error("condition_group_invalid", "An AND or OR group must contain a condition.")
+        if (
+            node.operator is AutomationConditionGroupOperator.not_
+            and len(node.children) != 1
+        ):
+            raise _error(
+                "condition_group_invalid",
+                "A NOT group must contain exactly one condition.",
+            )
+        if (
+            node.operator
+            in {
+                AutomationConditionGroupOperator.and_,
+                AutomationConditionGroupOperator.or_,
+            }
+            and not node.children
+        ):
+            raise _error(
+                "condition_group_invalid",
+                "An AND or OR group must contain a condition.",
+            )
         return {
             "group": node.operator.value,
             "children": [serialize_node(child) for child in node.children],
         }
 
-    if isinstance(conditions, tuple) and all(isinstance(item, AutomationCondition) for item in conditions):
+    if isinstance(conditions, tuple) and all(
+        isinstance(item, AutomationCondition) for item in conditions
+    ):
         serialized: list[dict[str, object]] = []
         for condition in conditions:
             serialized.append(serialize_node(condition))
@@ -718,7 +753,9 @@ def _validate_conditions(
     raise _error("condition_invalid", "The conditions are invalid.")
 
 
-def _condition_fields_for_triggers(trigger_keys: tuple[str, ...]) -> dict[str, AutomationConditionField]:
+def _condition_fields_for_triggers(
+    trigger_keys: tuple[str, ...],
+) -> dict[str, AutomationConditionField]:
     declared: dict[str, AutomationConditionField] = {}
     for trigger_key in trigger_keys:
         for field in automation_capabilities.trigger_capability(trigger_key).fields:
@@ -752,8 +789,14 @@ def _validate_stored_condition_tree(
         try:
             operator = AutomationOperator(str(value.get("operator") or ""))
         except ValueError as exc:
-            raise _error("condition_contract_stale", "A stored condition operator is invalid.") from exc
-        if field is None or operator not in field.operators or not _stored_value_matches(field, value.get("value")):
+            raise _error(
+                "condition_contract_stale", "A stored condition operator is invalid."
+            ) from exc
+        if (
+            field is None
+            or operator not in field.operators
+            or not _stored_value_matches(field, value.get("value"))
+        ):
             raise _error(
                 "condition_contract_stale",
                 "A stored condition no longer matches its trigger contract.",
@@ -763,13 +806,21 @@ def _validate_stored_condition_tree(
     try:
         group = AutomationConditionGroupOperator(str(value.get("group") or ""))
     except ValueError as exc:
-        raise _error("condition_contract_stale", "A stored condition group is invalid.") from exc
+        raise _error(
+            "condition_contract_stale", "A stored condition group is invalid."
+        ) from exc
     children = value.get("children")
     if not isinstance(children, list):
         raise _error("condition_contract_stale", "A stored condition group is invalid.")
     if group is AutomationConditionGroupOperator.not_ and len(children) != 1:
-        raise _error("condition_contract_stale", "A stored NOT group must contain one condition.")
-    if group in {AutomationConditionGroupOperator.and_, AutomationConditionGroupOperator.or_} and not children:
+        raise _error(
+            "condition_contract_stale", "A stored NOT group must contain one condition."
+        )
+    if (
+        group
+        in {AutomationConditionGroupOperator.and_, AutomationConditionGroupOperator.or_}
+        and not children
+    ):
         raise _error("condition_contract_stale", "A stored condition group is empty.")
     for child in children:
         _validate_stored_condition_tree(child, fields)
@@ -912,6 +963,10 @@ def _conditions_provably_disjoint(
     return False
 
 
+def _condition_list(value: object) -> list[dict[str, object]]:
+    return value if isinstance(value, list) else []
+
+
 def _live_automation_rule_conflicts(
     db: Session, *, rule: AutomationRule, version: AutomationRuleVersion
 ) -> tuple[tuple[UUID, str, tuple[str, ...]], ...]:
@@ -942,23 +997,23 @@ def _live_automation_rule_conflicts(
         .where(
             AutomationRule.tenant_id == rule.tenant_id,
             AutomationRule.id != rule.id,
-            or_(
-                AutomationRule.trigger_key.in_(tuple(rule.trigger_keys or [rule.trigger_key])),
-                *(
-                    AutomationRule.trigger_keys.contains([trigger_key])
-                    for trigger_key in (rule.trigger_keys or [rule.trigger_key])
-                ),
-            ),
             AutomationRule.status == AutomationRuleStatus.published.value,
         )
         .order_by(AutomationRule.id)
         .with_for_update()
     )
+    candidate_triggers = set(getattr(rule, "trigger_keys", None) or [rule.trigger_key])
     for existing, existing_version in db.execute(statement).tuples():
+        existing_triggers = set(
+            getattr(existing, "trigger_keys", None) or [existing.trigger_key]
+        )
+        if not candidate_triggers.intersection(existing_triggers):
+            continue
         existing_actions = conflict_scopes(existing_version.actions)
         shared = tuple(sorted(candidate_actions.intersection(existing_actions)))
         if shared and not _conditions_provably_disjoint(
-            version.conditions, existing_version.conditions
+            _condition_list(version.conditions),
+            _condition_list(existing_version.conditions),
         ):
             conflicts.append((existing.id, existing.name, shared))
     return tuple(conflicts)
@@ -972,7 +1027,11 @@ def _validate_definition(
     conditions: tuple[AutomationCondition, ...] | AutomationConditionGroup,
     actions: tuple[AutomationActionStep, ...],
     permission_keys: frozenset[str],
-) -> tuple[int | dict[str, int], list[dict[str, object]] | dict[str, object], list[dict[str, object]]]:
+) -> tuple[
+    int | dict[str, int],
+    list[dict[str, object]] | dict[str, object],
+    list[dict[str, object]],
+]:
     automation_capabilities.require_valid_capability_registry()
     selected_trigger_keys = _normalized_trigger_keys(trigger_key, trigger_keys)
     if _condition_leaf_count(conditions) > 20:
@@ -1058,7 +1117,7 @@ def _validate_persisted_definition(
     permission_keys: frozenset[str],
 ) -> None:
     automation_capabilities.require_valid_capability_registry()
-    trigger_keys = tuple(rule.trigger_keys or [rule.trigger_key])
+    trigger_keys = tuple(getattr(rule, "trigger_keys", None) or [rule.trigger_key])
     triggers = tuple(
         automation_capabilities.trigger_capability(trigger_key)
         for trigger_key in trigger_keys
@@ -1077,8 +1136,13 @@ def _validate_persisted_definition(
     }
     for trigger in triggers:
         stored_schema = int(schema_versions.get(trigger.key, 0))
-        if stored_schema != trigger.event_schema_version and stored_schema not in trigger.compatible_event_schema_versions:
-            raise _error("trigger_schema_stale", "The draft trigger schema is no longer current.")
+        if (
+            stored_schema != trigger.event_schema_version
+            and stored_schema not in trigger.compatible_event_schema_versions
+        ):
+            raise _error(
+                "trigger_schema_stale", "The draft trigger schema is no longer current."
+            )
     fields = _condition_fields_for_triggers(trigger_keys)
     _validate_customer_targets(db, version.conditions)
     _validate_stored_condition_tree(version.conditions, fields)
@@ -1095,7 +1159,9 @@ def _validate_persisted_definition(
                 action_key=action_key,
             )
         if any(
-            not automation_capabilities.action_applies_to_entity(capability, trigger.entity_type)
+            not automation_capabilities.action_applies_to_entity(
+                capability, trigger.entity_type
+            )
             for trigger in triggers
         ):
             raise _error(
@@ -1271,7 +1337,9 @@ def create_rule(
         name = command.name.strip()
         if not _KEY_PATTERN.fullmatch(key) or not name:
             raise _error("identity_invalid", "Rule key or name is invalid.")
-        trigger_keys = _normalized_trigger_keys(command.trigger_key, command.trigger_keys)
+        trigger_keys = _normalized_trigger_keys(
+            command.trigger_key, command.trigger_keys
+        )
         trigger_schema_versions, conditions, actions = _validate_definition(
             db=db,
             trigger_key=command.trigger_key,
@@ -1306,7 +1374,8 @@ def create_rule(
             existing_draft = _draft(db, existing.id)
             if (
                 existing.name == name
-                and tuple(existing.trigger_keys or [existing.trigger_key]) == trigger_keys
+                and tuple(existing.trigger_keys or [existing.trigger_key])
+                == trigger_keys
                 and existing_draft is not None
                 and existing_draft.content_sha256 == content_sha256
             ):
@@ -1426,7 +1495,9 @@ def replace_draft(
             )
             db.add(version)
         else:
-            version.trigger_schema_version = normalized_schema_versions[rule.trigger_key]
+            version.trigger_schema_version = normalized_schema_versions[
+                rule.trigger_key
+            ]
             version.trigger_schema_versions = normalized_schema_versions
             version.conditions = conditions
             version.actions = actions

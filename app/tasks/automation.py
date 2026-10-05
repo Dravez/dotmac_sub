@@ -7,14 +7,12 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from app.celery_app import celery_app
 from app.models.automation import (
     AutomationRule,
     AutomationRuleStatus,
     AutomationRuleVersion,
-    AutomationScheduledRun,
 )
 from app.services import automation_capabilities, automation_scheduled
 from app.services.db_session_adapter import db_session_adapter
@@ -75,7 +73,7 @@ def _slot_for(schedule: dict[str, object], now: datetime) -> str | None:
     current = now.astimezone(ZoneInfo(timezone))
     schedule_type = str(schedule.get("type") or "")
     if schedule_type == "interval":
-        interval = int(schedule.get("interval_seconds") or 0)
+        interval = int(str(schedule.get("interval_seconds") or "0"))
         if interval < 60:
             return None
         if interval >= 86400 and interval % 86400 == 0:
@@ -90,23 +88,6 @@ def _slot_for(schedule: dict[str, object], now: datetime) -> str | None:
             return None
         return f"cron:{current:%Y%m%d%H%M}"
     return None
-
-
-def _claim_slot(session, rule: AutomationRule, version: AutomationRuleVersion, slot: str) -> bool:
-    try:
-        with session.begin_nested():
-            session.add(
-                AutomationScheduledRun(
-                    tenant_id=rule.tenant_id,
-                    rule_id=rule.id,
-                    rule_version_id=version.id,
-                    slot_key=slot,
-                )
-            )
-            session.flush()
-    except IntegrityError:
-        return False
-    return True
 
 
 @celery_app.task(name="app.tasks.automation.run_scheduled_automation_rules")
@@ -127,7 +108,9 @@ def run_scheduled_automation_rules(*, now_iso: str | None = None) -> dict[str, i
         ).tuples()
         for rule, version in rows:
             slot = _slot_for(version.schedule or {}, now)
-            if slot is None or not _claim_slot(session, rule, version, slot):
+            if slot is None or not automation_scheduled.claim_slot(
+                session, rule, version, slot
+            ):
                 skipped += 1
                 continue
             claimed += 1
@@ -152,6 +135,10 @@ def run_scheduled_automation_rules(*, now_iso: str | None = None) -> dict[str, i
                         actor="automation-scheduler",
                     )
                     emitted += 1
-    result = {"rules_claimed": claimed, "events_emitted": emitted, "rules_skipped": skipped}
+    result = {
+        "rules_claimed": claimed,
+        "events_emitted": emitted,
+        "rules_skipped": skipped,
+    }
     logger.info("scheduled automation evaluation complete", extra=result)
     return result

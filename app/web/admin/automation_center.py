@@ -272,7 +272,11 @@ def _generic_form_context(
         "module_options": module_options,
         "condition_fields": tuple(union_fields.values()),
         "supports_customer_scope": bool(
-            any(field.key == "customer_id" for item in selected_triggers for field in item.fields)
+            any(
+                field.key == "customer_id"
+                for item in selected_triggers
+                for field in item.fields
+            )
         ),
         "service_teams": team_options,
         "builder_options": builder_options,
@@ -438,20 +442,23 @@ def _form_definition(
 ]:
     raw_conditions = json.loads(conditions_json)
     raw_actions = json.loads(actions_json)
-    if not isinstance(raw_conditions, (list, dict)) or not isinstance(raw_actions, list):
+    if not isinstance(raw_conditions, (list, dict)) or not isinstance(
+        raw_actions, list
+    ):
         raise ValueError("Review the conditions and actions and try again.")
     selected_keys = tuple(dict.fromkeys((trigger_key, *trigger_keys)))
     triggers = tuple(
         automation_capabilities.trigger_capability(key) for key in selected_keys
     )
-    fields = {
-        item.key: item
-        for trigger in triggers
-        for item in trigger.fields
-    }
+    fields = {item.key: item for trigger in triggers for item in trigger.fields}
     if customer_ids and "customer_id" not in fields:
         raise ValueError("This trigger does not support selecting customers.")
-    def parse_condition(item: object) -> object:
+
+    def parse_condition(
+        item: object,
+    ) -> (
+        automation_rules.AutomationCondition | automation_rules.AutomationConditionGroup
+    ):
         if not isinstance(item, dict):
             raise ValueError("A condition is not valid.")
         if "field_key" not in item:
@@ -501,9 +508,10 @@ def _form_definition(
         return automation_rules.AutomationCondition(field.key, operator, value)
 
     if isinstance(raw_conditions, list):
-        conditions: tuple[automation_rules.AutomationCondition, ...] | automation_rules.AutomationConditionGroup = tuple(
-            parse_condition(item) for item in raw_conditions
-        )
+        conditions: (
+            tuple[automation_rules.AutomationCondition, ...]
+            | automation_rules.AutomationConditionGroup
+        ) = tuple(parse_condition(item) for item in raw_conditions)
     else:
         parsed_root = parse_condition(raw_conditions)
         if not isinstance(parsed_root, automation_rules.AutomationConditionGroup):
@@ -518,7 +526,8 @@ def _form_definition(
         if isinstance(conditions, tuple):
             conditions = (*conditions, customer_condition)
         elif (
-            conditions.operator is automation_rules.AutomationConditionGroupOperator.and_
+            conditions.operator
+            is automation_rules.AutomationConditionGroupOperator.and_
             and not conditions.children
         ):
             conditions = automation_rules.AutomationConditionGroup(
@@ -583,6 +592,20 @@ def _safe_json_value(raw: str) -> object:
         return []
 
 
+def _safe_json_conditions(raw: str) -> tuple[Mapping[str, object], ...]:
+    value = _safe_json_value(raw)
+    if isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, Mapping))
+    return ()
+
+
+def _safe_json_schedule(raw: str) -> Mapping[str, object] | None:
+    value = _safe_json_value(raw)
+    return value if isinstance(value, Mapping) else None
+
+
 def _form_schedule(raw: str) -> dict[str, object] | None:
     value = _safe_json_value(raw)
     if value in (None, {}, []):
@@ -596,7 +619,9 @@ def _form_trigger_keys(primary: str, raw: str) -> tuple[str, ...]:
     value = _safe_json_value(raw)
     if not isinstance(value, list):
         return (primary,)
-    keys = tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+    keys = tuple(
+        dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+    )
     return keys or (primary,)
 
 
@@ -1641,13 +1666,9 @@ def create_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 customer_scope=customer_scope,
                 customer_ids=selected_customer_ids,
-                conditions=_safe_json_value(conditions_json),
+                conditions=_safe_json_conditions(conditions_json),
                 actions=_safe_json_list(actions_json),
-                schedule=(
-                    _safe_json_value(schedule_json)
-                    if isinstance(_safe_json_value(schedule_json), dict)
-                    else None
-                ),
+                schedule=_safe_json_schedule(schedule_json),
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),
             status_code=400,
@@ -1769,11 +1790,7 @@ def replace_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 customer_scope=customer_scope,
                 customer_ids=_preserved_customer_ids(customer_ids),
-                schedule=(
-                    _safe_json_value(schedule_json)
-                    if isinstance(_safe_json_value(schedule_json), dict)
-                    else None
-                ),
+                schedule=_safe_json_schedule(schedule_json),
                 rule_id=rule_id,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),
@@ -1810,13 +1827,9 @@ def replace_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 customer_scope=customer_scope,
                 customer_ids=selected_customer_ids,
-                conditions=_safe_json_value(conditions_json),
+                conditions=_safe_json_conditions(conditions_json),
                 actions=_safe_json_list(actions_json),
-                schedule=(
-                    _safe_json_value(schedule_json)
-                    if isinstance(_safe_json_value(schedule_json), dict)
-                    else None
-                ),
+                schedule=_safe_json_schedule(schedule_json),
                 rule_id=rule_id,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),

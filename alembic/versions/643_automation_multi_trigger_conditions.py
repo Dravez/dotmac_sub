@@ -43,11 +43,11 @@ def upgrade() -> None:
     )
     op.execute(
         "UPDATE automation_rule_versions AS versions "
-        "SET trigger_schema_versions = jsonb_build_object(" 
+        "SET trigger_schema_versions = jsonb_build_object("
         "rules.trigger_key, versions.trigger_schema_version) "
         "FROM automation_rules AS rules "
         "WHERE versions.rule_id = rules.id "
-        "AND jsonb_object_length(versions.trigger_schema_versions) = 0"
+        "AND versions.trigger_schema_versions = '{}'::jsonb"
     )
 
 

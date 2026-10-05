@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.automation import (
@@ -462,6 +462,7 @@ def _rule_matches(
 ) -> bool:
     trigger = automation_capabilities.trigger_capability(trigger_key)
     fields = {field.key: field for field in trigger.fields}
+
     def evaluate(node: object) -> bool:
         if isinstance(node, list):
             return all(evaluate(child) for child in node)
@@ -568,16 +569,17 @@ def prepare_event_runs(
             )
             .where(
                 AutomationRule.tenant_id == command.event.tenant_id,
-                or_(
-                    AutomationRule.trigger_key == command.event.trigger_key,
-                    AutomationRule.trigger_keys.contains([command.event.trigger_key]),
-                ),
                 AutomationRule.status == AutomationRuleStatus.published.value,
             )
             .order_by(AutomationRule.id)
         )
         prepared: list[PreparedAutomationRun] = []
         for rule, version in db.execute(statement).tuples():
+            trigger_keys = tuple(
+                getattr(rule, "trigger_keys", None) or [rule.trigger_key]
+            )
+            if command.event.trigger_key not in trigger_keys:
+                continue
             existing = db.scalar(
                 select(AutomationRun)
                 .where(
@@ -1088,7 +1090,10 @@ def start_run_retry(
                 ).event_type
                 == command.event.event_type.value
             )
-        except (automation_capabilities.AutomationCapabilityError, StopIteration) as exc:
+        except (
+            automation_capabilities.AutomationCapabilityError,
+            StopIteration,
+        ) as exc:
             raise _error(
                 "retry_trigger_unavailable",
                 "The trigger for this run is no longer available.",
