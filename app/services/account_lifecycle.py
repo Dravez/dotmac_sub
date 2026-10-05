@@ -1899,7 +1899,12 @@ def release_pause_cause_and_resume_subscription(
         )
     previous_anchor = _aware_utc(subscription.next_billing_at)
     recorded_anchor = _aware_utc(episode.previous_next_billing_at)
-    if previous_anchor != recorded_anchor:
+    anchor_reconciled = (
+        previous_anchor != recorded_anchor
+        and command.reconciled_renewal_period_start is not None
+        and command.reconciled_renewal_period_end is not None
+    )
+    if previous_anchor != recorded_anchor and not anchor_reconciled:
         raise BillingAnchorProjectionError(
             "Billing anchor changed while the subscription was paused"
         )
