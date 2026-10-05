@@ -83,6 +83,7 @@ class AutomationRule(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     trigger_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    trigger_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default=AutomationRuleStatus.draft.value
     )
@@ -137,7 +138,10 @@ class AutomationRuleVersion(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     trigger_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    conditions: Mapped[list[dict[str, object]]] = mapped_column(
+    trigger_schema_versions: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    conditions: Mapped[list[dict[str, object]] | dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=list
     )
     actions: Mapped[list[dict[str, object]]] = mapped_column(
