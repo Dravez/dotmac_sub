@@ -16,7 +16,10 @@ from uuid import UUID
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.fiber_change_request import FiberChangeRequest
+from app.models.fiber_change_request import (
+    FiberChangeRequest,
+    FiberChangeRequestOperation,
+)
 from app.models.vendor_routes import (
     AsBuiltRoute,
     InstallationProject,
@@ -71,8 +74,6 @@ def _closure_proposal_features(
         .filter(WorkOrder.project_id == project.project_id)
         .all()
     }
-    if not work_order_ids:
-        return []
     query = db.query(FiberChangeRequest).filter(
         FiberChangeRequest.asset_type == "splice_closure"
     )
@@ -82,7 +83,11 @@ def _closure_proposal_features(
     for request in query.order_by(FiberChangeRequest.created_at.asc()).all():
         payload = request.payload or {}
         provenance = payload.get("provenance") or {}
-        if str(provenance.get("work_order_id") or "") not in work_order_ids:
+        project_scoped = str(
+            provenance.get("installation_project_id") or ""
+        ) == str(project.id)
+        work_order_scoped = str(provenance.get("work_order_id") or "") in work_order_ids
+        if not project_scoped and not work_order_scoped:
             continue
         latitude = payload.get("latitude")
         longitude = payload.get("longitude")
@@ -108,6 +113,91 @@ def _closure_proposal_features(
             }
         )
     return features
+
+
+def _admin_route_proposal_features(
+    db: Session,
+    project: InstallationProject | None = None,
+) -> list[dict]:
+    """Project-scoped staff route proposals awaiting fibre review."""
+
+    features: list[dict] = []
+    requests = (
+        db.query(FiberChangeRequest)
+        .filter(FiberChangeRequest.asset_type == "fiber_segment")
+        .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+        .order_by(FiberChangeRequest.created_at.asc())
+        .all()
+    )
+    for request in requests:
+        payload = request.payload or {}
+        provenance = payload.get("provenance") or {}
+        if provenance.get("kind") != "admin_route":
+            continue
+        if project is not None and str(
+            provenance.get("installation_project_id") or ""
+        ) != str(project.id):
+            continue
+        geometry = payload.get("geojson") or payload.get("route_geom")
+        if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": {
+                    "id": str(request.id),
+                    "kind": "admin_route_proposal",
+                    "name": payload.get("name") or "Suggested route",
+                    "status": request.status.value,
+                    "length_meters": payload.get("length_meters")
+                    or payload.get("length_m"),
+                    "review_notes": request.review_notes,
+                    "review_url": f"/admin/network/fiber-change-requests/{request.id}",
+                },
+            }
+        )
+    return features
+
+
+def build_admin_proposal_geojson(db: Session) -> dict:
+    """All standalone admin route and closure proposals for the authoring map."""
+
+    features = _admin_route_proposal_features(db)
+    requests = (
+        db.query(FiberChangeRequest)
+        .filter(FiberChangeRequest.asset_type == "splice_closure")
+        .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+        .order_by(FiberChangeRequest.created_at.asc())
+        .all()
+    )
+    for request in requests:
+        payload = request.payload or {}
+        provenance = payload.get("provenance") or {}
+        if provenance.get("kind") != "admin_map_asset":
+            continue
+        latitude = payload.get("latitude")
+        longitude = payload.get("longitude")
+        if latitude is None or longitude is None:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [float(longitude), float(latitude)],
+                },
+                "properties": {
+                    "id": str(request.id),
+                    "kind": "closure_proposal",
+                    "name": payload.get("name") or "Proposed closure",
+                    "status": request.status.value,
+                    "review_notes": request.review_notes,
+                    "review_url": f"/admin/network/fiber-change-requests/{request.id}",
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
 
 
 def build_project_route_geojson(db: Session, project_id: str) -> dict:
@@ -174,6 +264,7 @@ def build_project_route_geojson(db: Session, project_id: str) -> dict:
             }
         )
 
+    features.extend(_admin_route_proposal_features(db, project))
     features.extend(_closure_proposal_features(db, project))
 
     return {"type": "FeatureCollection", "features": features}
@@ -304,7 +395,85 @@ def get_route_project(db: Session, project_id: str) -> dict | None:
         "label": _project_label(project),
         "status": project.status,
         "vendor": vendor.name if vendor is not None else None,
+        "native_project_id": str(project.project_id),
     }
+
+
+def list_admin_route_proposals(
+    db: Session, project_id: str | None = None
+) -> list[dict]:
+    """Return staff-owned route proposals, optionally filtered by project."""
+
+    rows = (
+        db.query(FiberChangeRequest)
+        .filter(FiberChangeRequest.asset_type == "fiber_segment")
+        .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+        .order_by(FiberChangeRequest.created_at.desc())
+        .all()
+    )
+    items: list[dict] = []
+    for row in rows:
+        payload = row.payload or {}
+        provenance = payload.get("provenance") or {}
+        if provenance.get("kind") != "admin_route":
+            continue
+        if project_id is not None and str(
+            provenance.get("installation_project_id") or ""
+        ) != str(project_id):
+            continue
+        items.append(
+            {
+                "id": str(row.id),
+                "name": payload.get("name") or "Suggested route",
+                "status": row.status.value,
+                "length_meters": payload.get("length_meters")
+                or payload.get("length_m"),
+                "created_at": row.created_at,
+                "review_notes": row.review_notes,
+                "review_url": f"/admin/network/fiber-change-requests/{row.id}",
+            }
+        )
+    return items
+
+
+def list_admin_authoring_projects(db: Session) -> list[dict]:
+    """Active project choices for optional proposal provenance."""
+
+    rows = (
+        db.query(InstallationProject)
+        .filter(InstallationProject.is_active.is_(True))
+        .order_by(InstallationProject.created_at.desc(), InstallationProject.id.desc())
+        .all()
+    )
+    return [
+        {
+            "id": str(row.id),
+            "label": _project_label(row),
+            "status": row.status,
+            "native_project_id": str(row.project_id),
+        }
+        for row in rows
+    ]
+
+
+def list_admin_authoring_work_orders(db: Session) -> list[dict]:
+    """Active work-order choices for optional proposal provenance."""
+
+    rows = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.is_active.is_(True))
+        .order_by(WorkOrder.created_at.desc(), WorkOrder.id.desc())
+        .all()
+    )
+    return [
+        {
+            "id": str(row.id),
+            "public_id": row.public_id,
+            "title": row.title,
+            "project_id": str(row.project_id) if row.project_id else None,
+        }
+        for row in rows
+    ]
 
 
 def list_route_projects(db: Session) -> list[dict]:
@@ -322,6 +491,25 @@ def list_route_projects(db: Session) -> list[dict]:
             .all()
         )
     }
+    admin_proposed_project_ids: set[UUID] = set()
+    for row in (
+        db.query(FiberChangeRequest)
+        .filter(FiberChangeRequest.asset_type == "fiber_segment")
+        .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+        .all()
+    ):
+        provenance = (row.payload or {}).get("provenance") or {}
+        if provenance.get("kind") != "admin_route":
+            continue
+        try:
+            admin_proposed_project_ids.add(
+                UUID(str(provenance["installation_project_id"]))
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "Ignoring admin route proposal %s with invalid project provenance",
+                row.id,
+            )
     as_built_project_ids = {
         row[0]
         for row in (
@@ -339,8 +527,20 @@ def list_route_projects(db: Session) -> list[dict]:
     )
     closure_work_order_ids: set[UUID] = set()
     for request in closure_requests:
+        provenance = (request.payload or {}).get("provenance") or {}
+        if provenance.get("kind") == "admin_map_asset":
+            try:
+                closure_project_ids.add(
+                    UUID(str(provenance["installation_project_id"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                logger.warning(
+                    "Ignoring admin asset proposal %s with invalid project provenance",
+                    request.id,
+                )
+            continue
         work_order_id = (
-            (request.payload or {}).get("provenance", {}).get("work_order_id")
+            provenance.get("work_order_id")
         )
         if not work_order_id:
             continue
@@ -366,7 +566,12 @@ def list_route_projects(db: Session) -> list[dict]:
                 .filter(InstallationProject.project_id.in_(native_project_ids))
                 .all()
             }
-    project_ids = proposed_project_ids | as_built_project_ids | closure_project_ids
+    project_ids = (
+        proposed_project_ids
+        | admin_proposed_project_ids
+        | as_built_project_ids
+        | closure_project_ids
+    )
     if not project_ids:
         return []
 
@@ -386,6 +591,7 @@ def list_route_projects(db: Session) -> list[dict]:
                 else None
             ),
             "has_proposed": project.id in proposed_project_ids,
+            "has_admin_proposed": project.id in admin_proposed_project_ids,
             "has_as_built": project.id in as_built_project_ids,
             "has_closure_proposals": project.id in closure_project_ids,
         }
