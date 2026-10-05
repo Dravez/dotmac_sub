@@ -1087,7 +1087,6 @@ from app.models.team_inbox import (  # noqa: F401
     InboxMessageTemplate,
     InboxQueueNotification,
     InboxReplyMacro,
-    InboxReplyReminder,
     InboxSavedFilter,
     InboxTeamRole,
     InboxTeamRoundRobinCursor,
