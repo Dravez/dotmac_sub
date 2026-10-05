@@ -165,6 +165,7 @@ def _generic_form_context(
     customer_ids: tuple[UUID, ...] = (),
     conditions: tuple[Mapping[str, object], ...] = (),
     actions: tuple[Mapping[str, object], ...] = (),
+    schedule: Mapping[str, object] | None = None,
     rule_id: UUID | None = None,
     permission_keys: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
@@ -224,6 +225,7 @@ def _generic_form_context(
             and (authorized or action.author_permission in permission_keys)
         )
         builder_options[item.key] = {
+            "scheduled": item.scheduled,
             "supports_customer_scope": any(
                 field.key == "customer_id" for field in item.fields
             ),
@@ -283,6 +285,7 @@ def _generic_form_context(
         ),
         "initial_conditions": jsonable_encoder(conditions),
         "initial_actions": jsonable_encoder(actions),
+        "initial_schedule": jsonable_encoder(schedule or {}),
         "rule_id": rule_id,
         "command_token": str(uuid4()),
     }
@@ -578,6 +581,15 @@ def _safe_json_value(raw: str) -> object:
         return json.loads(raw)
     except (TypeError, ValueError):
         return []
+
+
+def _form_schedule(raw: str) -> dict[str, object] | None:
+    value = _safe_json_value(raw)
+    if value in (None, {}, []):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Review the schedule and try again.")
+    return {str(key): item for key, item in value.items()}
 
 
 def _form_trigger_keys(primary: str, raw: str) -> tuple[str, ...]:
@@ -1551,6 +1563,7 @@ def create_automation_rule_draft(
     trigger_keys_json: str = Form(default="[]"),
     conditions_json: str = Form(default="[]"),
     actions_json: str = Form(default="[]"),
+    schedule_json: str = Form(default="{}"),
     customer_scope: str = Form(default="company"),
     customer_ids: list[str] = Form(default=[]),
     db: Session = Depends(get_db),
@@ -1588,6 +1601,7 @@ def create_automation_rule_draft(
             actions_json=actions_json,
             customer_ids=selected_customer_ids,
         )
+        schedule = _form_schedule(schedule_json)
         key = "automation.rule." + _KEY_WORDS.sub("_", name.strip().casefold()).strip(
             "_"
         )[:104].rstrip("_")
@@ -1605,6 +1619,7 @@ def create_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 conditions=conditions,
                 actions=actions,
+                schedule=schedule,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
                 context=CommandContext.system(
                     actor=_actor(request),
@@ -1628,6 +1643,11 @@ def create_automation_rule_draft(
                 customer_ids=selected_customer_ids,
                 conditions=_safe_json_value(conditions_json),
                 actions=_safe_json_list(actions_json),
+                schedule=(
+                    _safe_json_value(schedule_json)
+                    if isinstance(_safe_json_value(schedule_json), dict)
+                    else None
+                ),
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),
             status_code=400,
@@ -1696,6 +1716,7 @@ def edit_automation_rule_draft(
             customer_ids=state.customer_ids,
             conditions=conditions,
             actions=actions,
+            schedule=state.schedule,
             rule_id=rule_id,
             permission_keys=permission_keys,
         ),
@@ -1716,6 +1737,7 @@ def replace_automation_rule_draft(
     trigger_keys_json: str = Form(default="[]"),
     conditions_json: str = Form(default="[]"),
     actions_json: str = Form(default="[]"),
+    schedule_json: str = Form(default="{}"),
     customer_scope: str = Form(default="company"),
     customer_ids: list[str] = Form(default=[]),
     command_token: str = Form(...),
@@ -1734,6 +1756,7 @@ def replace_automation_rule_draft(
             actions_json=actions_json,
             customer_ids=selected_customer_ids,
         )
+        schedule = _form_schedule(schedule_json)
         token = UUID(command_token)
     except (ValueError, TypeError) as exc:
         return templates.TemplateResponse(
@@ -1746,6 +1769,11 @@ def replace_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 customer_scope=customer_scope,
                 customer_ids=_preserved_customer_ids(customer_ids),
+                schedule=(
+                    _safe_json_value(schedule_json)
+                    if isinstance(_safe_json_value(schedule_json), dict)
+                    else None
+                ),
                 rule_id=rule_id,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),
@@ -1761,6 +1789,7 @@ def replace_automation_rule_draft(
                 trigger_keys=selected_trigger_keys,
                 conditions=conditions,
                 actions=actions,
+                schedule=schedule,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
                 context=CommandContext.system(
                     actor=_actor(request),
@@ -1783,6 +1812,11 @@ def replace_automation_rule_draft(
                 customer_ids=selected_customer_ids,
                 conditions=_safe_json_value(conditions_json),
                 actions=_safe_json_list(actions_json),
+                schedule=(
+                    _safe_json_value(schedule_json)
+                    if isinstance(_safe_json_value(schedule_json), dict)
+                    else None
+                ),
                 rule_id=rule_id,
                 permission_keys=frozenset(auth.get("permission_keys") or ()),
             ),

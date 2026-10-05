@@ -3233,6 +3233,20 @@ DOMAIN = DomainSOT(
                 author_permission="customer:read",
                 runtime_enabled=True,
             ),
+            AutomationTriggerCapability(
+                key="customer.account.scheduled",
+                label="Customer account scheduled evaluation",
+                event_type="customer.account.scheduled",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(_CUSTOMER_STATUS_FIELD,),
+                author_permission="customer:read",
+                runtime_enabled=True,
+                scheduled=True,
+                schedule_adapter_key="customer.account",
+            ),
         ),
         actions=(
             AutomationActionCapability(

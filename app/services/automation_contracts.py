@@ -103,6 +103,10 @@ class AutomationTriggerCapability:
     runtime_enabled: bool = False
     #: Older condition contracts that remain safe against this event payload.
     compatible_event_schema_versions: tuple[int, ...] = ()
+    #: Whether the trigger can be evaluated by the shared scheduled-rule runner.
+    scheduled: bool = False
+    #: Stable key for the module-owned record provider used by scheduled runs.
+    schedule_adapter_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

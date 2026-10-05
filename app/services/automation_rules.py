@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -35,6 +36,7 @@ from app.services.owner_commands import (
     OwnerCommandDefinition,
     execute_owner_command,
 )
+from app.timezone import APP_TIMEZONE_NAME
 
 if TYPE_CHECKING:
     from app.services.support_automation import AutomationCenterLegacyRuleConflict
@@ -125,6 +127,7 @@ class CreateAutomationRuleCommand:
     permission_keys: frozenset[str]
     context: CommandContext
     trigger_keys: tuple[str, ...] = ()
+    schedule: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +139,7 @@ class ReplaceAutomationRuleDraftCommand:
     permission_keys: frozenset[str]
     context: CommandContext
     trigger_keys: tuple[str, ...] = ()
+    schedule: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +175,7 @@ class AutomationRuleEditorState:
     service_team_id: UUID | None
     conditions: tuple[AutomationCondition, ...] | AutomationConditionGroup
     actions: tuple[AutomationActionStep, ...]
+    schedule: dict[str, object] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +339,62 @@ def _normalized_trigger_keys(
     if not keys:
         raise _error("trigger_required", "Choose at least one event trigger.")
     return keys
+
+
+def _validate_schedule_definition(
+    *, trigger_keys: tuple[str, ...], schedule: Mapping[str, object] | None
+) -> dict[str, object] | None:
+    """Normalize and validate the UI schedule contract for a rule version."""
+
+    triggers = tuple(automation_capabilities.trigger_capability(key) for key in trigger_keys)
+    scheduled = tuple(trigger for trigger in triggers if trigger.scheduled)
+    if not scheduled:
+        if schedule:
+            raise _error(
+                "schedule_not_allowed",
+                "A schedule can only be used with a scheduled event trigger.",
+            )
+        return None
+    if len(scheduled) != len(triggers):
+        raise _error(
+            "schedule_trigger_mix",
+            "Scheduled and event-driven triggers cannot be mixed in one rule.",
+        )
+    if not isinstance(schedule, Mapping):
+        raise _error("schedule_required", "Choose a schedule for this trigger.")
+    schedule_type = str(schedule.get("type") or "").strip().casefold()
+    timezone = str(schedule.get("timezone") or APP_TIMEZONE_NAME).strip()
+    if not timezone:
+        timezone = APP_TIMEZONE_NAME
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise _error("schedule_timezone_invalid", "Choose a valid schedule time zone.") from exc
+    normalized: dict[str, object] = {"type": schedule_type, "timezone": timezone}
+    if schedule_type == "interval":
+        try:
+            interval_seconds = int(str(schedule.get("interval_seconds") or "0"))
+        except (TypeError, ValueError) as exc:
+            raise _error("schedule_interval_invalid", "Choose a valid schedule interval.") from exc
+        if interval_seconds < 60 or interval_seconds > 31_536_000:
+            raise _error(
+                "schedule_interval_invalid",
+                "Schedule intervals must be between one minute and one year.",
+            )
+        normalized["interval_seconds"] = interval_seconds
+    elif schedule_type == "crontab":
+        cron_expr = str(schedule.get("cron_expr") or "").strip()
+        from app.services.scheduler_config import is_valid_cron
+
+        if not is_valid_cron(cron_expr):
+            raise _error(
+                "schedule_cron_invalid",
+                "Enter a valid five-field cron expression.",
+            )
+        normalized["cron_expr"] = cron_expr
+    else:
+        raise _error("schedule_type_invalid", "Choose an interval or cron schedule.")
+    return normalized
 
 
 def _iter_condition_leaves(value: object) -> tuple[Mapping[str, object], ...]:
@@ -546,6 +607,7 @@ def _editor_state(
         service_team_id=service_team_id,
         conditions=conditions,
         actions=tuple(actions),
+        schedule=(dict(version.schedule) if version and version.schedule else None),
     )
 
 
@@ -1001,6 +1063,7 @@ def _validate_persisted_definition(
         automation_capabilities.trigger_capability(trigger_key)
         for trigger_key in trigger_keys
     )
+    _validate_schedule_definition(trigger_keys=trigger_keys, schedule=version.schedule)
     for trigger in triggers:
         _require_permission(permission_keys, trigger.author_permission)
         if not trigger.runtime_enabled:
@@ -1133,9 +1196,20 @@ def _validate_persisted_definition(
         )
 
 
-def _content_hash(*, trigger_keys: tuple[str, ...], conditions: object, actions: object) -> str:
+def _content_hash(
+    *,
+    trigger_keys: tuple[str, ...],
+    conditions: object,
+    actions: object,
+    schedule: object = None,
+) -> str:
     encoded = json.dumps(
-        {"trigger_keys": list(trigger_keys), "conditions": conditions, "actions": actions},
+        {
+            "trigger_keys": list(trigger_keys),
+            "conditions": conditions,
+            "actions": actions,
+            "schedule": schedule,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -1206,6 +1280,9 @@ def create_rule(
             actions=command.actions,
             permission_keys=command.permission_keys,
         )
+        schedule = _validate_schedule_definition(
+            trigger_keys=trigger_keys, schedule=command.schedule
+        )
         normalized_schema_versions = (
             trigger_schema_versions
             if isinstance(trigger_schema_versions, dict)
@@ -1215,6 +1292,7 @@ def create_rule(
             trigger_keys=trigger_keys,
             conditions=conditions,
             actions=actions,
+            schedule=schedule,
         )
         existing = db.scalar(
             select(AutomationRule)
@@ -1259,6 +1337,7 @@ def create_rule(
             trigger_schema_versions=normalized_schema_versions,
             conditions=conditions,
             actions=actions,
+            schedule=schedule,
             content_sha256=content_sha256,
             created_by=command.context.actor,
         )
@@ -1299,6 +1378,9 @@ def replace_draft(
             actions=command.actions,
             permission_keys=command.permission_keys,
         )
+        schedule = _validate_schedule_definition(
+            trigger_keys=trigger_keys, schedule=command.schedule
+        )
         version = _draft(db, rule.id)
         normalized_schema_versions = (
             trigger_schema_versions
@@ -1309,6 +1391,7 @@ def replace_draft(
             trigger_keys=trigger_keys,
             conditions=conditions,
             actions=actions,
+            schedule=schedule,
         )
         if version is not None and version.content_sha256 == content_sha256:
             return AutomationRuleOutcome(
@@ -1337,6 +1420,7 @@ def replace_draft(
                 trigger_schema_versions=normalized_schema_versions,
                 conditions=conditions,
                 actions=actions,
+                schedule=schedule,
                 content_sha256=content_sha256,
                 created_by=command.context.actor,
             )
@@ -1346,6 +1430,7 @@ def replace_draft(
             version.trigger_schema_versions = normalized_schema_versions
             version.conditions = conditions
             version.actions = actions
+            version.schedule = schedule
             version.content_sha256 = content_sha256
             version.created_by = command.context.actor
             version.created_at = datetime.now(UTC)

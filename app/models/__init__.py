@@ -41,6 +41,7 @@ from app.models.automation import (  # noqa: F401
     AutomationRule,
     AutomationRuleStatus,
     AutomationRuleVersion,
+    AutomationScheduledRun,
     AutomationRun,
     AutomationRunRetry,
     AutomationRunRetryStatus,

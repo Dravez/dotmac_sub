@@ -16,6 +16,7 @@
         <input type="hidden" id="conditions-json" name="conditions_json">
         <input type="hidden" id="actions-json" name="actions_json">
         <input type="hidden" id="trigger-keys-json" name="trigger_keys_json">
+        <input type="hidden" id="schedule-json" name="schedule_json">
         <div class="space-y-2">
             <label for="name" class="block text-sm font-medium text-slate-800 dark:text-slate-200">Workflow name</label>
             {% if rule_id %}<p class="font-semibold text-slate-950 dark:text-white">{{ name }}</p><input type="hidden" name="name" value="{{ name }}">
@@ -36,6 +37,20 @@
             </select>
             <p class="text-xs text-slate-500 dark:text-slate-400">Select one or more events. The same rule can react to several lifecycle events; conditions are evaluated against the event that fired it.</p>
             {% if rule_id %}<input type="hidden" name="trigger_key" value="{{ trigger_key }}">{% else %}<input type="hidden" id="trigger-key-value" name="trigger_key" value="{{ trigger_key }}">{% endif %}
+        </section>
+
+        <section id="schedule-section" class="hidden space-y-3 rounded-xl border border-teal-200 bg-teal-50/50 p-4 dark:border-teal-900 dark:bg-teal-950/20" aria-labelledby="schedule-heading">
+            <div>
+                <h2 id="schedule-heading" class="text-base font-semibold text-slate-950 dark:text-white">Run schedule</h2>
+                <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">The rule is evaluated against matching active records on this cadence. Use this for reminders or follow-ups that should repeat while a condition remains true.</p>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-3">
+                <label class="space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200"><span class="block">Schedule type</span><select id="schedule-type" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950"><option value="interval">Every interval</option><option value="crontab">Cron expression</option></select></label>
+                <label id="schedule-interval-wrap" class="space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200"><span class="block">Interval</span><select id="schedule-interval" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950"><option value="86400">Every day</option><option value="3600">Every hour</option><option value="604800">Every week</option><option value="900">Every 15 minutes</option></select></label>
+                <label id="schedule-cron-wrap" class="hidden space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200"><span class="block">Cron expression</span><input id="schedule-cron" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-950" placeholder="0 9 * * *" inputmode="text"><span class="block text-xs font-normal text-slate-500">minute hour day-of-month month day-of-week</span></label>
+                <label class="space-y-1 text-sm font-medium text-slate-800 dark:text-slate-200"><span class="block">Time zone</span><input id="schedule-timezone" value="Africa/Lagos" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-950" placeholder="Africa/Lagos" inputmode="text"></label>
+            </div>
+            <p id="schedule-availability" class="text-xs text-teal-800 dark:text-teal-200" aria-live="polite"></p>
         </section>
 
         <section class="space-y-3" aria-labelledby="conditions-heading">
@@ -79,12 +94,19 @@
     const actionButton = document.getElementById("add-action");
     const conditionAvailability = document.getElementById("conditions-availability");
     const actionAvailability = document.getElementById("actions-availability");
+    const scheduleSection = document.getElementById("schedule-section");
+    const scheduleType = document.getElementById("schedule-type");
+    const scheduleInterval = document.getElementById("schedule-interval");
+    const scheduleCron = document.getElementById("schedule-cron");
+    const scheduleTimezone = document.getElementById("schedule-timezone");
+    const scheduleAvailability = document.getElementById("schedule-availability");
     if (!form || !trigger || !conditionsBox || !actionsBox) return;
     const capabilities = {{ builder_options|tojson }};
     const moduleOptions = {{ module_options|tojson }};
     const teams = {{ service_teams|tojson }};
     const initialConditions = {{ initial_conditions|tojson }};
     const initialActions = {{ initial_actions|tojson }};
+    const initialSchedule = {{ initial_schedule|tojson }};
     const selectedTriggerKeys = () => [...trigger.selectedOptions].map((option) => option.value);
     const config = () => {
         const fields = new Map(), actions = new Map();
@@ -93,7 +115,15 @@
             for (const field of current.fields || []) if (!fields.has(field.key)) fields.set(field.key, field);
             for (const action of current.actions || []) if (!actions.has(action.key)) actions.set(action.key, action);
         }
-        return {fields: [...fields.values()], actions: [...actions.values()], supports_customer_scope: selectedTriggerKeys().some((key) => capabilities[key]?.supports_customer_scope)};
+        return {fields: [...fields.values()], actions: [...actions.values()], supports_customer_scope: selectedTriggerKeys().some((key) => capabilities[key]?.supports_customer_scope), scheduled: selectedTriggerKeys().some((key) => capabilities[key]?.scheduled)};
+    };
+    const updateSchedule = () => {
+        const available = Boolean(config().scheduled);
+        scheduleSection?.classList.toggle("hidden", !available);
+        if (scheduleAvailability) scheduleAvailability.textContent = available ? "This rule will run on the selected cadence and emit one evaluation event per matching record." : "Select a scheduled event to configure a recurring cadence.";
+        const cron = scheduleType?.value === "crontab";
+        document.getElementById("schedule-interval-wrap")?.classList.toggle("hidden", cron);
+        document.getElementById("schedule-cron-wrap")?.classList.toggle("hidden", !cron);
     };
     const updateBuilderAvailability = () => {
         const current = config();
@@ -164,7 +194,7 @@
     document.getElementById("add-group")?.addEventListener("click", () => { const rootChildren = conditionsBox.querySelector(".condition-group-children"); if (rootChildren) { const nested = renderGroup({group: "or", children: []}, false); rootChildren.append(nested); } });
     actionButton?.addEventListener("click", () => { if (!actionButton.disabled) renderAction(); });
     const updateCustomerScope = () => { const section = document.getElementById("customer-scope-section"); const supported = Boolean(config().supports_customer_scope); section?.classList.toggle("hidden", !supported); if (!supported) { const company = document.querySelector('input[name="customer_scope"][value="company"]'); if (company) company.checked = true; document.getElementById("selected-customers")?.replaceChildren(); } };
-    trigger.addEventListener("change", () => { const submittedTrigger = document.getElementById("trigger-key-value"); if (submittedTrigger) submittedTrigger.value = selectedTriggerKeys()[0] || ""; renderAll([], []); updateCustomerScope(); });
+    trigger.addEventListener("change", () => { const submittedTrigger = document.getElementById("trigger-key-value"); if (submittedTrigger) submittedTrigger.value = selectedTriggerKeys()[0] || ""; renderAll([], []); updateCustomerScope(); updateSchedule(); });
     module.addEventListener("change", () => { syncModules(); trigger.dispatchEvent(new Event("change")); });
     form.addEventListener("submit", () => {
         const serializeNode = (node) => { if (node.dataset.condition) { const field = node.querySelector("[data-field]").value; const op = node.querySelector("select:not([data-field])").value; const raw = node.querySelector("[data-value]")?.value ?? ""; return {field_key: field, operator: op, value: ["is_empty", "is_not_empty"].includes(op) ? null : raw}; } return {group: node.querySelector(":scope > .flex select")?.value || "and", children: [...node.querySelector(":scope > .condition-group-children").children].map(serializeNode)}; };
@@ -174,6 +204,8 @@
         document.getElementById("conditions-json").value = JSON.stringify(conditions);
         document.getElementById("actions-json").value = JSON.stringify(actions);
         document.getElementById("trigger-keys-json").value = JSON.stringify(selectedTriggerKeys());
+        const schedule = config().scheduled ? {type: scheduleType.value, interval_seconds: Number(scheduleInterval.value), cron_expr: scheduleCron.value.trim(), timezone: scheduleTimezone.value} : {};
+        document.getElementById("schedule-json").value = JSON.stringify(schedule);
     });
     const picker = document.getElementById("customer-picker"), searchInput = document.getElementById("customer-search"), searchButton = document.getElementById("customer-search-button"), message = document.getElementById("customer-search-message"), results = document.getElementById("customer-search-results"), selected = document.getElementById("selected-customers");
     const updateScope = () => picker?.classList.toggle("hidden", document.querySelector('input[name="customer_scope"]:checked')?.value !== "selected");
@@ -183,7 +215,12 @@
     searchInput?.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); searchButton.click(); } });
     const initialModule = moduleOptions.find((item) => selectedTriggerKeys().some((key) => item.trigger_keys.includes(key)));
     if (initialModule) module.value = initialModule.key;
-    syncModules(); renderAll(initialConditions, initialActions); updateScope(); updateCustomerScope();
+    if (initialSchedule?.type) scheduleType.value = initialSchedule.type;
+    if (initialSchedule?.interval_seconds) scheduleInterval.value = String(initialSchedule.interval_seconds);
+    if (initialSchedule?.cron_expr) scheduleCron.value = initialSchedule.cron_expr;
+    if (initialSchedule?.timezone) scheduleTimezone.value = initialSchedule.timezone;
+    scheduleType?.addEventListener("change", updateSchedule);
+    syncModules(); renderAll(initialConditions, initialActions); updateScope(); updateCustomerScope(); updateSchedule();
 })();
 </script>
 {% endblock %}
