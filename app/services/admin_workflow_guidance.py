@@ -800,9 +800,8 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
 )
 
 
-# These guides complete the Help Center's Admin-sidebar inventory. They are not
-# matched by ``guidance_for_path``, so adding Help content never adds a new
-# contextual question-mark control to a page.
+# These guides complete the Help Center's Admin-sidebar inventory. They are
+# also available to contextual path lookup when they describe a concrete page.
 HELP_ONLY_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
     _guide(
         "workqueue",
@@ -2010,7 +2009,7 @@ def guidance_for_path(path: str) -> AdminWorkflowGuidance | None:
     """Return the most-specific guide for an Admin page path."""
     matches = (
         (specificity, guide)
-        for guide in WORKFLOW_GUIDANCE
+        for guide in all_guidance()
         if (specificity := guide.match_specificity(path)) is not None
     )
     return max(matches, key=lambda match: match[0], default=(0, None))[1]
