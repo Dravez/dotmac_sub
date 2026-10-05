@@ -67,6 +67,7 @@ def _apply(db, args):
             proposed_resumed_at=args.resumed_at,
         ),
     )
+    db.rollback()
     result = reconcile_ticket_paused_prepaid_service(
         db,
         ReconcileTicketPausedPrepaidServiceCommand(
