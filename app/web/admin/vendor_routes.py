@@ -32,7 +32,6 @@ from app.schemas.vendor_portal import VendorRouteRevisionCreate
 from app.services import (
     fiber_change_requests,
     fiber_plant_api,
-    vendor_portal_operations,
     vendor_routes_api,
     work_order_views,
 )
@@ -40,6 +39,7 @@ from app.services.auth_dependencies import can, require_permission
 from app.services.common import coerce_uuid
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
+from app.services.vendor_portal_operations import vendor_portal_operations
 from app.web.request_parsing import parse_form_data_sync
 
 templates = Jinja2Templates(directory="templates")
