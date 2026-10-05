@@ -45,6 +45,7 @@ from app.models.automation import (  # noqa: F401
     AutomationRunRetry,
     AutomationRunRetryStatus,
     AutomationRunStatus,
+    AutomationScheduledRun,
     AutomationStepRun,
     AutomationStepStatus,
 )
@@ -1087,7 +1088,6 @@ from app.models.team_inbox import (  # noqa: F401
     InboxMessageTemplate,
     InboxQueueNotification,
     InboxReplyMacro,
-    InboxReplyReminder,
     InboxSavedFilter,
     InboxTeamRole,
     InboxTeamRoundRobinCursor,

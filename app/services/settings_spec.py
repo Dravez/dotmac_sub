@@ -2712,6 +2712,16 @@ SETTINGS_SPECS: list[SettingSpec] = [
     ),
     SettingSpec(
         domain=SettingDomain.subscriber,
+        key="customer_minimum_age_years",
+        env_var="CUSTOMER_MINIMUM_AGE_YEARS",
+        value_type=SettingValueType.integer,
+        default=13,
+        min_value=0,
+        max_value=120,
+        label="Minimum customer age",
+    ),
+    SettingSpec(
+        domain=SettingDomain.subscriber,
         key="default_country_code",
         env_var="DEFAULT_COUNTRY_CODE",
         value_type=SettingValueType.string,
@@ -3880,24 +3890,6 @@ SETTINGS_SPECS: list[SettingSpec] = [
     # set would leave an editable control that decides nothing and an obvious
     # place for a second chat writer to reappear, so the concept is gone rather
     # than re-pointed. Migration 569 deletes any surviving row.
-    SettingSpec(
-        domain=SettingDomain.comms,
-        key="inbox_reply_reminder_delay_minutes",
-        env_var="INBOX_REPLY_REMINDER_DELAY_MINUTES",
-        value_type=SettingValueType.integer,
-        default=15,
-        min_value=1,
-        label="Team Inbox first reply reminder delay (minutes)",
-    ),
-    SettingSpec(
-        domain=SettingDomain.comms,
-        key="inbox_reply_reminder_repeat_minutes",
-        env_var="INBOX_REPLY_REMINDER_REPEAT_MINUTES",
-        value_type=SettingValueType.integer,
-        default=15,
-        min_value=1,
-        label="Team Inbox reply reminder repeat interval (minutes)",
-    ),
     SettingSpec(
         domain=SettingDomain.comms,
         key="campaign_processing_enabled",

@@ -237,6 +237,20 @@ def test_project_infrastructure_guide_is_linked_and_searchable() -> None:
     }
 
 
+def test_vendor_route_guidance_covers_optional_admin_proposals() -> None:
+    guide = guidance_for_path("/admin/vendors/routes/new")
+    fiber_map_guide = guidance_for_path("/admin/network/fiber")
+
+    assert guide is not None
+    assert guide.id == "vendor-routes"
+    assert fiber_map_guide is not None
+    assert fiber_map_guide.id == "vendor-routes"
+    content = " ".join((*guide.steps, *guide.notes)).lower()
+    assert "project and work order links are optional" in content
+    assert "no vendor quote is required" in content
+    assert "staff-owned proposals remain separate" in content
+
+
 def test_support_ticket_guidance_separates_editing_from_assignment() -> None:
     guide = guidance_for_path("/admin/support/tickets/123")
 
@@ -331,7 +345,7 @@ def test_every_help_guide_has_complete_action_sections() -> None:
         assert all(action.title and action.steps for action in actions)
 
 
-def test_help_navigation_matches_sidebar_destinations_without_adding_icons() -> None:
+def test_help_navigation_matches_sidebar_destinations_and_contextual_lookup() -> None:
     labels = {section.label for section in HELP_NAVIGATION}
     sidebar = Path("templates/components/navigation/admin_sidebar.html").read_text(
         encoding="utf-8"
@@ -346,8 +360,13 @@ def test_help_navigation_matches_sidebar_destinations_without_adding_icons() -> 
         guide_id for section in HELP_NAVIGATION for guide_id in section.guide_ids
     }
     assert navigation_guide_ids == guide_ids
-    assert guidance_for_path("/admin/workqueue") is None
-    assert guidance_for_path("/admin/surveys") is None
+    for path, guide_id in (
+        ("/admin/workqueue", "workqueue"),
+        ("/admin/surveys", "surveys"),
+    ):
+        guide = guidance_for_path(path)
+        assert guide is not None
+        assert guide.id == guide_id
 
 
 def test_help_center_uses_sidebar_sections_and_action_anchors() -> None:
