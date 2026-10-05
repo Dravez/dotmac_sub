@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from app.models.fiber_change_request import (
     FiberChangeRequest,
     FiberChangeRequestOperation,
+    FiberChangeRequestStatus,
 )
+from app.models.network import FiberSegment, FiberSpliceClosure
 from app.models.vendor_routes import (
     AsBuiltRoute,
     InstallationProject,
@@ -30,6 +32,55 @@ from app.models.work_order import WorkOrder
 from app.services.common import coerce_uuid
 
 logger = logging.getLogger(__name__)
+
+
+def get_active_work_order(db: Session, work_order_id: str | UUID) -> WorkOrder | None:
+    return (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == coerce_uuid(str(work_order_id)))
+        .filter(WorkOrder.is_active.is_(True))
+        .one_or_none()
+    )
+
+
+def get_installation_project_for_native_project(
+    db: Session, project_id: UUID
+) -> InstallationProject | None:
+    return (
+        db.query(InstallationProject)
+        .filter(InstallationProject.project_id == project_id)
+        .filter(InstallationProject.is_active.is_(True))
+        .one_or_none()
+    )
+
+
+def pending_proposal_names(
+    db: Session, asset_type: str, *, provenance_kind: str
+) -> set[str]:
+    return {
+        str((row.payload or {}).get("name") or "")
+        for row in (
+            db.query(FiberChangeRequest)
+            .filter(FiberChangeRequest.asset_type == asset_type)
+            .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+            .filter(FiberChangeRequest.status == FiberChangeRequestStatus.pending)
+            .all()
+        )
+        if (row.payload or {}).get("provenance", {}).get("kind") == provenance_kind
+    }
+
+
+def route_name_exists(db: Session, name: str) -> bool:
+    return (
+        db.query(FiberSegment.id).filter(FiberSegment.name == name).first() is not None
+    )
+
+
+def closure_name_exists(db: Session, name: str) -> bool:
+    return (
+        db.query(FiberSpliceClosure.id).filter(FiberSpliceClosure.name == name).first()
+        is not None
+    )
 
 
 def _geom_to_geojson(db: Session, geom) -> dict | None:

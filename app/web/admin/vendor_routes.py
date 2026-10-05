@@ -20,13 +20,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.fiber_change_request import (
-    FiberChangeRequest,
-    FiberChangeRequestOperation,
-    FiberChangeRequestStatus,
-)
-from app.models.network import FiberSegment, FiberSpliceClosure
-from app.models.vendor_routes import InstallationProject
+from app.models.fiber_change_request import FiberChangeRequestOperation
 from app.models.work_order import WorkOrder
 from app.schemas.vendor_portal import VendorRouteRevisionCreate
 from app.services import (
@@ -113,11 +107,8 @@ def _optional_scope(
 
     work_order = None
     if work_order_id:
-        work_order = (
-            db.query(WorkOrder)
-            .filter(WorkOrder.id == _form_uuid(work_order_id, "Invalid work order"))
-            .filter(WorkOrder.is_active.is_(True))
-            .one_or_none()
+        work_order = vendor_routes_api.get_active_work_order(
+            db, _form_uuid(work_order_id, "Invalid work order")
         )
         if work_order is None:
             raise HTTPException(status_code=404, detail="Work order not found")
@@ -130,10 +121,9 @@ def _optional_scope(
             )
         if project is None and work_order.project_id is not None:
             installation = (
-                db.query(InstallationProject)
-                .filter(InstallationProject.project_id == work_order.project_id)
-                .filter(InstallationProject.is_active.is_(True))
-                .one_or_none()
+                vendor_routes_api.get_installation_project_for_native_project(
+                    db, work_order.project_id
+                )
             )
             if installation is not None:
                 project = vendor_routes_api.get_route_project(db, str(installation.id))
@@ -216,18 +206,10 @@ def _create_admin_route_request(
         raise HTTPException(status_code=422, detail="The route name is too long")
     payload = _route_revision_payload(form)
     actor_id = _form_uuid(actor, "Authenticated actor is required")
-    pending_names = {
-        str((row.payload or {}).get("name") or "")
-        for row in (
-            db.query(FiberChangeRequest)
-            .filter(FiberChangeRequest.asset_type == "fiber_segment")
-            .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
-            .filter(FiberChangeRequest.status == FiberChangeRequestStatus.pending)
-            .all()
-        )
-        if (row.payload or {}).get("provenance", {}).get("kind") == "admin_route"
-    }
-    if db.query(FiberSegment).filter(FiberSegment.name == route_name).first():
+    pending_names = vendor_routes_api.pending_proposal_names(
+        db, "fiber_segment", provenance_kind="admin_route"
+    )
+    if vendor_routes_api.route_name_exists(db, route_name):
         raise HTTPException(
             status_code=409, detail="A route with this name already exists"
         )
@@ -341,20 +323,13 @@ def _create_admin_asset_proposal(
         raise HTTPException(status_code=422, detail="An asset name is required")
     if len(name) > 160:
         raise HTTPException(status_code=422, detail="Asset name is too long")
-    if db.query(FiberSpliceClosure).filter(FiberSpliceClosure.name == name).first():
+    if vendor_routes_api.closure_name_exists(db, name):
         raise HTTPException(
             status_code=409, detail="A closure with this name already exists"
         )
-    pending_closures = (
-        db.query(FiberChangeRequest)
-        .filter(FiberChangeRequest.asset_type == "splice_closure")
-        .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
-        .filter(FiberChangeRequest.status == FiberChangeRequestStatus.pending)
-        .all()
+    pending_names = vendor_routes_api.pending_proposal_names(
+        db, "splice_closure", provenance_kind="admin_map_asset"
     )
-    pending_names = {
-        str((row.payload or {}).get("name") or "") for row in pending_closures
-    }
     if name in pending_names:
         raise HTTPException(
             status_code=409,
