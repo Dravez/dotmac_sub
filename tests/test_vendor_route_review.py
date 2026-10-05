@@ -228,9 +228,7 @@ def test_review_queue_routes_templates_and_sot_are_explicit():
     authoring_template = (
         root / "templates/admin/vendors/route_authoring.html"
     ).read_text()
-    fiber_map_template = (
-        root / "templates/admin/network/fiber/map.html"
-    ).read_text()
+    fiber_map_template = (root / "templates/admin/network/fiber/map.html").read_text()
     queue = (root / "templates/admin/vendors/operations.html").read_text()
     sot = (root / "docs/SOT_RELATIONSHIP_MAP.md").read_text()
     migration = (

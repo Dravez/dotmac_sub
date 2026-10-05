@@ -83,9 +83,9 @@ def _closure_proposal_features(
     for request in query.order_by(FiberChangeRequest.created_at.asc()).all():
         payload = request.payload or {}
         provenance = payload.get("provenance") or {}
-        project_scoped = str(
-            provenance.get("installation_project_id") or ""
-        ) == str(project.id)
+        project_scoped = str(provenance.get("installation_project_id") or "") == str(
+            project.id
+        )
         work_order_scoped = str(provenance.get("work_order_id") or "") in work_order_ids
         if not project_scoped and not work_order_scoped:
             continue
@@ -539,9 +539,7 @@ def list_route_projects(db: Session) -> list[dict]:
                     request.id,
                 )
             continue
-        work_order_id = (
-            provenance.get("work_order_id")
-        )
+        work_order_id = provenance.get("work_order_id")
         if not work_order_id:
             continue
         try:

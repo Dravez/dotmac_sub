@@ -10,6 +10,7 @@ GeoJSON endpoint; the fiber overlay reuses ``fiber_plant_api``. Guarded by
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from json import JSONDecodeError
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -31,6 +32,7 @@ from app.schemas.vendor_portal import VendorRouteRevisionCreate
 from app.services import (
     fiber_change_requests,
     fiber_plant_api,
+    vendor_portal_operations,
     vendor_routes_api,
     work_order_views,
 )
@@ -59,16 +61,13 @@ def _requester_person_id(request: Request) -> str | None:
     return value or None
 
 
-def _route_revision_payload(form: dict) -> VendorRouteRevisionCreate:
+def _route_revision_payload(form: Mapping[str, object]) -> VendorRouteRevisionCreate:
     raw_geojson = str(form.get("geojson") or "").strip()
+    raw_length = str(form.get("length_meters") or "").strip()
     try:
         return VendorRouteRevisionCreate(
             geojson=json.loads(raw_geojson),
-            length_meters=(
-                float(form["length_meters"])
-                if str(form.get("length_meters") or "").strip()
-                else None
-            ),
+            length_meters=float(raw_length) if raw_length else None,
         )
     except (JSONDecodeError, TypeError, ValueError, ValidationError) as exc:
         raise HTTPException(
@@ -101,14 +100,16 @@ def _optional_scope(
     *,
     project_id: str | None,
     work_order_id: str | None,
-) -> tuple[dict | None, WorkOrder | None]:
+) -> tuple[dict[str, object] | None, WorkOrder | None]:
     """Resolve optional project/work-order provenance without requiring either."""
 
     project = None
     if project_id:
         project = vendor_routes_api.get_route_project(db, project_id)
         if project is None:
-            raise HTTPException(status_code=404, detail="Installation project not found")
+            raise HTTPException(
+                status_code=404, detail="Installation project not found"
+            )
 
     work_order = None
     if work_order_id:
@@ -194,7 +195,7 @@ def create_admin_suggested_route(
 
 def _create_admin_route_request(
     request: Request,
-    form: dict,
+    form: Mapping[str, object],
     db: Session,
     *,
     default_project_id: str | None = None,
@@ -219,15 +220,9 @@ def _create_admin_route_request(
         str((row.payload or {}).get("name") or "")
         for row in (
             db.query(FiberChangeRequest)
-            .filter(
-                FiberChangeRequest.asset_type == "fiber_segment"
-            )
-            .filter(
-                FiberChangeRequest.operation == FiberChangeRequestOperation.create
-            )
-            .filter(
-                FiberChangeRequest.status == FiberChangeRequestStatus.pending
-            )
+            .filter(FiberChangeRequest.asset_type == "fiber_segment")
+            .filter(FiberChangeRequest.operation == FiberChangeRequestOperation.create)
+            .filter(FiberChangeRequest.status == FiberChangeRequestStatus.pending)
             .all()
         )
         if (row.payload or {}).get("provenance", {}).get("kind") == "admin_route"
@@ -241,23 +236,27 @@ def _create_admin_route_request(
             status_code=409,
             detail="A route with this name is already awaiting review",
         )
-    route_payload = {
+    provenance: dict[str, object] = {
+        "kind": "admin_route",
+        "person_id": str(actor_id),
+    }
+    route_payload: dict[str, object] = {
         "name": route_name,
         "geojson": payload.geojson,
         "length_m": payload.length_meters,
         "is_active": False,
         "notes": str(form.get("notes") or "").strip()[:2000] or None,
-        "provenance": {"kind": "admin_route", "person_id": str(actor_id)},
+        "provenance": provenance,
     }
     if project is not None:
-        route_payload["provenance"].update(
+        provenance.update(
             {
                 "installation_project_id": str(project["id"]),
                 "native_project_id": str(project["native_project_id"]),
             }
         )
     if work_order is not None:
-        route_payload["provenance"].update(
+        provenance.update(
             {
                 "work_order_id": str(work_order.id),
                 "work_order_public_id": work_order.public_id,
@@ -312,7 +311,7 @@ def create_admin_asset_proposal(
 
 def _create_admin_asset_proposal(
     request: Request,
-    form: dict,
+    form: Mapping[str, object],
     db: Session,
     *,
     default_project_id: str | None = None,
@@ -326,9 +325,11 @@ def _create_admin_asset_proposal(
         project_id=project_id,
         work_order_id=str(form.get("work_order_id") or "").strip() or None,
     )
+    latitude_raw = str(form.get("latitude") or "").strip()
+    longitude_raw = str(form.get("longitude") or "").strip()
     try:
-        latitude = float(form.get("latitude"))
-        longitude = float(form.get("longitude"))
+        latitude = float(latitude_raw)
+        longitude = float(longitude_raw)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=422, detail="Valid map coordinates are required"
@@ -360,26 +361,27 @@ def _create_admin_asset_proposal(
             detail="A closure with this name is already awaiting review",
         )
     actor_id = _form_uuid(actor, "Authenticated actor is required")
-    payload = {
+    provenance: dict[str, object] = {
+        "kind": "admin_map_asset",
+        "person_id": str(actor_id),
+    }
+    payload: dict[str, object] = {
         "name": name,
         "latitude": latitude,
         "longitude": longitude,
         "geom": {"type": "Point", "coordinates": [longitude, latitude]},
         "is_active": False,
-        "provenance": {
-            "kind": "admin_map_asset",
-            "person_id": str(actor_id),
-        },
+        "provenance": provenance,
     }
     if project is not None:
-        payload["provenance"].update(
+        provenance.update(
             {
                 "installation_project_id": str(project["id"]),
                 "native_project_id": str(project["native_project_id"]),
             }
         )
     if work_order is not None:
-        payload["provenance"].update(
+        provenance.update(
             {
                 "work_order_id": str(work_order.id),
                 "work_order_public_id": work_order.public_id,
