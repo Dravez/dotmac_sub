@@ -163,7 +163,7 @@ def _generic_form_context(
     trigger_keys: tuple[str, ...] = (),
     customer_scope: str = "company",
     customer_ids: tuple[UUID, ...] = (),
-    conditions: tuple[Mapping[str, object], ...] = (),
+    conditions: Mapping[str, object] | tuple[Mapping[str, object], ...] = (),
     actions: tuple[Mapping[str, object], ...] = (),
     schedule: Mapping[str, object] | None = None,
     rule_id: UUID | None = None,
@@ -362,10 +362,11 @@ def _script_form_context(
         )
     )
     selected_target = target_type or (str(targets[0]["entity_type"]) if targets else "")
-    selected_events = next(
-        (item["events"] for item in targets if item["entity_type"] == selected_target),
-        [],
-    )
+    selected_events: list[object] = []
+    for item in targets:
+        if item["entity_type"] == selected_target and isinstance(item["events"], list):
+            selected_events = item["events"]
+            break
     selected_event = event_name or (str(selected_events[0]) if selected_events else "")
     return {
         **_base_context(request, db),
@@ -437,7 +438,8 @@ def _form_definition(
     actions_json: str,
     customer_ids: tuple[UUID, ...],
 ) -> tuple[
-    tuple[automation_rules.AutomationCondition, ...],
+    tuple[automation_rules.AutomationCondition, ...]
+    | automation_rules.AutomationConditionGroup,
     tuple[automation_rules.AutomationActionStep, ...],
 ]:
     raw_conditions = json.loads(conditions_json)
@@ -508,10 +510,22 @@ def _form_definition(
         return automation_rules.AutomationCondition(field.key, operator, value)
 
     if isinstance(raw_conditions, list):
+        parsed_conditions = tuple(parse_condition(item) for item in raw_conditions)
+        if not all(
+            isinstance(item, automation_rules.AutomationCondition)
+            for item in parsed_conditions
+        ):
+            raise ValueError(
+                "A top-level condition list must contain field conditions."
+            )
         conditions: (
             tuple[automation_rules.AutomationCondition, ...]
             | automation_rules.AutomationConditionGroup
-        ) = tuple(parse_condition(item) for item in raw_conditions)
+        ) = tuple(
+            item
+            for item in parsed_conditions
+            if isinstance(item, automation_rules.AutomationCondition)
+        )
     else:
         parsed_root = parse_condition(raw_conditions)
         if not isinstance(parsed_root, automation_rules.AutomationConditionGroup):
@@ -572,7 +586,7 @@ def _form_definition(
             )
         values = tuple(parsed_values)
         actions.append(automation_rules.AutomationActionStep(capability.key, values))
-    return tuple(conditions), tuple(actions)
+    return conditions, tuple(actions)
 
 
 def _safe_json_list(raw: str) -> tuple[Mapping[str, object], ...]:
@@ -625,7 +639,7 @@ def _form_trigger_keys(primary: str, raw: str) -> tuple[str, ...]:
     return keys or (primary,)
 
 
-def _editor_condition_value(value: object) -> object:
+def _editor_condition_value(value: object) -> Mapping[str, object] | None:
     if isinstance(value, automation_rules.AutomationCondition):
         if value.field_key == "customer_id":
             return None
@@ -1717,7 +1731,7 @@ def edit_automation_rule_draft(
         return _automation_redirect(
             error="Your account is missing a permission required to edit this rule."
         )
-    conditions = _editor_condition_value(state.conditions) or []
+    conditions = _editor_condition_value(state.conditions) or ()
     actions = tuple(
         {
             "action_key": step.action_key,

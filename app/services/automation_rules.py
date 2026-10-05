@@ -1122,7 +1122,9 @@ def _validate_persisted_definition(
         automation_capabilities.trigger_capability(trigger_key)
         for trigger_key in trigger_keys
     )
-    _validate_schedule_definition(trigger_keys=trigger_keys, schedule=version.schedule)
+    _validate_schedule_definition(
+        trigger_keys=trigger_keys, schedule=getattr(version, "schedule", None)
+    )
     for trigger in triggers:
         _require_permission(permission_keys, trigger.author_permission)
         if not trigger.runtime_enabled:
