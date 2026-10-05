@@ -80,4 +80,3 @@ def test_execute_prepared_run_preserves_non_retryable_action_failure(monkeypatch
 
     assert exc_info.value.retryable is False
     assert exc_info.value.code == "automation.execution.event_handler_failed"
-
