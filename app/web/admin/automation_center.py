@@ -204,7 +204,9 @@ def _generic_form_context(
             action
             for manifest in manifests
             for action in manifest.actions
-            if action.entity_type == item.entity_type
+            if automation_capabilities.action_applies_to_entity(
+                action, item.entity_type
+            )
             and action.authoring_enabled
             and action.runtime_enabled
             and (authorized or action.author_permission in permission_keys)

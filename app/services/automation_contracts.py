@@ -137,6 +137,10 @@ class AutomationActionCapability:
     #: event-to-command adapter is ready. Publication must reject it until this
     #: flag is enabled in a later reviewed slice.
     runtime_enabled: bool = False
+    #: Optional target types for shared actions. An empty tuple preserves the
+    #: original same-entity contract; ``("*",)`` admits the action for any
+    #: trigger target after the action validates its own recipient/target.
+    target_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -759,7 +759,9 @@ def _validate_definition(
                 "This action is retired and cannot be added to a rule.",
                 action_key=capability.key,
             )
-        if capability.entity_type != trigger.entity_type:
+        if not automation_capabilities.action_applies_to_entity(
+            capability, trigger.entity_type
+        ):
             raise _error(
                 "action_target_mismatch",
                 "An action cannot operate on the trigger target type.",
@@ -851,7 +853,9 @@ def _validate_persisted_definition(
                 "This retired action cannot be published from a draft.",
                 action_key=action_key,
             )
-        if capability.entity_type != trigger.entity_type:
+        if not automation_capabilities.action_applies_to_entity(
+            capability, trigger.entity_type
+        ):
             raise _error(
                 "action_target_mismatch",
                 "A stored action no longer matches the trigger target.",
