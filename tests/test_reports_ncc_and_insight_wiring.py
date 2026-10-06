@@ -5,6 +5,7 @@ the AI gateway the way test_ai_engine does.
 """
 
 from datetime import UTC, datetime
+from html import unescape
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -179,7 +180,7 @@ def test_ncc_complaints_page_canonicalises_date_filter_values(db_session, monkey
         per_page=20,
         db=db_session,
     )
-    body = response.body.decode()
+    body = unescape(response.body.decode())
 
     assert 'name="date_from" value="2026-08-01"' in body
     assert 'name="date_to" value="2026-08-31"' in body
