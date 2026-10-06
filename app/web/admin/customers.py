@@ -264,7 +264,6 @@ def customer_test_connection_form(
     customer_type: Literal["person", "business"],
     customer_id: UUID,
     subscription_id: UUID,
-    duration_hours: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     from app.services.test_connection import (
@@ -280,7 +279,6 @@ def customer_test_connection_form(
             query=TestConnectionPreviewQuery(
                 subscriber_id=customer_id,
                 subscription_id=subscription_id,
-                duration_hours=duration_hours,
             ),
         )
     except DomainError as exc:
@@ -314,7 +312,6 @@ def customer_test_connection_activate(
     customer_type: Literal["person", "business"],
     customer_id: UUID,
     subscription_id: UUID,
-    duration_hours: int = Form(...),
     command_id: UUID = Form(...),
 ):
     from app.services.test_connection import (
@@ -347,7 +344,6 @@ def customer_test_connection_activate(
                     subscriber_id=customer_id,
                     subscription_id=subscription_id,
                     actor_id=actor_id,
-                    duration_hours=duration_hours,
                 ),
             )
     except DomainError as exc:
