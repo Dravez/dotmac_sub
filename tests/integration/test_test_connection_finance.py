@@ -51,7 +51,7 @@ def _seed(db: Session) -> tuple[UUID, tuple[UUID, UUID], UUID]:
         reseller_id=_default_reseller_id(db),
     )
     offer = CatalogOffer(
-        name="Test",
+        name=f"Finance Test {uuid4()}",
         code=f"test-{uuid4()}",
         access_type=AccessType.fiber,
         service_type=ServiceType.residential,
