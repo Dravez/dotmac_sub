@@ -207,6 +207,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "If you have retry permission, continue a failed run; successful steps are skipped, and the retry result is recorded.",
         notes=(
             "Workflow and rule refer to the same central event-to-action mechanism; the technical /rules routes remain for compatibility.",
+            "For repeated temporary activations, choose Financial Access → Test Connection created, set the preceding 7-day count greater than 5, and choose Notify Finance with the intended team. Counts use classified requests created for each customer; queued email still requires delivery confirmation.",
             "The hub is a directory. Module ownership diagnostics are not part of the operator workspace.",
             "Run history is read-only, while continuing a failed run requires the separate retry permission.",
             "A target may be scriptable before it is workflow-executable; each mechanism has its own declared capability list.",
@@ -632,11 +633,14 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Billing, support, operations",
         "Grant or reverse approved temporary service coverage.",
         ("/admin/billing/service-extensions",),
-        "Set the reason, dates or days, and affected customer or subscription scope.",
+        "Choose Outage Compensation or Test Connection, then set the reason, dates or days, and affected scope. Test Connections require explicitly selected customers.",
         "Review billing-date and access effects before confirming.",
         "Use cancellation for pending extensions and reversal for applied extensions.",
         "Verify the request state and any recorded billing-date impact from the customer Billing tab under Extensions.",
-        notes=("Do not manually edit billing dates to undo an extension.",),
+        notes=(
+            "Do not manually edit billing dates to undo an extension.",
+            "Test Connection requests count separately for each customer over the preceding 7 days, including later cancellations or reversals. Creating a request does not apply service; a different staff approver must apply it.",
+        ),
     ),
     _guide(
         "payments",
