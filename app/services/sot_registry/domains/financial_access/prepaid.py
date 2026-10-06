@@ -642,6 +642,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "access-restoration, audit, and event helpers are flush-only."
                 ),
                 locking=(
+                    "Test Connection creates acquire customer-key advisory locks "
+                    "in stable UUID order before timestamping and counting their "
+                    "preceding-seven-day explicit requests. "
                     "Apply, cancel, and reverse select the extension FOR UPDATE. "
                     "Reverse also locks ordered immutable entries and affected "
                     "subscriptions before re-fingerprinting the preview. Apply "
@@ -687,6 +690,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.service_extensions.idempotency_conflict",
                     "financial.service_extensions.invalid_customer_identifier",
                     "financial.service_extensions.invalid_days",
+                    "financial.service_extensions.invalid_purpose",
+                    "financial.service_extensions.test_connection_scope_invalid",
                     "financial.service_extensions.invalid_extension_id",
                     "financial.service_extensions.invalid_idempotency_key",
                     "financial.service_extensions.invalid_scope",
@@ -720,6 +725,7 @@ SERVICES: tuple[SOTService, ...] = (
             ),
             events=EventContract(
                 event_types=(
+                    "billing.test_connection.created",
                     "billing.service_extension_created",
                     "billing.service_extension_applied",
                     "billing.service_extension_canceled",
@@ -730,6 +736,9 @@ SERVICES: tuple[SOTService, ...] = (
                 schema_version=1,
                 delivery_owner="events.dispatcher",
                 compatibility=(
+                    "Test Connection schema 1 carries customer UUID, count_7d, "
+                    "UTC creation window and up to ten immutable request references; "
+                    "there is one deterministic event per extension/customer. "
                     "Version 1 carries stable extension, reversal, command, correlation, "
                     "scope, status, and bounded outcome evidence without customer "
                     "contact data or full subscriber lists. Grant interval and "
@@ -815,6 +824,8 @@ SERVICES: tuple[SOTService, ...] = (
                 "docs/SOT_RELATIONSHIP_MAP.md",
             ),
             test_refs=(
+                "tests/test_test_connection_finance.py",
+                "tests/integration/test_test_connection_finance.py",
                 "tests/test_service_extensions.py",
                 "tests/test_web_billing_service_extensions.py",
                 "tests/test_service_extension_reversal_migration.py",

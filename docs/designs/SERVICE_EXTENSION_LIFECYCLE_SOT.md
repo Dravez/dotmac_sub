@@ -56,6 +56,14 @@ as a separate follow-up.
 
 ## Creation scope policy
 
+New extensions explicitly select outage compensation or Test Connection.
+Test Connection requests require explicit customer UUID scope; creation stages
+one customer-specific seven-day count event in the same transaction. Historical
+unclassified rows are never inferred from reasons. Classification, frozen
+counting, concurrency and Finance consequences are specified in
+`docs/designs/TEST_CONNECTION_FINANCE_ALERT.md`. Apply still requires a separate
+approver and retains all existing access and billing safeguards.
+
 New service extensions may target a POP site, NAS device, or an explicit set of
 customers. Whole-network creation is retired: the typed form options omit it and
 the `financial.service_extensions` create owner rejects it before writing any

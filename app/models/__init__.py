@@ -1096,6 +1096,7 @@ from app.models.team_inbox import (  # noqa: F401
     TeamInboxChannelRoute,
     TeamInboxEmailRoute,
 )
+from app.models.test_connection_review import TestConnectionFinanceReview  # noqa: F401
 from app.models.ticket_workflow import (  # noqa: F401
     SlaBreach,
     SlaBreachStatus,

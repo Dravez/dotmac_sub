@@ -7,7 +7,7 @@
 <div class="relative space-y-8" x-data="serviceExtensionForm('{{ form_values.scope_type }}')">
     {% call(content) page_header(
         title="New Service Extension",
-        subtitle="Compensate an outage by extending service validity",
+        subtitle="Request outage compensation or temporary service for connection testing",
         icon='<svg class="h-7 w-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3"/></svg>',
         color="amber",
         color2="orange",
@@ -26,6 +26,17 @@
     <form method="post" action="/admin/billing/service-extensions" class="space-y-6" @submit="submitting = true">
         {% include "components/forms/csrf_input.html" %}
         <input type="hidden" name="idempotency_key" value="{{ form_values.idempotency_key }}" />
+
+        <div>
+            <label for="extension-purpose" class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">Purpose</label>
+            <select id="extension-purpose" name="purpose" required aria-describedby="extension-purpose-help"
+                    class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-600 dark:bg-slate-700 dark:text-white">
+                {% for purpose in scope_options.purposes %}
+                <option value="{{ purpose.value }}" {% if purpose.value == form_values.purpose %}selected{% endif %}>{{ purpose.label }}</option>
+                {% endfor %}
+            </select>
+            <p id="extension-purpose-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">Test Connections require selected customers. Each request counts toward that customer's 7-day activity, even if later canceled. Applying service still requires a different approver.</p>
+        </div>
 
         <div>
             <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Reason</label>

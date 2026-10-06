@@ -10,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.service_extension import ServiceExtensionScope
+from app.models.service_extension import ServiceExtensionPurpose, ServiceExtensionScope
 from app.services import service_extensions as service_extensions_service
 from app.services import web_admin as web_admin_service
 from app.services import web_billing_service_extensions
@@ -67,6 +67,7 @@ def _form_context(
         "form_values": {
             "idempotency_key": idempotency_key,
             "reason": "",
+            "purpose": ServiceExtensionPurpose.outage_compensation.value,
             "window_start": "",
             "window_end": "",
             "days": 1,
@@ -272,6 +273,7 @@ def service_extension_create(
     subscriber_identifiers: str | None = Form(None),
     idempotency_key: str = Form(...),
     db: Session = Depends(get_db),
+    purpose: str = Form(ServiceExtensionPurpose.outage_compensation.value),
 ):
     ids: list[str] | None = None
     ids_resolved = False
@@ -297,6 +299,7 @@ def service_extension_create(
                 scope_id=_parse_optional_uuid(scope_id, "scope identifier"),
                 subscriber_identifiers=tuple(ids or ()),
                 subscriber_ids_resolved=ids_resolved,
+                purpose=ServiceExtensionPurpose(purpose),
             ),
         )
     except (DomainError, HTTPException, ValueError) as exc:
@@ -331,6 +334,7 @@ def service_extension_create(
                     error=str(detail),
                     values={
                         "reason": reason,
+                        "purpose": purpose,
                         "window_start": window_start,
                         "window_end": window_end,
                         "days": days,

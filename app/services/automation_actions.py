@@ -543,6 +543,37 @@ def _set_work_order_status(
     )
 
 
+def _notify_test_connection_finance(
+    db: Session,
+    command: ExecuteAutomationActionCommand,
+) -> AutomationActionOutcome:
+    from app.services.test_connection_finance import (
+        NotifyTestConnectionFinanceCommand,
+        notify_test_connection_finance,
+    )
+
+    if command.target.entity_type != "billing.service_extension":
+        raise AutomationActionExecutorError(
+            "The Finance action requires a Test Connection extension target."
+        )
+    notify_test_connection_finance(
+        db,
+        command=NotifyTestConnectionFinanceCommand(
+            context=command.context,
+            tenant_id=command.tenant_id,
+            event_id=command.event_id,
+            extension_id=command.target.entity_id,
+            rule_version_id=command.rule_version_id,
+            step_index=command.step_index,
+            service_team_id=_uuid_input(command.inputs, key="service_team_id"),
+        ),
+    )
+    return AutomationActionOutcome(
+        disposition=AutomationActionDisposition.succeeded,
+        outcome_code="test_connection_finance_review_queued",
+    )
+
+
 def _send_automation_notification(
     db: Session, command: ExecuteAutomationActionCommand
 ) -> AutomationActionOutcome:
@@ -650,6 +681,7 @@ _ACTION_EXECUTORS: Mapping[str, AutomationActionExecutor] = MappingProxyType(
         "operations.work_order.set_status": _set_work_order_status,
         "operations.vendor.set_status": _set_vendor_project_status,
         "communications.send_notification": _send_automation_notification,
+        "billing.test_connection.notify_finance": _notify_test_connection_finance,
     }
 )
 

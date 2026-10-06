@@ -90,6 +90,7 @@ class ServiceExtensionImpactProjection:
 class ServiceExtensionSummaryProjection:
     id: UUID
     reason: str
+    purpose_label: str
     status_presentation: StatusPresentation
     days: int
     scope_label: str
@@ -687,6 +688,9 @@ def build_service_extension_detail(
         summary=ServiceExtensionSummaryProjection(
             id=extension.id,
             reason=extension.reason,
+            purpose_label=extension.purpose.label
+            if extension.purpose
+            else "Unclassified (historical)",
             status_presentation=status_presentation,
             days=int(extension.days),
             scope_label=_SCOPE_LABELS[extension.scope_type],

@@ -43,6 +43,19 @@ class ServiceExtensionStatus(enum.Enum):
     reversed = "reversed"
 
 
+class ServiceExtensionPurpose(enum.Enum):
+    outage_compensation = "outage_compensation"
+    test_connection = "test_connection"
+
+    @property
+    def label(self) -> str:
+        return (
+            "Test Connection"
+            if self is ServiceExtensionPurpose.test_connection
+            else "Outage Compensation"
+        )
+
+
 class ServiceExtensionAnchorBasis(enum.Enum):
     """Why an extension grant starts at its recorded boundary."""
 
@@ -62,11 +75,26 @@ class ServiceExtensionReversalAnchorDisposition(enum.Enum):
 
 class ServiceExtension(Base):
     __tablename__ = "service_extensions"
+    __table_args__ = (
+        Index("ix_service_extensions_purpose_created", "purpose", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL preserves unclassified historical/old-version writes. Never infer
+    # a Test Connection from free-text reasons.
+    purpose: Mapped[ServiceExtensionPurpose | None] = mapped_column(
+        Enum(
+            ServiceExtensionPurpose,
+            native_enum=False,
+            length=32,
+            create_constraint=True,
+        ),
+        nullable=True,
+        default=ServiceExtensionPurpose.outage_compensation,
+    )
     window_start: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     column as sql_column,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -42,6 +43,7 @@ from app.models.service_extension import (
     ServiceExtension,
     ServiceExtensionAnchorBasis,
     ServiceExtensionEntry,
+    ServiceExtensionPurpose,
     ServiceExtensionReversal,
     ServiceExtensionReversalAnchorDisposition,
     ServiceExtensionReversalEntry,
@@ -50,6 +52,7 @@ from app.models.service_extension import (
 )
 from app.models.subscriber import Subscriber
 from app.schemas.audit import AuditEventCreate
+from app.schemas.test_connection import TestConnectionCreated, TestConnectionReference
 from app.services import settings_spec
 from app.services.account_lifecycle import (
     BillingAnchorProjectionCommand,
@@ -61,6 +64,7 @@ from app.services.common import coerce_uuid
 from app.services.customer_identity_resolution import resolve_customer_identity
 from app.services.domain_errors import DomainError
 from app.services.events.types import EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -130,6 +134,7 @@ class CreateServiceExtensionCommand:
     scope_id: uuid.UUID | None = None
     subscriber_identifiers: tuple[str, ...] = ()
     subscriber_ids_resolved: bool = False
+    purpose: ServiceExtensionPurpose = ServiceExtensionPurpose.outage_compensation
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +323,7 @@ class ServiceExtensionScopeOptions:
     nas_devices: tuple[ServiceExtensionScopeChoice, ...]
     scope_types: tuple[ServiceExtensionScope, ...]
     max_days: int
+    purposes: tuple[ServiceExtensionPurpose, ...] = tuple(ServiceExtensionPurpose)
 
 
 CREATABLE_SERVICE_EXTENSION_SCOPES: tuple[ServiceExtensionScope, ...] = (
@@ -1457,6 +1463,7 @@ def _create_fingerprint(
     scope_type: ServiceExtensionScope,
     scope_id: uuid.UUID | None,
     subscriber_ids: Sequence[uuid.UUID],
+    purpose: ServiceExtensionPurpose = ServiceExtensionPurpose.outage_compensation,
 ) -> str:
     payload = {
         "reason": reason,
@@ -1467,6 +1474,9 @@ def _create_fingerprint(
         "scope_id": str(scope_id) if scope_id else None,
         "subscriber_ids": sorted(str(item) for item in subscriber_ids),
     }
+    # Preserve fingerprints for outstanding pre-upgrade compensation requests.
+    if purpose == ServiceExtensionPurpose.test_connection:
+        payload["purpose"] = purpose.value
     return _sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
@@ -1590,6 +1600,7 @@ def _stage_lifecycle_evidence(
         "correlation_id": str(context.correlation_id),
         "idempotency_key_sha256": idempotency_key_sha256,
         "days": int(extension.days),
+        "purpose": extension.purpose.value if extension.purpose else None,
         "scope_type": extension.scope_type.value,
         "resulting_status": extension.status.value,
         "affected": int(extension.affected_count),
@@ -1627,6 +1638,88 @@ def _stage_lifecycle_evidence(
     )
 
 
+def _test_connection_scope(db: Session, customer_id: uuid.UUID) -> ColumnElement[bool]:
+    """Match an explicit customer UUID, never an applied subscription row."""
+    if db.get_bind().dialect.name == "postgresql":
+        return cast(ServiceExtension.scope_subscriber_ids, JSONB).contains(
+            [str(customer_id)]
+        )
+    # SQLite is the non-authoritative fast unit lane.
+    members = func.json_each(ServiceExtension.scope_subscriber_ids).table_valued(
+        "value"
+    )
+    return exists(
+        select(1).select_from(members).where(members.c.value == str(customer_id))
+    )
+
+
+def _stage_test_connection_events(
+    db: Session,
+    *,
+    extension: ServiceExtension,
+    customer_ids: Sequence[uuid.UUID],
+    context: CommandContext,
+) -> None:
+    """Freeze each customer's count in the authoritative create transaction."""
+    from app.services.events import emit_event
+
+    end = _as_utc(extension.created_at)
+    start = end - timedelta(days=7)
+    for customer_id in sorted(set(customer_ids)):
+        filters = (
+            ServiceExtension.purpose == ServiceExtensionPurpose.test_connection,
+            ServiceExtension.scope_type == ServiceExtensionScope.subscribers,
+            ServiceExtension.created_at > start,
+            ServiceExtension.created_at <= end,
+            _test_connection_scope(db, customer_id),
+        )
+        count = int(
+            db.scalar(
+                select(func.count()).select_from(ServiceExtension).where(*filters)
+            )
+            or 0
+        )
+        previous = db.scalars(
+            select(ServiceExtension)
+            .where(*filters, ServiceExtension.id != extension.id)
+            .order_by(ServiceExtension.created_at.desc(), ServiceExtension.id.desc())
+            .limit(9)
+        ).all()
+        evidence = TestConnectionCreated(
+            tenant_id=OPERATOR_TENANT_ID,
+            extension_id=extension.id,
+            customer_id=customer_id,
+            command_id=context.command_id,
+            correlation_id=context.correlation_id,
+            causation_id=context.causation_id,
+            created_at=end,
+            window_start=start,
+            window_end=end,
+            count_7d=count,
+            recent_connections=tuple(
+                TestConnectionReference(
+                    extension_id=item.id,
+                    created_at=_as_utc(item.created_at),
+                    created_by=item.created_by,
+                    days=item.days,
+                )
+                for item in (extension, *previous)
+            ),
+        )
+        emit_event(
+            db,
+            EventType.test_connection_created,
+            evidence.model_dump(mode="json"),
+            event_id=uuid.uuid5(
+                _EXTENSION_ID_NAMESPACE, f"test-connection:{extension.id}:{customer_id}"
+            ),
+            actor=context.actor,
+            account_id=customer_id,
+            subscriber_id=customer_id,
+            dispatch_after_commit=False,
+        )
+
+
 def create_service_extension(
     db: Session,
     command: CreateServiceExtensionCommand,
@@ -1655,6 +1748,16 @@ def create_service_extension(
                 "network_scope_retired",
                 "Whole-network service extensions can no longer be created.",
                 scope_type=command.scope_type.value,
+            )
+        if not isinstance(command.purpose, ServiceExtensionPurpose):
+            _error("invalid_purpose", "Choose a valid service-extension purpose.")
+        if (
+            command.purpose == ServiceExtensionPurpose.test_connection
+            and command.scope_type != ServiceExtensionScope.subscribers
+        ):
+            _error(
+                "test_connection_scope_invalid",
+                "Test Connections require explicit selected customers.",
             )
 
         resolved_subscriber_ids: list[uuid.UUID] = []
@@ -1686,15 +1789,29 @@ def create_service_extension(
             scope_type=command.scope_type,
             scope_id=scope_id,
             subscriber_ids=resolved_subscriber_ids,
+            purpose=command.purpose,
         )
         existing = db.get(ServiceExtension, replay_id)
         if existing is not None:
             return _assert_create_replay(existing, fingerprint=fingerprint)
 
+        # Serialize overlapping customer cohorts before timestamping and counting.
+        # Locks remain held until the entire creation transaction commits.
+        if command.purpose == ServiceExtensionPurpose.test_connection:
+            for customer_id in sorted(set(resolved_subscriber_ids)):
+                _lock_create_key(
+                    db,
+                    uuid.uuid5(
+                        _EXTENSION_ID_NAMESPACE,
+                        f"test-connection-customer:{customer_id}",
+                    ),
+                )
+
         now = _now_utc()
         extension = ServiceExtension(
             id=replay_id,
             reason=reason,
+            purpose=command.purpose,
             window_start=window_start,
             window_end=window_end,
             days=days,
@@ -1723,6 +1840,13 @@ def create_service_extension(
             idempotency_key_sha256=_sha256(idempotency_key),
             command_fingerprint_sha256=fingerprint,
         )
+        if command.purpose == ServiceExtensionPurpose.test_connection:
+            _stage_test_connection_events(
+                db,
+                extension=extension,
+                customer_ids=resolved_subscriber_ids,
+                context=command.context,
+            )
         return _create_outcome(extension, replayed=False)
 
     return execute_owner_command(
