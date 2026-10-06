@@ -781,11 +781,17 @@ def _validate_lookup_conditions(
     field = fields.get(str(value.get("field_key") or ""))
     lookup_key = field.lookup_key if field is not None else None
     operator = str(value.get("operator") or "")
-    if lookup_key in {None, AutomationLookupKey.customer} or operator in {
-        AutomationOperator.is_empty.value,
-        AutomationOperator.is_not_empty.value,
-    }:
+    if (
+        lookup_key is None
+        or lookup_key is AutomationLookupKey.customer
+        or operator
+        in {
+            AutomationOperator.is_empty.value,
+            AutomationOperator.is_not_empty.value,
+        }
+    ):
         return
+    assert lookup_key is not None
     raw = value.get("value")
     values = raw if isinstance(raw, list) else (raw,)
     if not all(

@@ -58,11 +58,11 @@ def _rows(
     db: Session,
     model: type[Base],
     id_column: ColumnElement[Any],
-    label_columns: tuple[ColumnElement[str], ...],
+    label_columns: tuple[ColumnElement[Any], ...],
     q: str,
     limit: int,
     *,
-    active_column: ColumnElement[bool] | None = None,
+    active_column: ColumnElement[Any] | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(model)
     if active_column is not None:
@@ -86,7 +86,7 @@ def _rows(
     )
 
 
-def _label(row: _LookupRow, columns: tuple[ColumnElement[str], ...]) -> str:
+def _label(row: _LookupRow, columns: tuple[ColumnElement[Any], ...]) -> str:
     values = [
         str(row.__dict__.get(column.key or "", "") or "").strip() for column in columns
     ]
@@ -96,11 +96,11 @@ def _label(row: _LookupRow, columns: tuple[ColumnElement[str], ...]) -> str:
 def _distinct_values(
     db: Session,
     model: type[Base],
-    column: ColumnElement[str],
+    column: ColumnElement[Any],
     q: str,
     limit: int,
     *,
-    active_column: ColumnElement[bool] | None = None,
+    active_column: ColumnElement[Any] | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(column).where(column.is_not(None)).distinct().order_by(column)
     if active_column is not None:
