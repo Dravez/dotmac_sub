@@ -137,6 +137,38 @@ def test_ncc_complaints_page_renders_twenty_rows_and_pagination(
     assert "Page 2" in body
 
 
+def test_ncc_complaints_page_tolerates_stale_per_page_values(
+    db_session, monkeypatch
+):
+    _stub_admin(monkeypatch)
+    monkeypatch.setattr(reports_web, "can", lambda request, permission: False)
+    for index in range(21):
+        db_session.add(
+            Ticket(
+                title=f"Stale page size complaint {index:02d}",
+                status="open",
+                priority="normal",
+                created_at=datetime(2026, 8, 1, 9, index, tzinfo=UTC),
+            )
+        )
+    db_session.commit()
+
+    response = reports_web.reports_ncc_complaints(
+        _request(),
+        date_from="2026-08-01",
+        date_to="2026-08-31",
+        page=1,
+        per_page=25,
+        db=db_session,
+    )
+    body = response.body.decode()
+
+    assert "Stale page size complaint 00" in body
+    assert "Stale page size complaint 19" in body
+    assert "Stale page size complaint 20" not in body
+    assert "Showing 1 to 20 of 21 complaints" in body
+
+
 def test_ncc_complaints_page_canonicalises_date_filter_values(db_session, monkeypatch):
     _stub_admin(monkeypatch)
     monkeypatch.setattr(reports_web, "can", lambda request, permission: True)

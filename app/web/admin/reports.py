@@ -2753,7 +2753,7 @@ def reports_ncc_complaints(
     date_from: str | None = None,
     date_to: str | None = None,
     page: int = Query(default=1, ge=1),
-    per_page: Literal[20, 50, 100] = Query(default=20),
+    per_page: int = Query(default=20, ge=1),
     db: Session = Depends(get_db),
 ):
     from app.web.admin import get_current_user, get_sidebar_stats
@@ -2770,7 +2770,12 @@ def reports_ncc_complaints(
             search=None,
             filters={"date_from": effective_date_from, "date_to": effective_date_to},
             page=page,
-            per_page=per_page,
+            per_page=(
+                per_page
+                if per_page
+                in ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.per_page_options
+                else ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.default_per_page
+            ),
         )
     )
     table_page = ncc_complaints_service.paginate_report(
