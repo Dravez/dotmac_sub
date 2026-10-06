@@ -675,6 +675,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "If the complete prepaid charge is unavailable, no renewal invoice is created and the billing date is not moved.",
         "Acknowledge duplicate risk only when the reviewed bank evidence proves the payment is distinct.",
         "Use allocation for existing unallocated value; it does not create new money.",
+        "Filter the Payments or Unallocated Payments list by customer, status, method, or dates. Leave either date blank to omit that boundary; leave both blank for all dates. Export CSV uses the same filters across the complete result.",
         notes=(
             "Use Payment Proof review for customer-uploaded transfer receipts; never bypass a duplicate warning by changing the reference.",
             "Do not create a manual invoice or manually change the next billing date to imitate a prepaid renewal.",
@@ -1460,6 +1461,12 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
         _action("verify-extension", "Verify extension history", 3),
     ),
     "payments": (
+        _action(
+            "filter-export-payments",
+            "Filter or export payments",
+            7,
+            permission="billing:payment:read",
+        ),
         _action(
             "record-payment",
             "Record a payment",
