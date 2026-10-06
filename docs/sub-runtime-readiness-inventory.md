@@ -80,6 +80,14 @@ file end to end.
 
 ## Local engine/session construction inventory
 
+The Test Connection Finance slice adds two test-only `sessionmaker` sites in
+`tests/integration/test_test_connection_finance.py`: one for independently
+committing concurrent creations and one for observing complete request/outbox
+rollback. Both bind the shared migrated PostgreSQL test engine. The reviewed
+aggregate test-fixture ratchet is now 170 (168 from main plus these two); production construction sites and
+the production per-file baseline are unchanged. This is test-fixture authorship,
+not an application runtime change.
+
 Every place that builds a `sqlalchemy.Engine` or an ORM `Session` outside
 `app.db`'s canonical `SessionLocal` factory (`app/db.py:69`), swept by AST
 (not text search — see the ratchet's sensitivity proofs) across the whole
@@ -202,7 +210,7 @@ two-directional ratchet, mirroring the existing
   without deliberately lowering the baseline, so the debt figure cannot
   drift down silently either.
 - `test_test_fixture_engine_family_is_swept` holds `tests/` to the same
-  two-directional discipline at the AGGREGATE level (currently 168) rather
+  two-directional discipline at the AGGREGATE level (currently 170) rather
   than per-file, because test fixtures legitimately construct one ad hoc
   engine per test and per-file tracking there would churn with test
   authorship, not with runtime readiness.

@@ -1,5 +1,11 @@
 """Native temporary subscription test-access ownership."""
 
+from app.services.automation_contracts import (
+    AutomationConditionField,
+    AutomationOperator,
+    AutomationTriggerCapability,
+    AutomationValueType,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -17,6 +23,39 @@ from app.services.sot_manifest import (
     owner_command_boundary_error_codes,
 )
 
+TRIGGERS = (
+    AutomationTriggerCapability(
+        key="billing.test_connection.created",
+        label="Test Connection created",
+        event_type="billing.test_connection.created",
+        event_schema_version=1,
+        entity_type="access.test_connection",
+        tenant_id_field="tenant_id",
+        entity_id_field="grant_id",
+        fields=(
+            AutomationConditionField(
+                key="customer_id",
+                label="Customer",
+                value_type=AutomationValueType.uuid,
+                operators=(AutomationOperator.in_values,),
+            ),
+            AutomationConditionField(
+                key="count_7d",
+                label="Test Connections created in the preceding 7 days",
+                value_type=AutomationValueType.integer,
+                operators=(
+                    AutomationOperator.greater_than,
+                    AutomationOperator.greater_than_or_equal,
+                    AutomationOperator.equals,
+                    AutomationOperator.less_than_or_equal,
+                ),
+            ),
+        ),
+        author_permission="subscription:test_connection",
+        runtime_enabled=True,
+    ),
+)
+
 OWNER = "access.test_connection"
 CONCERN = "bounded subscription test-access grants"
 SERVICE = SOTService(
@@ -26,6 +65,7 @@ SERVICE = SOTService(
         CONCERN,
         "current time-bounded test-access evidence",
         "current test-access network consequence",
+        "customer-scoped Test Connection creation counts",
     ),
     depends_on=(
         "control.settings_spec",
@@ -36,6 +76,11 @@ SERVICE = SOTService(
     ),
     contract=ServiceContract(
         concerns=(
+            ConcernContract(
+                name="customer-scoped Test Connection creation counts",
+                role=OwnerRole.RESOLVER,
+                input_names=("grant records",),
+            ),
             ConcernContract(
                 name=CONCERN,
                 role=OwnerRole.AUTHORITATIVE_RECORD,
@@ -82,7 +127,7 @@ SERVICE = SOTService(
         transaction=TransactionContract(
             mode=TransactionMode.OWNER_MANAGED,
             boundary="Each public write enters execute_owner_command once; audit, event and required timer are flush-only participants.",
-            locking="Subscription FOR UPDATE serializes activation; grant FOR UPDATE serializes expiry/delivery; partial unique index permits one open grant.",
+            locking="Subscription FOR UPDATE serializes activation; account-key advisory lock serializes creation counts across subscriptions before timestamp selection. Grant FOR UPDATE serializes expiry/delivery; partial unique index permits one open grant.",
             idempotency="command_id uniquely identifies an activation; repeat commands return its unchanged interval and mismatched replays fail closed.",
             retries="At-least-once events recompute current network state; stale expiry cannot expire a newer grant; transport retries never extend the interval.",
         ),
@@ -114,10 +159,13 @@ SERVICE = SOTService(
             ),
         ),
         events=EventContract(
-            event_types=("subscription.test_connection_changed",),
+            event_types=(
+                "subscription.test_connection_changed",
+                "billing.test_connection.created",
+            ),
             schema_version=1,
             delivery_owner="events.dispatcher",
-            compatibility="Additive v1 grant identity, subscription identity and transition.",
+            compatibility="Existing changed-event v1 remains unchanged. Creation-event v1 freezes customer-specific seven-day count and bounded references with command provenance in the activation transaction.",
             replay="Consequence always resolves current access; expiry consumes the exact grant identity, never a saved commercial-state snapshot.",
         ),
         projections=(
@@ -136,7 +184,10 @@ SERVICE = SOTService(
             state=AuthorityMigrationState.NATIVE, new_owner=OWNER
         ),
         steward="customer experience and network operations",
-        design_refs=("docs/designs/SUBSCRIPTION_TEST_CONNECTION.md",),
+        design_refs=(
+            "docs/designs/SUBSCRIPTION_TEST_CONNECTION.md",
+            "docs/designs/TEST_CONNECTION_FINANCE_ALERT.md",
+        ),
         test_refs=(
             "tests/test_subscription_test_connection.py",
             "tests/integration/test_subscription_test_connection.py",

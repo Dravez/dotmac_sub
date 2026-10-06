@@ -23,9 +23,15 @@ from app.services.sot_manifest import (
     TransactionMode,
     owner_command_boundary_error_codes,
 )
+from app.services.sot_registry.domains.financial_access.test_connections import (
+    ACTIONS as TEST_CONNECTION_ACTIONS,
+)
 from app.services.sot_registry.model import DomainSOT
 from app.services.sot_registry.test_connection_contracts import (
     SERVICE as TEST_CONNECTION_SERVICE,
+)
+from app.services.sot_registry.test_connection_contracts import (
+    TRIGGERS as TEST_CONNECTION_TRIGGERS,
 )
 
 DOMAIN = DomainSOT(
@@ -2398,7 +2404,20 @@ DOMAIN = DomainSOT(
     "once, map it to RADIUS state once, then let enforcement apply the "
     "network-side change.",
     automation=AutomationDomainCapabilities(
+        target_types=("access.test_connection",),
+        triggers=TEST_CONNECTION_TRIGGERS,
+        actions=TEST_CONNECTION_ACTIONS,
         catalog_items=(
+            AutomationCatalogItem(
+                key="billing.test_connection.finance_review",
+                label="Repeated Test Connection Finance review",
+                group="Usage and access",
+                state=AutomationCatalogState.available,
+                explanation="Native customer Test Connection creation counts with staff Finance review notifications.",
+                management_path="/admin/automation/workflows",
+                trigger_keys=("billing.test_connection.created",),
+                action_keys=("billing.test_connection.notify_finance",),
+            ),
             AutomationCatalogItem(
                 key="usage.radius_accounting_import",
                 label="RADIUS accounting import",

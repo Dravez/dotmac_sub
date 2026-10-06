@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.catalog import AccessCredential, Subscription, SubscriptionStatus
@@ -15,6 +15,7 @@ from app.models.domain_settings import SettingDomain
 from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.system_user import SystemUser
 from app.models.test_connection import TestConnectionGrant
+from app.schemas.test_connection import TestConnectionCreated, TestConnectionReference
 from app.services.audit_adapter import AuditActor, stage_audit_event
 from app.services.domain_errors import DomainError
 from app.services.events.dispatcher import emit_event
@@ -25,6 +26,7 @@ from app.services.form_contracts import (
     FormPrerequisite,
     register,
 )
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -399,6 +401,70 @@ def _validate_network_identity(db: Session, subscription: Subscription) -> None:
         )
 
 
+def _stage_finance_creation_event(
+    db: Session,
+    *,
+    grant: TestConnectionGrant,
+    context: CommandContext,
+) -> None:
+    """Freeze one customer's rolling creation count in the grant transaction."""
+    from app.services.events.dispatcher import emit_event as stage_creation_event
+
+    end = utc_datetime(grant.activated_at)
+    start = end - timedelta(days=7)
+    filters = (
+        TestConnectionGrant.subscriber_id == grant.subscriber_id,
+        TestConnectionGrant.activated_at > start,
+        TestConnectionGrant.activated_at <= end,
+    )
+    count = int(
+        db.scalar(select(func.count()).select_from(TestConnectionGrant).where(*filters))
+        or 0
+    )
+    previous = db.scalars(
+        select(TestConnectionGrant)
+        .where(*filters, TestConnectionGrant.id != grant.id)
+        .order_by(
+            TestConnectionGrant.activated_at.desc(), TestConnectionGrant.id.desc()
+        )
+        .limit(9)
+    ).all()
+    evidence = TestConnectionCreated(
+        tenant_id=OPERATOR_TENANT_ID,
+        grant_id=grant.id,
+        subscription_id=grant.subscription_id,
+        customer_id=grant.subscriber_id,
+        command_id=context.command_id,
+        correlation_id=context.correlation_id,
+        causation_id=context.causation_id,
+        created_at=end,
+        window_start=start,
+        window_end=end,
+        count_7d=count,
+        recent_connections=tuple(
+            TestConnectionReference(
+                grant_id=item.id,
+                created_at=utc_datetime(item.activated_at),
+                created_by=item.actor_label,
+                duration_seconds=item.duration_seconds,
+            )
+            for item in (grant, *previous)
+        ),
+    )
+    stage_creation_event(
+        db,
+        EventType.test_connection_created,
+        evidence.model_dump(mode="json"),
+        event_id=uuid5(
+            NAMESPACE_URL, f"subscription-test-connection-created:{grant.id}"
+        ),
+        actor=context.actor,
+        account_id=grant.subscriber_id,
+        subscription_id=grant.subscription_id,
+        dispatch_after_commit=False,
+    )
+
+
 def activate_test_connection(
     db: Session, *, command: ActivateTestConnectionCommand
 ) -> TestConnectionOutcome:
@@ -444,6 +510,15 @@ def activate_test_connection(
                     "The request identity has already been used for another activation.",
                 )
             return _outcome(previous, replayed=True)
+        # Serialize all subscriptions belonging to this customer before choosing
+        # the activation/creation time. Same-subscription replays remain under
+        # the existing subscription lock and return before this point.
+        if db.get_bind().dialect.name == "postgresql":
+            lock_id = uuid5(
+                NAMESPACE_URL, f"test-connection-customer:{subscription.subscriber_id}"
+            )
+            lock_key = int.from_bytes(lock_id.bytes[:8], "big", signed=True)
+            db.execute(select(func.pg_advisory_xact_lock(lock_key)))
         config = configuration(db)
         if not config.deadline_verified:
             raise _error(
@@ -554,6 +629,7 @@ def activate_test_connection(
             subscription_id=subscription.id,
             account_id=subscription.subscriber_id,
         )
+        _stage_finance_creation_event(db, grant=grant, context=command.context)
         return _outcome(grant)
 
     return execute_owner_command(
