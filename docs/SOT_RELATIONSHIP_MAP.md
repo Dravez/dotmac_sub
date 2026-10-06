@@ -3293,6 +3293,10 @@ exclusive start of the following UTC day. The export streams the complete
 result without a silent row cap, projects the canonical customer account
 display identity as `customer_name`, and does not expose internal account
 UUIDs. Routes and templates only transport and render the owner-defined scope.
+The list, CSV export, and unallocated-list HTTP adapters normalize empty HTML
+date fields to absent optional dates through `OptionalDateQuery`. Valid dates
+continue to the same typed list owner; malformed dates and reversed ranges
+remain validation errors rather than silently widening the requested scope.
 
 12. `ui.support_ticket_list_projection` extends the existing
     `app.services.web_support_tickets` web owner and delegates its filtered
