@@ -23,6 +23,9 @@ from app.services.sot_manifest import (
     TransactionMode,
     owner_command_boundary_error_codes,
 )
+from app.services.sot_registry.domains.test_connection import (
+    SERVICE as TEST_CONNECTION_SERVICE,
+)
 from app.services.sot_registry.model import DomainSOT
 
 DOMAIN = DomainSOT(
@@ -30,6 +33,7 @@ DOMAIN = DomainSOT(
     setting_domains=("radius",),
     authentication_mechanisms=("radius",),
     services=(
+        TEST_CONNECTION_SERVICE,
         SOTService(
             name="access.subscription_lifecycle",
             module="app.services.account_lifecycle",
@@ -1194,6 +1198,7 @@ DOMAIN = DomainSOT(
                 "access.radius_state",
                 "access.radius_reject",
                 "access.radius_target_registry",
+                "access.test_connection",
                 "control.settings_spec",
             ),
             notes=(

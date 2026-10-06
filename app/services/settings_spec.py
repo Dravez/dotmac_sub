@@ -213,6 +213,34 @@ MAX_CONCATENATED_SMS_CHARS = 918
 
 SETTINGS_SPECS: list[SettingSpec] = [
     SettingSpec(
+        domain=SettingDomain.radius,
+        key="test_connection_default_hours",
+        env_var=None,
+        value_type=SettingValueType.integer,
+        default=2,
+        min_value=1,
+        max_value=24,
+        label="Default Test Connection duration (hours)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.radius,
+        key="test_connection_maximum_hours",
+        env_var=None,
+        value_type=SettingValueType.integer,
+        default=24,
+        min_value=4,
+        max_value=24,
+        label="Maximum Test Connection duration (hours)",
+    ),
+    SettingSpec(
+        domain=SettingDomain.radius,
+        key="test_connection_deadline_verified",
+        env_var=None,
+        value_type=SettingValueType.boolean,
+        default=False,
+        label="Test Connection RADIUS/NAS deadline verified",
+    ),
+    SettingSpec(
         domain=SettingDomain.auth,
         key="credential_rotation_enabled",
         env_var="CREDENTIAL_ROTATION_ENABLED",

@@ -34,6 +34,14 @@ account-scoped; it is never coerced to zero, paid, funded, or safe-to-suspend.
 
 ## Owners and boundaries
 
+Subscription Test Connection is a separate bounded troubleshooting grant,
+owned by `access.test_connection`. A valid grant temporarily overrides financial
+network restrictions without changing debt, baselines, billing approval,
+commercial status, locks or coverage. Normal financial transitions continue;
+their network consequences respect current grant evidence. Absolute RADIUS/NAS
+deadlines and durable expiry return to current ordinary access policy. See
+[Subscription Test Connection](designs/SUBSCRIPTION_TEST_CONNECTION.md).
+
 | Concern | Owner | Contract |
 | --- | --- | --- |
 | Postpaid invoices and lifecycle | `financial.invoices` | Owns invoice construction, issue, due, settlement projection, void, and receivable document state. |

@@ -57,6 +57,7 @@ class EventType(enum.Enum):
     subscriber_unthrottled = "subscriber.unthrottled"
 
     # Subscription events
+    subscription_test_connection_changed = "subscription.test_connection_changed"
     subscription_created = "subscription.created"
     subscription_activated = "subscription.activated"
     subscription_paused = "subscription.paused"
