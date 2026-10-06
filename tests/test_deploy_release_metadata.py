@@ -245,6 +245,13 @@ exit 0
             )
             else "180"
         ),
+        "CANDIDATE_HEALTH_TIMEOUT_SECONDS": (
+            "0"
+            if not (
+                health_success and primary_health_success and rollback_health_success
+            )
+            else "600"
+        ),
         "CANDIDATE_DRAIN_SECONDS": "0",
         "BACKGROUND_RUNTIME_TIMEOUT_SECONDS": "0",
         "BACKGROUND_STABILITY_SECONDS": "0",
@@ -420,6 +427,7 @@ def test_deploy_reports_candidate_before_health_failure_rollback(
 
     assert result.returncode != 0
     assert "Warm candidate health gate failed" in result.stderr
+    assert "timeout 0s" in result.stderr
     assert "Warm candidate container state:" in result.stderr
     assert "Warm candidate logs (last 200 lines):" in result.stderr
     env_text = env_file.read_text()
