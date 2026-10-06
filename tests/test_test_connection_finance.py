@@ -33,8 +33,6 @@ from app.services.test_connection_finance import (
 )
 from tests.staff_identity_fixtures import add_bound_staff_user
 
-pytest_plugins = ("tests.test_subscription_test_connection",)
-
 NOW = datetime(2026, 10, 6, 12, tzinfo=UTC)
 
 
