@@ -83,6 +83,7 @@ _CORE_ROUTER_SPECS = [
     ("app.api.crm_webhooks", "router", "api", "none"),
     ("app.api.inbox_webhooks", "router", "api", "none"),
     ("app.api.meta_inbox_webhooks", "router", "api", "none"),
+    ("app.api.zeptomail_webhooks", "router", "api", "none"),
     ("app.api.fiber_inquiry_webhooks", "router", "api", "none"),
     ("app.api.erp_material_webhooks", "router", "api", "none"),
     ("app.api.erp_staff_access_webhooks", "router", "api", "none"),
@@ -141,6 +142,7 @@ _DEFERRED_API_ROUTER_SPECS = [
     ("app.api.staff_sync", "router", "api", "user"),
     ("app.api.customers", "router", "api", "user"),
     ("app.api.subscribers", "router", "api", "user"),
+    ("app.api.custom_fields", "router", "api", "user"),
     # Native referrals: staff surface rides crm:lead:* per-route
     # permissions; capture and signed-context signup are public continuations
     # from shared /r/{code} links.
@@ -567,6 +569,9 @@ def _startup_preflight() -> None:
     idempotent default-settings seeding is deferred off the serving path — see
     [_run_deferred_startup]."""
     _check_test_environment_leakage()
+    from app.services.avatar import require_compatible_avatar_policy
+
+    require_compatible_avatar_policy()
     from app.config import settings
     from app.services.credential_crypto import require_encryption_key
     from app.services.kernel_key_provider import (

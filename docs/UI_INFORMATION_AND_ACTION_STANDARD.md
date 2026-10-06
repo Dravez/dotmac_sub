@@ -358,6 +358,34 @@ implementation.
 
 ## OLT Operational Health Contract
 
+## Customer Portal Profile Contract
+
+- Audience and task: an authenticated customer maintains identity, biodata, and
+  the contact address used for correspondence and account notices from
+  `/portal/profile`.
+- Authority: `customer.portal_profile_commands` accepts one typed update and
+  owns the minimum-customer-age interpretation;
+  `app.services.customer_profile_location` supplies the ISO country and Nigerian
+  subdivision option projection; `app.services.ncc_location` validates and
+  canonicalizes Nigerian state/LGA pairs. The route, template, and browser
+  script are adapters.
+- Field behavior: Date of birth shows the effective minimum age and constrains
+  the date picker to the latest eligible DOB supplied by the owner. Country is
+  a searchable list of ISO countries. Nigeria enables
+  a searchable list of the 36 states plus the FCT, and a state selection enables
+  only that state's LGAs. Changing country or state clears an incompatible LGA.
+  A non-Nigerian country retains free-text Region and disables LGA.
+- Validation and state: server validation rejects future and underage DOBs,
+  unknown country codes, unknown Nigerian states, and mismatched state/LGA
+  pairs. A rejected submission keeps the customer's submitted contact-address
+  values and displays the owner error. Existing Address Line, City, and Postal
+  Code semantics remain unchanged.
+- Accessibility and responsive behavior: controls have programmatic labels,
+  keyboard-searchable native option lists, help text for dependent state, and a
+  single-column layout on small screens.
+
+## OLT Operational Health Contract
+
 - Audience and task: NOC staff compare OLTs in the inventory table and inspect
   one OLT without receiving contradictory operational answers.
 - Authority: `network.device_state` owns the binary result and verifier-reason
@@ -445,10 +473,22 @@ implementation.
   invoice or payment intent. Missing or unauthorized quotations render the same
   not-found state.
 - Review state: Draft/Sent Quotes without a current approval show `Awaiting
-  staff review` and no payment action. Approved Quotes show `Approved — Payment
-  required`. Rejected Quotes show the owner-supplied rejection message. Mobile
-  must consume `can_pay_deposit`; it must not infer payment eligibility from
-  Quote status or deposit amount.
+  staff review` and no payment action. Approved unpaid Quotes show `Approved —
+  Payment required`. Rejected Quotes show the owner-supplied rejection message.
+  A paid Quote shows `Paid` and no payment action, including when its linked
+  deposit Invoice is paid. Mobile consumes `deposit_paid` and `can_pay_deposit`;
+  it must not infer payment eligibility from Quote status or deposit amount.
+- Customer service requests show the selected installation or relocation type
+  and coverage before review. A move that changes access technology requires
+  the customer to choose a compatible destination plan before pinning the new
+  location. Customer Quote reads omit subtotal, tax, total,
+  deposit policy and amount, and priced line items until approval applies to the
+  current commercial snapshot. Staff must add at least one priced line and a
+  positive total before approving a request for payment. A changed Quote hides
+  prices again until staff approves its new snapshot. An approved relocation
+  shows the full charge and uses the canonical subscription-change Invoice
+  payment path. After settlement, the Home screen shows relocation progress
+  from the issued WorkOrder.
 - Mutation: the customer confirms through the CSRF-protected POST intent route.
   The request carries idempotency evidence only; it cannot submit amount,
   currency, invoice identity, or provider choice. The server fixes the provider
@@ -456,7 +496,9 @@ implementation.
   quotation-deposit capability.
 - States: unauthenticated, unauthorized/not found, expired, cancelled/inactive,
   already paid, Paystack unavailable, checkout failed, pending verification,
-  and confirmed are distinct and fail closed.
+  and confirmed are distinct and fail closed. Expected Paystack routing or
+  checkout-start failures return a generic retryable unavailable response; the
+  adapter logs the typed failure without exposing its configuration details.
 - Responsive behavior: summary and action stack on small screens, retain the
   authoritative amount and primary action, and do not expose internal
   collection-account or payment-intent identifiers.

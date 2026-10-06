@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event
@@ -37,6 +37,14 @@ from app.models.catalog import (
     Subscription,
     SubscriptionStatus,
 )
+from app.models.customer_subledger import (
+    CustomerPositionEffect,
+    CustomerPostingGroup,
+    PositionEffectKind,
+    PostingCommandKind,
+    PostingProducer,
+    PostingSourceKind,
+)
 from app.models.enforcement_lock import EnforcementLock, EnforcementReason
 from app.models.integration_platform import (
     IntegrationCapabilityBinding,
@@ -57,6 +65,7 @@ from app.services.account_credit_deposits import (
 )
 from app.services.billing._common import get_account_credit_balance
 from app.services.billing.account_credit import AccountCreditApplications
+from app.services.billing.customer_subledger import permitted_authority
 from app.services.billing.invoices import InvoiceIssuanceInput, Invoices
 from app.services.billing_health import (
     billing_health_observations,
@@ -69,7 +78,10 @@ from app.services.topup_intents import (
     TopupIntentChannel,
     TopupIntentStatus,
 )
-from tests.prepaid_funding_helpers import materialize_test_prepaid_opening_balance
+from tests.prepaid_funding_helpers import (
+    create_test_settled_payment_credit,
+    materialize_test_prepaid_opening_balance,
+)
 
 
 def _provider(db_session) -> PaymentProvider:
@@ -830,18 +842,39 @@ def test_invoice_created_during_checkout_consumes_confirmed_credit(
     )
 
 
-def test_two_invoices_consume_one_credit_source_in_oldest_debt_order(
-    db_session, subscriber
-):
+def test_eligible_invoice_statuses_consume_credit_in_fifo_order(db_session, subscriber):
     provider = _provider(db_session)
+    middle = Invoice(
+        account_id=subscriber.id,
+        invoice_number="INV-MIDDLE",
+        status=InvoiceStatus.issued,
+        currency="NGN",
+        total=Decimal("5000.00"),
+        balance_due=Decimal("5000.00"),
+        due_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    db_session.add(middle)
+    db_session.commit()
+    create_test_settled_payment_credit(
+        db_session,
+        subscriber.id,
+        Decimal("1000.00"),
+        paid_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    AccountCreditApplications.apply(db_session, str(subscriber.id))
+    db_session.commit()
+    db_session.refresh(middle)
+    assert middle.status is InvoiceStatus.partially_paid
+    assert middle.balance_due == Decimal("4000.00")
+
     intent = _intent(db_session, subscriber, provider, amount="9000.00")
     older = Invoice(
         account_id=subscriber.id,
         invoice_number="INV-OLDER",
-        status=InvoiceStatus.issued,
+        status=InvoiceStatus.overdue,
         currency="NGN",
-        total=Decimal("6000.00"),
-        balance_due=Decimal("6000.00"),
+        total=Decimal("4000.00"),
+        balance_due=Decimal("4000.00"),
         due_at=datetime.now(UTC),
     )
     newer = Invoice(
@@ -851,7 +884,7 @@ def test_two_invoices_consume_one_credit_source_in_oldest_debt_order(
         currency="NGN",
         total=Decimal("6000.00"),
         balance_due=Decimal("6000.00"),
-        due_at=datetime.now(UTC) + timedelta(days=1),
+        due_at=datetime.now(UTC) + timedelta(days=2),
     )
     db_session.add_all([older, newer])
     db_session.commit()
@@ -863,10 +896,12 @@ def test_two_invoices_consume_one_credit_source_in_oldest_debt_order(
     )
 
     db_session.refresh(older)
+    db_session.refresh(middle)
     db_session.refresh(newer)
     assert older.status == InvoiceStatus.paid
+    assert middle.status == InvoiceStatus.paid
     assert newer.status == InvoiceStatus.partially_paid
-    assert newer.balance_due == Decimal("3000.00")
+    assert newer.balance_due == Decimal("5000.00")
 
 
 def test_invoice_issued_after_deposit_uses_same_applicator(db_session, subscriber):
@@ -1031,6 +1066,42 @@ def test_voiding_invoice_releases_applied_account_credit(db_session, subscriber)
     assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal(
         "4000.00"
     )
+    original_posting = CustomerPostingGroup(
+        account_id=subscriber.id,
+        currency="NGN",
+        authority=permitted_authority(db_session),
+        command_kind=PostingCommandKind.customer_credit_application,
+        producer_owner=PostingProducer.account_credit_applications.value,
+        source_kind=PostingSourceKind.payment_allocation.value,
+        source_id=allocation.id,
+        occurred_at=allocation.created_at or issued_at,
+        command_id=uuid4(),
+        correlation_id=uuid4(),
+        idempotency_key=f"posting:test-void-application:{allocation.id}",
+        actor="pytest",
+        reason="seed customer-credit application posting for void release",
+    )
+    db_session.add(original_posting)
+    db_session.flush()
+    db_session.add_all(
+        [
+            CustomerPositionEffect(
+                group_id=original_posting.id,
+                effect=PositionEffectKind.customer_credit_consumed,
+                amount=Decimal("6000.00"),
+                currency="NGN",
+                payment_id=settlement.payment.id,
+            ),
+            CustomerPositionEffect(
+                group_id=original_posting.id,
+                effect=PositionEffectKind.receivable_settled,
+                amount=Decimal("6000.00"),
+                currency="NGN",
+                invoice_id=invoice.id,
+            ),
+        ]
+    )
+    db_session.flush()
 
     result = Invoices.void_system(
         db_session,
@@ -1043,6 +1114,17 @@ def test_voiding_invoice_releases_applied_account_credit(db_session, subscriber)
     assert result.invoice.status == InvoiceStatus.void
     assert allocation.is_active is False
     assert len(result.closure.ledger_evidence) == 2
+    posting_reversal = (
+        db_session.query(CustomerPostingGroup)
+        .filter(CustomerPostingGroup.reverses_group_id == original_posting.id)
+        .one()
+    )
+    assert posting_reversal.command_kind == PostingCommandKind.reversal
+    assert (
+        posting_reversal.producer_owner
+        == PostingProducer.account_credit_applications.value
+    )
+    assert posting_reversal.source_id == allocation.id
     assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal(
         "10000.00"
     )
@@ -1087,6 +1169,64 @@ def test_draft_invoice_does_not_consume_credit_until_issued(db_session, subscrib
     assert draft.status == InvoiceStatus.paid
 
 
+def test_prepaid_issuance_reserves_funding_before_its_own_receivable_debit(
+    db_session, subscriber
+):
+    subscriber.billing_mode = BillingMode.prepaid
+    db_session.commit()
+    boundary = datetime(2026, 6, 30, tzinfo=UTC)
+    materialize_test_prepaid_opening_balance(
+        db_session,
+        subscriber.id,
+        Decimal("0.00"),
+        position_at=boundary,
+    )
+    payment = create_test_settled_payment_credit(
+        db_session,
+        subscriber.id,
+        Decimal("18812.50"),
+        paid_at=datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    draft = Invoice(
+        account_id=subscriber.id,
+        invoice_number="INV-PREPAID-ISSUANCE-RESERVATION",
+        status=InvoiceStatus.draft,
+        currency="NGN",
+        subtotal=Decimal("17500.00"),
+        total=Decimal("18812.50"),
+        balance_due=Decimal("18812.50"),
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    result = Invoices.issue_draft_system(
+        db_session,
+        str(draft.id),
+        issuance=InvoiceIssuanceInput(
+            issued_at=datetime(2026, 8, 1, tzinfo=UTC),
+            due_at=datetime(2026, 8, 1, tzinfo=UTC),
+            due_date_basis=InvoiceDueDateBasis.contract_terms,
+            due_date_basis_ref="pytest:prepaid-issuance-reservation",
+            due_date_policy_version="pytest-v1",
+            reason="regression_prepaid_invoice_consumed_without_settlement",
+        ),
+        require_full_available_credit=True,
+        commit=True,
+    )
+
+    assert result.invoice.status is InvoiceStatus.paid
+    assert result.invoice.balance_due == Decimal("0.00")
+    allocation = (
+        db_session.query(PaymentAllocation)
+        .filter_by(payment_id=payment.id, invoice_id=draft.id)
+        .one()
+    )
+    assert allocation.amount == Decimal("18812.50")
+    assert allocation.ledger_entry_id is not None
+    assert allocation.consumption_ledger_entry_id is not None
+    assert get_account_credit_balance(db_session, str(subscriber.id)) == Decimal("0.00")
+
+
 def test_ineligible_invoice_states_and_currency_consume_nothing(db_session, subscriber):
     provider = _provider(db_session)
     invoices = [
@@ -1125,6 +1265,23 @@ def test_ineligible_invoice_states_and_currency_consume_nothing(db_session, subs
         ),
         Invoice(
             account_id=subscriber.id,
+            invoice_number="INV-PROFORMA-SKIP",
+            status=InvoiceStatus.issued,
+            currency="NGN",
+            total=Decimal("5000.00"),
+            balance_due=Decimal("5000.00"),
+            is_proforma=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-PAID-SKIP",
+            status=InvoiceStatus.paid,
+            currency="NGN",
+            total=Decimal("5000.00"),
+            balance_due=Decimal("0.00"),
+        ),
+        Invoice(
+            account_id=subscriber.id,
             invoice_number="INV-USD-SKIP",
             status=InvoiceStatus.issued,
             currency="USD",
@@ -1151,6 +1308,16 @@ def test_ineligible_invoice_states_and_currency_consume_nothing(db_session, subs
 def test_duplicate_confirmation_returns_same_payment(db_session, subscriber):
     provider = _provider(db_session)
     intent = _intent(db_session, subscriber, provider)
+    invoice = Invoice(
+        account_id=subscriber.id,
+        invoice_number="INV-IDEMPOTENT-AUTO-ALLOCATION",
+        status=InvoiceStatus.issued,
+        currency="NGN",
+        total=Decimal("5000.00"),
+        balance_due=Decimal("5000.00"),
+    )
+    db_session.add(invoice)
+    db_session.commit()
     transaction = _transaction(intent, external_id="gateway-idempotent")
 
     first = _settle(db_session, intent_id=intent.id, transaction=transaction)
@@ -1160,6 +1327,12 @@ def test_duplicate_confirmation_returns_same_payment(db_session, subscriber):
     assert second.payment.id == first.payment.id
     assert (
         db_session.query(Payment).filter_by(external_id="gateway-idempotent").count()
+        == 1
+    )
+    assert (
+        db_session.query(PaymentAllocation)
+        .filter_by(payment_id=first.payment.id, invoice_id=invoice.id)
+        .count()
         == 1
     )
 

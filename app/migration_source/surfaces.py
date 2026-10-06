@@ -571,23 +571,6 @@ COHORT_SURFACES: Final[tuple[SourceSurface, ...]] = (
         ),
     ),
     SourceSurface(
-        path="app/services/crm_ticket_pull.py",
-        family=EntryPointFamily.SERVICE,
-        authority=AuthorityRole.PARALLEL_WRITER,
-        boundary=BoundaryRole.PERSISTS,
-        reachability=Reachability.BACKGROUND_JOB,
-        disposition=Disposition.ROUTE_THROUGH_OWNER_FIRST,
-        entity_types=(CohortEntityType.CUSTOMER_ACCOUNT,),
-        owning_service="party.registry",
-        registry_declared=False,
-        open_question=None,
-        note=(
-            "A ticket importer that also writes the customer account's CRM provenance "
-            "id. Collecting an observation is legitimate; writing it onto the "
-            "authoritative row is what makes it parallel."
-        ),
-    ),
-    SourceSurface(
         path="app/services/customer_canonical_profile_patch.py",
         family=EntryPointFamily.SERVICE,
         authority=AuthorityRole.DECLARED_OWNER,
@@ -667,6 +650,27 @@ COHORT_SURFACES: Final[tuple[SourceSurface, ...]] = (
             "Declared as communications.customer_read_state, and stores that read "
             "state inside the customer account's `metadata` blob. A declared owner "
             "writing another owner's row is still a parallel writer of that row."
+        ),
+    ),
+    SourceSurface(
+        path="app/services/customer_portal_profile_commands.py",
+        family=EntryPointFamily.SERVICE,
+        authority=AuthorityRole.DECLARED_OWNER,
+        boundary=BoundaryRole.PERSISTS,
+        reachability=Reachability.ONLINE_REQUEST,
+        disposition=Disposition.RETIRE_AFTER_CUTOVER,
+        entity_types=(
+            CohortEntityType.CUSTOMER_ACCOUNT,
+            CohortEntityType.CUSTOMER_ADDRESS,
+        ),
+        owning_service="customer.portal_profile_commands",
+        registry_declared=True,
+        open_question=None,
+        note=(
+            "The registered typed portal profile command persists validated "
+            "customer-profile values and the closed notification-preference keys "
+            "on the locked Subscriber. This owner is retired as cohort customer "
+            "state moves to its target application."
         ),
     ),
     SourceSurface(
@@ -1060,19 +1064,6 @@ COHORT_SURFACES: Final[tuple[SourceSurface, ...]] = (
             "Counted so the ratchet still sees it, marked non-production so it does "
             "not inflate the writer surface a cutover has to displace."
         ),
-    ),
-    SourceSurface(
-        path="scripts/one_off/backfill_crm_subscriber_ids.py",
-        family=EntryPointFamily.CLI_SCRIPT,
-        authority=AuthorityRole.PARALLEL_WRITER,
-        boundary=BoundaryRole.PERSISTS,
-        reachability=Reachability.OPERATOR_COMMAND,
-        disposition=Disposition.RETIRE_AFTER_CUTOVER,
-        entity_types=(CohortEntityType.CUSTOMER_ACCOUNT,),
-        owning_service="customer.accounts",
-        registry_declared=False,
-        open_question=None,
-        note=("A one-off script stamping CRM provenance ids onto account rows."),
     ),
     SourceSurface(
         path="scripts/seed/seed_test_fixtures.py",

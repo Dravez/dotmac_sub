@@ -72,6 +72,7 @@ from app.services.common import (
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.events import EventType, emit_event
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import CommandContext
 from app.services.response import ListResponseMixin
 from app.services.sales import lifecycle as lead_lifecycle
@@ -1246,9 +1247,24 @@ def _recalculate_quote_totals(db: Session, quote: Quote) -> None:
 def _locked_quote_for_mutation(db: Session, quote_id: uuid.UUID) -> Quote | None:
     """Serialize every commercial mutation with Quote acceptance."""
 
-    return db.scalars(
+    quote = db.scalars(
         select(Quote).where(Quote.id == quote_id).with_for_update()
     ).one_or_none()
+    if quote is not None:
+        from app.models.subscription_change import SubscriptionChangeRequest
+
+        booked = db.scalar(
+            select(SubscriptionChangeRequest.id).where(
+                SubscriptionChangeRequest.confirmation_idempotency_key
+                == f"customer-relocation-quote:{quote.id}"
+            )
+        )
+        if booked is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A booked relocation Quote cannot be changed",
+            )
+    return quote
 
 
 def _locked_line_and_quote_for_mutation(
@@ -1317,6 +1333,7 @@ def _emit_lead_created(db: Session, lead: Lead) -> None:
             db,
             EventType.lead_created,
             {
+                "tenant_id": str(OPERATOR_TENANT_ID),
                 "lead_id": str(lead.id),
                 "status": lead.status,
                 "lead_source": lead.lead_source,
@@ -2586,6 +2603,7 @@ class QuoteLineItems(ListResponseMixin):
         item_id: str,
         payload: QuoteLineItemUpdate,
         *,
+        expected_quote_id: uuid.UUID | None = None,
         context: CommandContext | None = None,
     ) -> QuoteLineItem:
         from app.services.sales import quote_acceptance
@@ -2597,6 +2615,10 @@ class QuoteLineItems(ListResponseMixin):
         if not item:
             raise HTTPException(status_code=404, detail="Quote line item not found")
         assert quote is not None
+        if expected_quote_id is not None and quote.id != expected_quote_id:
+            # A nested web route must not be able to mutate a line belonging to
+            # a different Quote merely by substituting its line identifier.
+            raise HTTPException(status_code=404, detail="Quote line item not found")
         quote_acceptance.assert_quote_mutable(
             quote,
             mutation="line_item_update",
@@ -2624,6 +2646,7 @@ class QuoteLineItems(ListResponseMixin):
         db: Session,
         item_id: str,
         *,
+        expected_quote_id: uuid.UUID | None = None,
         context: CommandContext | None = None,
     ) -> None:
         """Remove a line and re-derive the quote's money from what is left.
@@ -2640,6 +2663,8 @@ class QuoteLineItems(ListResponseMixin):
         if not item:
             raise HTTPException(status_code=404, detail="Quote line item not found")
         assert quote is not None
+        if expected_quote_id is not None and quote.id != expected_quote_id:
+            raise HTTPException(status_code=404, detail="Quote line item not found")
         quote_acceptance.assert_quote_mutable(
             quote,
             mutation="line_item_delete",

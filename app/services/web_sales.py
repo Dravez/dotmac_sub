@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.catalog import RegionZone
@@ -59,6 +59,7 @@ from app.schemas.sales import (
     PipelineStageUpdate,
     PipelineUpdate,
     QuoteLineItemCreate,
+    QuoteLineItemUpdate,
     QuoteUpdate,
 )
 from app.schemas.sales_order import (
@@ -2872,9 +2873,51 @@ def delete_quote_line_item(
     db: Session,
     item_id: str,
     *,
+    quote_id: str,
     context: CommandContext | None = None,
 ) -> None:
-    sales_service.quote_line_items.delete(db, item_id, context=context)
+    sales_service.quote_line_items.delete(
+        db,
+        item_id,
+        expected_quote_id=coerce_uuid(quote_id),
+        context=context,
+    )
+
+
+def update_quote_line_item_from_form(
+    db: Session,
+    *,
+    quote_id: str,
+    item_id: str,
+    description: str | None,
+    quantity: str | None,
+    unit_price: str | None,
+    context: CommandContext | None = None,
+) -> None:
+    """Apply the staff line-editor fields through the typed line command."""
+
+    clean_description = (description or "").strip()
+    if not clean_description:
+        raise ValueError("A line item needs a description.")
+
+    def _decimal(value: str | None, field: str) -> Decimal:
+        try:
+            return Decimal((value or "").strip())
+        except (ArithmeticError, ValueError):
+            raise ValueError(f"{field} must be a number.") from None
+
+    payload = QuoteLineItemUpdate(
+        description=clean_description,
+        quantity=_decimal(quantity, "Quantity"),
+        unit_price=_decimal(unit_price, "Unit price"),
+    )
+    sales_service.quote_line_items.update(
+        db,
+        item_id,
+        payload,
+        expected_quote_id=coerce_uuid(quote_id),
+        context=context,
+    )
 
 
 def change_quote_discount_from_form(
@@ -3178,6 +3221,17 @@ def build_quote_detail_context(db: Session, *, quote_id: str) -> dict[str, Any]:
         lead = db.get(Lead, quote.lead_id)
 
     meta = quote.metadata_ if isinstance(quote.metadata_, dict) else {}
+    from app.models.subscription_change import SubscriptionChangeRequest
+
+    relocation_booked = (
+        db.scalar(
+            select(SubscriptionChangeRequest.id).where(
+                SubscriptionChangeRequest.confirmation_idempotency_key
+                == f"customer-relocation-quote:{quote.id}"
+            )
+        )
+        is not None
+    )
     deposit = meta.get("deposit") if isinstance(meta.get("deposit"), dict) else {}
     feasibility = (
         meta.get("feasibility") if isinstance(meta.get("feasibility"), dict) else {}
@@ -3203,7 +3257,9 @@ def build_quote_detail_context(db: Session, *, quote_id: str) -> dict[str, Any]:
         email_reason = "This Quote has expired."
 
     discount_change_reason: str | None = None
-    if not quote.is_active:
+    if relocation_booked:
+        discount_change_reason = "This relocation Quote already has a booking Invoice."
+    elif not quote.is_active:
         discount_change_reason = "This Quote is inactive."
     elif quote.status == QuoteStatus.accepted.value:
         discount_change_reason = "Accepted Quotes cannot be changed."
@@ -3218,7 +3274,9 @@ def build_quote_detail_context(db: Session, *, quote_id: str) -> dict[str, Any]:
         )
     payment_review = quote_payment_review.resolve_payment_review(quote)
     review_reason: str | None = None
-    if not quote.is_active:
+    if relocation_booked:
+        review_reason = "This relocation Quote already has a booking Invoice."
+    elif not quote.is_active:
         review_reason = "This Quote is inactive."
     elif quote.subscriber_id is None:
         review_reason = "Link a Customer before reviewing payment."
@@ -3246,6 +3304,10 @@ def build_quote_detail_context(db: Session, *, quote_id: str) -> dict[str, Any]:
         "is_accepted": (quote.status or "") == QuoteStatus.accepted.value,
         "quote_source": meta.get("source"),
         "quote_project_type": quote.project_type,
+        "service_option": meta.get("service_option"),
+        "source_subscription_id": meta.get("source_subscription_id"),
+        "destination_offer_id": meta.get("destination_offer_id"),
+        "relocation_booked": relocation_booked,
         "deposit": deposit,
         "deposit_percent": meta.get("deposit_percent"),
         "estimate_provisional": meta.get("estimate_provisional"),

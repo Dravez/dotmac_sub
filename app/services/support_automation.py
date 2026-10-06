@@ -18,6 +18,8 @@ from app.models.support import (
     TicketStatus,
     parse_ticket_status,
 )
+from app.models.ticket_workflow import TicketAssignmentRule
+from app.services import support_ticket_settings as support_ticket_settings_service
 from app.services.customer_identity_resolution import (
     AUTOMATION_SUPPRESSION_REASON_IDENTITY_REVIEW,
     identity_resolution_requires_manual_review,
@@ -39,6 +41,130 @@ class TicketAutomationProposal:
     status: TicketStatus | None = None
     due_in_hours: int | None = None
     tag: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationCenterLegacyConflictQuery:
+    """Automation Center actions and priority facts checked against legacy rules."""
+
+    priority: str
+    action_keys: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationCenterLegacyRuleConflict:
+    """One active legacy rule that could perform the same Ticket action."""
+
+    surface_key: str
+    rule_id: UUID
+    rule_name: str
+
+
+def _normalized_values(value: object) -> frozenset[str]:
+    values = value if isinstance(value, list | tuple | set) else (value,)
+    return frozenset(
+        str(item).strip().casefold() for item in values if str(item).strip()
+    )
+
+
+def _allows_value(value: object, expected: str) -> bool:
+    values = _normalized_values(value)
+    return not values or expected.casefold() in values
+
+
+def _assignment_rule_can_overlap_urgent_ticket(rule: TicketAssignmentRule) -> bool:
+    """Conservatively identify active legacy rules that can set a Ticket team."""
+
+    config = rule.match_config if isinstance(rule.match_config, dict) else {}
+    if rule.team_id is None or config.get("assignee_person_id"):
+        return False
+    return _allows_value(config.get("entity_types"), "ticket") and _allows_value(
+        config.get("priorities"), "urgent"
+    )
+
+
+def _automation_rule_can_overlap_urgent_ticket(rule: TicketAutomationRule) -> bool:
+    if (
+        rule.trigger is not AutomationTrigger.ticket_created
+        or rule.action_type is not AutomationActionType.assign_team
+    ):
+        return False
+    conditions = rule.conditions if isinstance(rule.conditions, dict) else {}
+    return _allows_value(conditions.get("priority"), "urgent")
+
+
+def _automation_rule_can_overlap_priority_ticket(
+    rule: TicketAutomationRule, *, priority: str
+) -> bool:
+    if (
+        rule.trigger is not AutomationTrigger.ticket_created
+        or rule.action_type is not AutomationActionType.set_priority
+    ):
+        return False
+    conditions = rule.conditions if isinstance(rule.conditions, dict) else {}
+    return not priority or _allows_value(conditions.get("priority"), priority)
+
+
+def list_automation_center_legacy_conflicts(
+    db: Session,
+    query: AutomationCenterLegacyConflictQuery,
+) -> tuple[AutomationCenterLegacyRuleConflict, ...]:
+    """Return live legacy overlap evidence for supported Ticket actions.
+
+    The legacy rules remain separate owners. This check compares priority where
+    both contracts expose it; region, type, channel, customer, and tag filters
+    are treated as possibly overlapping when the contracts cannot prove them
+    disjoint.
+    """
+
+    conflicts: list[AutomationCenterLegacyRuleConflict] = []
+    if (
+        "support.ticket.assign_service_team" in query.action_keys
+        and query.priority.casefold() in {"", "urgent"}
+        and support_ticket_settings_service.auto_assign_enabled(db)
+    ):
+        assignment_rules = db.scalars(
+            select(TicketAssignmentRule)
+            .where(TicketAssignmentRule.is_active.is_(True))
+            .order_by(TicketAssignmentRule.created_at, TicketAssignmentRule.id)
+        )
+        conflicts.extend(
+            AutomationCenterLegacyRuleConflict(
+                surface_key="support.ticket_assignment_rules",
+                rule_id=rule.id,
+                rule_name=rule.name,
+            )
+            for rule in assignment_rules
+            if _assignment_rule_can_overlap_urgent_ticket(rule)
+        )
+    check_assignment = (
+        "support.ticket.assign_service_team" in query.action_keys
+        and query.priority.casefold() in {"", "urgent"}
+    )
+    check_priority = "support.ticket.set_priority" in query.action_keys
+    if not check_assignment and not check_priority:
+        return ()
+    automation_rules = db.scalars(
+        select(TicketAutomationRule)
+        .where(TicketAutomationRule.is_active.is_(True))
+        .order_by(TicketAutomationRule.sort_order, TicketAutomationRule.id)
+    )
+    conflicts.extend(
+        AutomationCenterLegacyRuleConflict(
+            surface_key="support.ticket_creation_automation",
+            rule_id=rule.id,
+            rule_name=rule.name,
+        )
+        for rule in automation_rules
+        if (check_assignment and _automation_rule_can_overlap_urgent_ticket(rule))
+        or (
+            check_priority
+            and _automation_rule_can_overlap_priority_ticket(
+                rule, priority=query.priority.casefold()
+            )
+        )
+    )
+    return tuple(conflicts)
 
 
 def evaluate_rules(

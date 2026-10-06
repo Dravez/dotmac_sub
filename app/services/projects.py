@@ -126,6 +126,7 @@ from app.services.domain_errors import DomainError
 from app.services.events import emit_event
 from app.services.events.types import EventType
 from app.services.numbering import generate_number
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.owner_commands import (
     CommandContext,
     OwnerCommandDefinition,
@@ -2507,6 +2508,7 @@ def complete_from_verified_installation(
             "project_canceled",
             "Canceled project cannot receive implementation verification",
         )
+    previous_status = project.status
     project.status = ProjectStatus.completed.value
     project.completed_at = datetime.now(UTC)
     metadata = dict(project.metadata_ or {})
@@ -2519,6 +2521,8 @@ def complete_from_verified_installation(
         project,
         {
             "project_id": str(project.id),
+            "from_status": previous_status,
+            "to_status": project.status,
             "sales_order_id": str(project.sales_order_id)
             if project.sales_order_id
             else None,
@@ -3095,7 +3099,7 @@ def _emit_project_event(
     emit_event(
         db,
         EventType.custom,
-        {"name": event_name, **payload},
+        {"name": event_name, "tenant_id": str(OPERATOR_TENANT_ID), **payload},
         subscriber_id=project.subscriber_id,
     )
 

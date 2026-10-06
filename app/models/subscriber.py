@@ -66,14 +66,16 @@ class SubscriberStatus(enum.Enum):
       deleted  → canceled (soft-deleted, record preserved for audit)
 
     DotMac-only statuses:
-      suspended — generic suspension (local origin)
+      paused — derived while the account's current service has a pause episode
+      suspended — derived access and future-recurring-billing stop
       delinquent — past due, pre-suspension
     """
 
     new = "new"  # Signed up, awaiting activation
     active = "active"  # Active, paying subscriber
     blocked = "blocked"  # Temporarily blocked
-    suspended = "suspended"  # Generic suspension (DotMac-native)
+    suspended = "suspended"  # Access and future recurring billing stopped
+    paused = "paused"  # Derived temporary non-billable service pause
     disabled = "disabled"  # Administratively paused; explicit re-enable required
     canceled = "canceled"  # Terminated / soft-deleted
     delinquent = "delinquent"  # Past due, pre-suspension

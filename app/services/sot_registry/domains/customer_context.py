@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationActionCapability,
+    AutomationActionInput,
+    AutomationConditionField,
+    AutomationDomainCapabilities,
+    AutomationOperator,
+    AutomationScriptTargetCapability,
+    AutomationTriggerCapability,
+    AutomationValueType,
+)
+from app.services.custom_field_contracts import (
+    CustomFieldDomainCapabilities,
+    CustomFieldTargetCapability,
+    LegacyCustomFieldSurface,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -20,10 +35,157 @@ from app.services.sot_manifest import (
 )
 from app.services.sot_registry.model import DomainSOT
 
+_CUSTOMER_STATUS_FIELD = AutomationConditionField(
+    key="status",
+    label="Account status",
+    value_type=AutomationValueType.enum,
+    operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+    enum_values=(
+        "new",
+        "active",
+        "blocked",
+        "suspended",
+        "paused",
+        "disabled",
+        "canceled",
+        "delinquent",
+    ),
+)
+
+_CUSTOMER_PREVIOUS_STATUS_FIELD = AutomationConditionField(
+    key="previous_status",
+    label="Previous account status",
+    value_type=AutomationValueType.enum,
+    operators=(
+        AutomationOperator.equals,
+        AutomationOperator.not_equals,
+        AutomationOperator.in_values,
+        AutomationOperator.not_in_values,
+    ),
+    enum_values=(
+        "new",
+        "active",
+        "blocked",
+        "suspended",
+        "paused",
+        "disabled",
+        "canceled",
+        "delinquent",
+    ),
+)
+
+_CUSTOMER_ACTION_FIELD = AutomationConditionField(
+    key="action",
+    label="Status action",
+    value_type=AutomationValueType.enum,
+    operators=(AutomationOperator.equals, AutomationOperator.not_equals),
+    enum_values=("activate", "unsuspend", "suspend", "block", "disable"),
+)
+
 DOMAIN = DomainSOT(
     domain="customer_context",
     setting_domains=("subscriber",),
     services=(
+        SOTService(
+            name="customer.avatar",
+            module="app.services.avatar",
+            owns=("subscriber avatar selection and durable metadata",),
+            depends_on=("customer.accounts",),
+            notes=(
+                "Subscriber.avatar_url selects one public StoredFile. The storage "
+                "participant writes S3 before SQL and stages metadata without commit; "
+                "legacy static URLs remain readable until independently verified migration."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="subscriber avatar selection and durable metadata",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed avatar command",
+                            "canonical subscriber account",
+                        ),
+                        canonical_writer="customer.avatar",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed avatar command",
+                        owner="customer.avatar",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source="authenticated subscriber upload or removal request",
+                    ),
+                    AuthorityInput(
+                        name="canonical subscriber account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="locked Subscriber row and selected avatar URL",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "execute_owner_command commits Subscriber selection and "
+                        "StoredFile metadata atomically; S3 upload precedes SQL."
+                    ),
+                    locking="Subscriber row is selected FOR UPDATE before selection changes.",
+                    idempotency=(
+                        "Object keys are content-addressed; deletion is metadata-only. "
+                        "A retry may create another StoredFile row but selects one URL."
+                    ),
+                    retries="Retry the entire owner command after a rolled-back failure.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "customer.avatar.invalid_file",
+                        "customer.avatar.stale_legacy_url",
+                        "customer.avatar.subscriber_missing",
+                        *owner_command_boundary_error_codes("customer.avatar"),
+                    ),
+                    mapping_owner="authenticated avatar API adapter",
+                    fail_closed_on=(
+                        "missing subscriber",
+                        "invalid image",
+                        "missing object",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The existing subscriber.updated envelope names only the "
+                        "subscriber and avatar_url in updated_fields."
+                    ),
+                    replay=(
+                        "The owner command stages a pending event in the same "
+                        "transaction; the durable dispatcher replays delivery."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.CUTOVER_READY,
+                    old_owner="local static avatar writer",
+                    new_owner="customer.avatar",
+                    verification=(
+                        "tests/test_avatar_services.py and "
+                        "tests/test_avatar_migration_tools.py"
+                    ),
+                    cutover_gate=(
+                        "digest-bound dry-run inventory, guarded backfill, and "
+                        "per-object verification in docs/storage_s3.md"
+                    ),
+                    fallback_retirement="remove static compatibility only after all old URLs are migrated",
+                ),
+                steward="customer operations",
+                design_refs=("docs/storage_s3.md", "docs/SOT_RELATIONSHIP_MAP.md"),
+                test_refs=(
+                    "tests/test_avatar_services.py",
+                    "tests/test_avatar_migration_tools.py",
+                    "tests/architecture/test_avatar_storage_boundary.py",
+                    "tests/architecture/test_avatar_ingress_contract.py",
+                ),
+            ),
+        ),
         SOTService(
             name="customer.accounts",
             module="app.services.subscriber",
@@ -43,6 +205,86 @@ DOMAIN = DomainSOT(
                 "Subscriber or Reseller rows or decide account lifecycle "
                 "state themselves. "
                 "Existing direct writers remain shrink-only migration debt."
+            ),
+        ),
+        SOTService(
+            name="customer.search",
+            module="app.services.customer_search",
+            owns=("bounded active customer search and customer identity selection",),
+            depends_on=("customer.accounts",),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="bounded active customer search and customer identity selection",
+                        role=OwnerRole.RESOLVER,
+                        input_names=(
+                            "typed customer search query",
+                            "selected canonical customer identities",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="typed customer search query",
+                        owner="customer.search",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "validated CustomerSearchQuery provided by an authorized adapter"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="selected canonical customer identities",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="active Subscriber identities resolved by customer.search",
+                    ),
+                    AuthorityInput(
+                        name="canonical customer accounts",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="active Subscriber identity and account labels",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "Search and identity resolution read canonical customer rows; "
+                        "they do not change customer state or commit writes."
+                    ),
+                    locking="Read projections acquire no mutation locks.",
+                    idempotency=(
+                        "The same normalized query and account snapshot produce the "
+                        "same bounded customer matches."
+                    ),
+                    retries="Read-only search and identity resolution are safe to retry.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="customer search adapters",
+                    fail_closed_on=("selected active customer no longer exists",),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="customer.search",
+                    verification=(
+                        "customer search service and Automation Center customer-scope checks"
+                    ),
+                    cutover_gate=(
+                        "customer pickers resolve canonical active Subscriber identities"
+                    ),
+                    fallback_retirement=(
+                        "no picker may infer customer identity from display labels"
+                    ),
+                ),
+                steward="customer operations",
+                design_refs=(
+                    "docs/designs/AUTOMATION_CENTER_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_customer_search_services.py",
+                    "tests/architecture/test_customer_search_performance.py",
+                ),
             ),
         ),
         SOTService(
@@ -676,9 +918,150 @@ DOMAIN = DomainSOT(
                 "person edits and form category controls must not change "
                 "the customer account type. Approved legacy Subscriber "
                 "name corrections remain here until explicit Party cutover. "
+                "Customer portal profile writes are owned by "
+                "customer.portal_profile_commands. "
                 "AI-collected DOB/gender candidates are validated and saved "
                 "only through this owner after direct residential-customer "
                 "eligibility is rechecked."
+            ),
+        ),
+        SOTService(
+            name="customer.portal_profile_commands",
+            module="app.services.customer_portal_profile_commands",
+            owns=(
+                "customer minimum age policy",
+                "customer portal profile update",
+            ),
+            depends_on=(
+                "control.settings_spec",
+                "customer.accounts",
+                "customer.identity_scope",
+                "events.dispatcher",
+                "observability.audit_log",
+                "gis.spatial_sync",
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="customer minimum age policy",
+                        role=OwnerRole.POLICY,
+                        input_names=("minimum customer age setting",),
+                    ),
+                    ConcernContract(
+                        name="customer portal profile update",
+                        role=OwnerRole.COMMAND_WRITER,
+                        input_names=(
+                            "typed authenticated customer profile command",
+                            "locked canonical Subscriber account",
+                            "minimum customer age setting",
+                        ),
+                        canonical_writer="customer.portal_profile_commands",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="minimum customer age setting",
+                        owner="control.settings_spec",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "database-authoritative subscriber setting "
+                            "customer_minimum_age_years"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="typed authenticated customer profile command",
+                        owner="customer.portal_profile_commands",
+                        kind=AuthorityKind.CONTROL_INPUT,
+                        source=(
+                            "validated portal form values, authenticated subscriber "
+                            "scope, actor, and command correlation context"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="locked canonical Subscriber account",
+                        owner="customer.accounts",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="Subscriber row selected FOR UPDATE",
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OWNER_MANAGED,
+                    boundary=(
+                        "execute_owner_command commits profile, identity index, "
+                        "event, and audit evidence atomically; geocoding is a "
+                        "best-effort spatial consequence."
+                    ),
+                    locking="The target Subscriber is selected FOR UPDATE before validation and mutation.",
+                    idempotency=(
+                        "Applying the same typed profile values converges to the "
+                        "same Subscriber state; verification dispatch occurs only "
+                        "after the command transaction commits."
+                    ),
+                    retries="Retry the complete owner command after rollback using the same command context.",
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        *owner_command_boundary_error_codes(
+                            "customer.portal_profile_commands"
+                        ),
+                        "customer.portal_profile_commands.invalid_scope",
+                        "customer.portal_profile_commands.invalid_country",
+                        "customer.portal_profile_commands.invalid_region",
+                        "customer.portal_profile_commands.invalid_lga",
+                        "customer.portal_profile_commands.invalid_profile",
+                        "customer.portal_profile_commands.invalid_age_policy",
+                        "customer.portal_profile_commands.invalid_date_of_birth",
+                        "customer.portal_profile_commands.minimum_age_not_met",
+                        "customer.portal_profile_commands.subscriber_not_found",
+                        "customer.portal_profile_commands.invalid_biodata",
+                    ),
+                    mapping_owner="customer portal profile route",
+                    fail_closed_on=(
+                        "subscriber outside authenticated scope",
+                        "unknown country code",
+                        "invalid Nigerian state or FCT/LGA pairing",
+                        "invalid or unavailable minimum customer age policy",
+                        "future or underage date of birth",
+                        "invalid profile or required biodata",
+                    ),
+                ),
+                events=EventContract(
+                    event_types=("subscriber.updated",),
+                    schema_version=1,
+                    delivery_owner="events.dispatcher",
+                    compatibility=(
+                        "The event names the Subscriber, changed field names, "
+                        "and command correlation IDs without profile values."
+                    ),
+                    replay=(
+                        "The event is staged in the owner transaction and is "
+                        "replayed through the durable dispatcher after commit."
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.CUTOVER_READY,
+                    old_owner="customer.profile_commands portal update helper",
+                    new_owner="customer.portal_profile_commands",
+                    verification=(
+                        "tests/test_customer_profile_location.py and "
+                        "tests/test_customer_portal_gaps.py"
+                    ),
+                    cutover_gate="The profile POST route calls the typed owner directly.",
+                    fallback_retirement=(
+                        "The legacy profile helper no longer handles portal writes."
+                    ),
+                ),
+                steward="customer operations",
+                design_refs=(
+                    "docs/designs/SUBSCRIBER_SERVICE_LOCATION_SOT.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                    "docs/UI_INFORMATION_AND_ACTION_STANDARD.md",
+                ),
+                test_refs=(
+                    "tests/test_customer_profile_location.py",
+                    "tests/test_customer_portal_profile_age_policy.py",
+                    "tests/test_customer_portal_gaps.py",
+                ),
             ),
         ),
         SOTService(
@@ -1339,7 +1722,10 @@ DOMAIN = DomainSOT(
                     ),
                 ),
                 events=EventContract(
-                    event_types=("subscriber.updated",),
+                    event_types=(
+                        "subscriber.updated",
+                        "customer.account.status_changed",
+                    ),
                     schema_version=1,
                     delivery_owner="events.dispatcher",
                     compatibility=(
@@ -2299,7 +2685,10 @@ DOMAIN = DomainSOT(
             notes=(
                 "Authoritative zero is a valid total. Customer clients do "
                 "not replace server totals with loaded-session pages or "
-                "retention-limited chart series."
+                "retention-limited chart series. Operator-selected custom "
+                "date ranges are inclusive calendar-day windows; the Stats "
+                "Records CSV uses the same typed window and exports the full "
+                "filtered result rather than the visible page."
             ),
         ),
         SOTService(
@@ -2802,4 +3191,157 @@ DOMAIN = DomainSOT(
     "policy from subscription status or invoice rows, and consume usage "
     "totals with their server-owned provenance instead of reconstructing "
     "headlines from partial client data.",
+    automation=AutomationDomainCapabilities(
+        target_types=("customer.account",),
+        triggers=(
+            AutomationTriggerCapability(
+                key="customer.account.status_changed",
+                label="Customer account status changed",
+                event_type="customer.account.status_changed",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(
+                    _CUSTOMER_STATUS_FIELD,
+                    _CUSTOMER_PREVIOUS_STATUS_FIELD,
+                    _CUSTOMER_ACTION_FIELD,
+                ),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.created",
+                label="Customer account created",
+                event_type="subscriber.created",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.updated",
+                label="Customer account updated",
+                event_type="subscriber.updated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.suspended",
+                label="Customer account suspended",
+                event_type="subscriber.suspended",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.reactivated",
+                label="Customer account reactivated",
+                event_type="subscriber.reactivated",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(),
+                author_permission="customer:read",
+                runtime_enabled=True,
+            ),
+            AutomationTriggerCapability(
+                key="customer.account.scheduled",
+                label="Customer account scheduled evaluation",
+                event_type="customer.account.scheduled",
+                event_schema_version=1,
+                entity_type="customer.account",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+                fields=(_CUSTOMER_STATUS_FIELD,),
+                author_permission="customer:read",
+                runtime_enabled=True,
+                scheduled=True,
+                schedule_adapter_key="customer.account",
+            ),
+        ),
+        actions=(
+            AutomationActionCapability(
+                key="customer.account.set_status",
+                label="Apply customer account status action",
+                entity_type="customer.account",
+                command_owner="customer.account_status_actions",
+                command_name="confirm_account_status_change",
+                input_schema_version=1,
+                inputs=(
+                    AutomationActionInput(
+                        key="action",
+                        label="Action",
+                        value_type=AutomationValueType.enum,
+                        enum_values=(
+                            "activate",
+                            "unsuspend",
+                            "suspend",
+                            "block",
+                            "disable",
+                        ),
+                    ),
+                ),
+                author_permission="customer:update",
+                runtime_scope="one customer account",
+                idempotency="tenant/customer/status/version",
+                runtime_enabled=True,
+            ),
+        ),
+        script_targets=(
+            AutomationScriptTargetCapability(
+                key="customer.account",
+                label="Customer",
+                entity_type="customer.account",
+                client_events=("form.load", "field.change", "form.validate"),
+                server_events=(
+                    "customer.account.status_changed",
+                    "subscriber.created",
+                    "subscriber.updated",
+                    "subscriber.suspended",
+                    "subscriber.reactivated",
+                ),
+                read_permission="customer:read",
+                write_permission="customer:update",
+                tenant_id_field="tenant_id",
+                entity_id_field="subscriber_id",
+            ),
+        ),
+    ),
+    custom_fields=CustomFieldDomainCapabilities(
+        targets=(
+            CustomFieldTargetCapability(
+                key="subscriber",
+                label="Subscribers",
+                entity_id_type="uuid",
+                read_permission="customer:read",
+                write_permission="customer:update",
+                create_permission="customer:write",
+                detail_path_template="/admin/customers/person/{target_id}",
+                maximum_active_fields=50,
+            ),
+        ),
+        legacy_surfaces=(
+            LegacyCustomFieldSurface(
+                key="subscriber.operator_defined_fields",
+                label="Legacy subscriber custom fields",
+                owner_service="customer.accounts",
+                management_path="/api/v1/subscribers/{target_id}/custom-fields",
+                migration_state="retained_no_migration",
+            ),
+        ),
+    ),
 )

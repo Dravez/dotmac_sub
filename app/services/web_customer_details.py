@@ -82,7 +82,10 @@ from app.services.access_resolution import resolve_customer_access
 from app.services.billing_profile import resolve_billing_profiles
 from app.services.billing_settings import resolve_payment_due_days
 from app.services.credential_crypto import decrypt_credential
-from app.services.customer_financial_position import prepaid_available_balances
+from app.services.customer_financial_position import (
+    get_customer_billing_summary,
+    prepaid_available_balances,
+)
 from app.services.customer_network_path import (
     SubscriptionNetworkPath,
     project_customer_network_map,
@@ -118,9 +121,27 @@ from app.services.subscription_lifecycle_policy import (
     is_customer_impact_service_status,
     is_mrr_countable_service_status,
 )
+from app.services.test_connection_policy import TestConnectionAccess
 from app.services.topology.customer_path import resolve_customer_path
 
 logger = logging.getLogger(__name__)
+
+
+def _test_connection_summaries(
+    db: Session, subscriptions: Sequence[Subscription]
+) -> dict[str, object]:
+    from app.services.test_connection import TestConnectionQuery, current_summaries
+
+    return {
+        str(item.subscription_id): item
+        for item in current_summaries(
+            db,
+            query=TestConnectionQuery(
+                subscription_ids=tuple(sub.id for sub in subscriptions),
+                evaluated_at=datetime.now(UTC),
+            ),
+        )
+    }
 
 
 @dataclass(frozen=True)
@@ -491,18 +512,18 @@ def _build_common_financials(db: Session, accounts: Sequence[Subscriber]):
                 exc_info=True,
             )
 
-    total_invoiced = 0
+    total_invoiced = Decimal("0.00")
     total_paid = 0
     overdue_invoices = 0
     last_payment = None
     last_invoice = None
     if account_ids:
-        total_invoiced = (
-            db.query(func.coalesce(func.sum(Invoice.total), 0))
-            .filter(Invoice.account_id.in_(account_ids))
-            .filter(Invoice.is_active.is_(True))
-            .scalar()
-            or 0
+        total_invoiced = sum(
+            (
+                get_customer_billing_summary(db, account_id).total_billed
+                for account_id in account_ids
+            ),
+            start=Decimal("0.00"),
         )
         total_paid = (
             db.query(func.coalesce(func.sum(Payment.amount), 0))
@@ -1126,7 +1147,9 @@ def _build_access_endpoint_projection(
     return project_subscription_network_path(db, subscription, path=path)
 
 
-def _build_access_state_facts(subscription) -> dict[str, object] | None:
+def _build_access_state_facts(
+    subscription, *, test_access: TestConnectionAccess | None = None
+) -> dict[str, object] | None:
     """Why RADIUS is allowing or blocking this service, from the canonical owner.
 
     Reports what access_resolution decided, with its own reason strings. It
@@ -1135,7 +1158,7 @@ def _build_access_state_facts(subscription) -> dict[str, object] | None:
     """
 
     try:
-        decision = resolve_customer_access(subscription)
+        decision = resolve_customer_access(subscription, test_access=test_access)
     except Exception:
         logger.warning(
             "Access resolution failed for subscription %s",
@@ -1977,12 +2000,42 @@ def build_customer_detail_snapshot(
         )
     else:
         additional_routes_by_subscriber = {}
+    from app.services.test_connection import TestConnectionQuery, current_access
+
+    test_access_by_id = {
+        access.subscription_id: access
+        for access in current_access(
+            db,
+            query=TestConnectionQuery(
+                subscription_ids=tuple(sub.id for sub in network_subscriptions)
+                if include_network
+                else (),
+                evaluated_at=datetime.now(UTC),
+            ),
+        )
+    }
+    from app.services.test_connection import TestConnectionQuery, current_access
+
+    test_access_by_id = {
+        access.subscription_id: access
+        for access in current_access(
+            db,
+            query=TestConnectionQuery(
+                subscription_ids=tuple(sub.id for sub in network_subscriptions)
+                if include_network
+                else (),
+                evaluated_at=datetime.now(UTC),
+            ),
+        )
+    }
     for sub in network_subscriptions if include_network else ():
         # One composition per subscription: access facts, known incident,
         # live impact word, this period's SLA context, and one path
         # resolution feeding the endpoint card, the graph view, and the
         # trace via ui.customer_network_path_projection.
-        access_state_by_subscription[str(sub.id)] = _build_access_state_facts(sub)
+        access_state_by_subscription[str(sub.id)] = _build_access_state_facts(
+            sub, test_access=test_access_by_id.get(sub.id)
+        )
         incident_by_subscription[str(sub.id)] = _build_known_incident(db, sub)
         service_impact_by_subscription[str(sub.id)] = _build_service_impact(db, sub)
         service_level_by_subscription[str(sub.id)] = _build_service_level(db, sub)
@@ -2074,6 +2127,9 @@ def build_customer_detail_snapshot(
         },
         "subscriptions": subscriptions,
         "service_ipv4_by_subscription": service_ipv4_by_subscription,
+        "test_connection_by_subscription": _test_connection_summaries(
+            db, subscriptions
+        ),
         "restorable_subscription_ids": {
             str(subscription.id)
             for subscription in subscriptions

@@ -16,7 +16,6 @@ from sqlalchemy import and_, not_
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.catalog import Subscription, SubscriptionStatus
-from app.services.billing_settings import COLLECTIBLE_SERVICE_STATUSES
 from app.services.radius_access_state import (
     ACTIVE_STATUSES as RADIUS_ACTIVE_STATUSES,
 )
@@ -27,13 +26,16 @@ from app.services.radius_access_state import (
     TERMINATED_STATUSES as RADIUS_TERMINATED_STATUSES,
 )
 
-CUSTOMER_IMPACT_STATUSES = frozenset({SubscriptionStatus.active})
+CUSTOMER_IMPACT_STATUSES = frozenset(
+    {SubscriptionStatus.active, SubscriptionStatus.paused}
+)
 PORTAL_VISIBLE_SERVICE_STATUSES = frozenset(
     {
         SubscriptionStatus.pending,
         SubscriptionStatus.active,
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
     }
@@ -55,7 +57,17 @@ TERMINAL_SERVICE_STATUSES = frozenset(
         SubscriptionStatus.hidden,
     }
 )
-BILLING_COLLECTIBLE_SERVICE_STATUSES = frozenset(COLLECTIBLE_SERVICE_STATUSES)
+# Lifecycle previews answer whether a new recurring service period may be
+# created. That is deliberately narrower than billing_settings'
+# COLLECTIBLE_SERVICE_STATUSES, which retains suspended service only so an
+# already-recorded obligation can still be paid or reconciled.
+BILLING_COLLECTIBLE_SERVICE_STATUSES = frozenset(
+    {
+        SubscriptionStatus.active,
+        SubscriptionStatus.pending,
+        SubscriptionStatus.blocked,
+    }
+)
 RADIUS_PROJECTABLE_SERVICE_STATUSES = frozenset(
     RADIUS_ACTIVE_STATUSES | RADIUS_BLOCKED_STATUSES
 )

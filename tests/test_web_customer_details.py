@@ -1,6 +1,7 @@
 import json
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,8 @@ from app.models.billing import (
     LedgerEntry,
     LedgerEntryType,
     LedgerSource,
+    Payment,
+    PaymentStatus,
 )
 from app.models.catalog import (
     AccessCredential,
@@ -249,6 +252,77 @@ def test_customer_detail_billing_overview_has_responsive_amount_contract() -> No
     assert billing_overview.count("min-w-0") >= 5
     assert billing_overview.count("text-[clamp(1.25rem,2.2vw,1.8rem)]") == 5
     assert billing_overview.count("break-words") == 5
+
+
+@pytest.mark.parametrize(
+    ("permission_keys", "expected_tag"),
+    [
+        (frozenset({"billing:payment:read"}), "a"),
+        (frozenset(), "div"),
+    ],
+)
+def test_customer_detail_recent_payment_navigation_respects_permission(
+    monkeypatch,
+    db_session,
+    subscriber,
+    permission_keys: frozenset[str],
+    expected_tag: str,
+) -> None:
+    subscriber.user_type = UserType.customer
+    payment = Payment(
+        account_id=subscriber.id,
+        amount=Decimal("1250.00"),
+        status=PaymentStatus.succeeded,
+        receipt_number="RECENT-1250",
+    )
+    db_session.add(payment)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        customer_routes.web_notifications_service,
+        "customer_notification_picker_context",
+        lambda _db: {},
+    )
+    monkeypatch.setattr(
+        customer_routes.subscriber_party_binding_repair,
+        "resolve_repair_context",
+        lambda _db, *, subscriber_id: None,
+    )
+    import app.web.admin as admin_module
+
+    monkeypatch.setattr(admin_module, "get_current_user", lambda request: None)
+    monkeypatch.setattr(admin_module, "get_sidebar_stats", lambda db: {})
+    request = _bare_request(f"/admin/customers/person/{subscriber.id}#billing")
+    request.state.auth = {
+        "principal_id": uuid.uuid4(),
+        "principal_type": "system_user",
+        "roles": [],
+        "scopes": list(permission_keys),
+        "permission_keys": permission_keys,
+    }
+
+    response = customer_routes.person_detail(
+        request=request,
+        customer_id=str(subscriber.id),
+        panel=None,
+        usage_period="current",
+        usage_page=1,
+        usage_per_page=25,
+        usage_view="chart",
+        db=db_session,
+    )
+    rendered = response.body.decode("utf-8")
+    marker = f"recent-payment-{payment.id}"
+    row_match = re.search(
+        rf'<(?P<tag>a|div) [^>]*data-testid="{marker}"[^>]*>', rendered
+    )
+
+    assert row_match is not None
+    assert row_match.group("tag") == expected_tag
+    if expected_tag == "a":
+        assert f'href="/admin/billing/payments/{payment.id}"' in row_match.group(0)
+    else:
+        assert "href=" not in row_match.group(0)
 
 
 def test_customer_detail_billing_workspace_includes_pending_extension_request(
@@ -964,6 +1038,7 @@ def test_customer_subscription_action_context_hides_unauthorized_actions(
         "can_activate_subscriptions": True,
         "can_suspend_subscriptions": False,
         "can_reconcile_service_changes": False,
+        "can_test_connection": False,
     }
 
 
@@ -1049,6 +1124,7 @@ def test_person_detail_normalizes_usage_period(monkeypatch, db_session):
 
 def test_person_detail_stats_normalizes_usage_period(monkeypatch, db_session):
     captured: dict[str, object] = {}
+    customer_id = "00000000-0000-0000-0000-000000000123"
 
     def _template_response(template_name, context, status_code=200):
         captured["template_name"] = template_name
@@ -1060,28 +1136,22 @@ def test_person_detail_stats_normalizes_usage_period(monkeypatch, db_session):
             status_code=status_code,
         )
 
-    def _get_usage_page(
-        db,
-        usage_customer,
-        *,
-        period,
-        page,
-        per_page,
-        allow_postgres_fallback,
-    ):
-        captured["period"] = period
-        return {
-            "usage_records": [],
-            "period": period,
-            "page": page,
-            "per_page": per_page,
-            "total": 0,
-            "total_pages": 1,
-            "usage_summary": {},
-            "fup_status": None,
-            "usage_source": "none",
-            "has_subscription": False,
-        }
+    def _query_usage_page(db, query):
+        captured["query"] = query
+        return SimpleNamespace(
+            to_template_context=lambda: {
+                "usage_records": (),
+                "period": query.period.value,
+                "page": query.page,
+                "per_page": query.per_page,
+                "total": 0,
+                "total_pages": 1,
+                "usage_summary": {},
+                "fup_status": None,
+                "usage_source": "none",
+                "has_subscription": False,
+            }
+        )
 
     monkeypatch.setattr(
         customer_routes,
@@ -1095,8 +1165,8 @@ def test_person_detail_stats_normalizes_usage_period(monkeypatch, db_session):
     )
     monkeypatch.setattr(
         customer_routes.customer_portal,
-        "get_usage_page",
-        _get_usage_page,
+        "query_usage_page",
+        _query_usage_page,
     )
     monkeypatch.setattr(
         customer_routes,
@@ -1111,7 +1181,7 @@ def test_person_detail_stats_normalizes_usage_period(monkeypatch, db_session):
 
     response = customer_routes.person_detail_stats(
         request=SimpleNamespace(headers={}),
-        customer_id="cust-123",
+        customer_id=customer_id,
         usage_period="last,",
         usage_page=1,
         usage_per_page=25,
@@ -1119,7 +1189,7 @@ def test_person_detail_stats_normalizes_usage_period(monkeypatch, db_session):
     )
 
     assert response.status_code == 200
-    assert captured["period"] == "last"
+    assert captured["query"].period.value == "last"
     assert captured["template_name"] == "admin/customers/_stats_panel.html"
     assert captured["context"]["usage_portal"]["period"] == "last"
     assert captured["context"]["usage_subscription_id"] == "sub-123"
@@ -1133,6 +1203,70 @@ def test_admin_customer_stats_templates_register_portal_datetime_filter():
 
     assert portal_datetime is not None
     assert portal_datetime(None, "%b %d, %Y", "N/A") == "N/A"
+
+
+def test_person_detail_stats_export_uses_complete_typed_date_filter(
+    monkeypatch, db_session
+):
+    from app.services.customer_portal_flow_services import (
+        UsageDateRange,
+        UsagePeriod,
+        UsageRecordProjection,
+    )
+
+    customer_id = uuid.UUID("00000000-0000-0000-0000-000000000123")
+    selected_range = UsageDateRange(date(2026, 5, 1), date(2026, 5, 2))
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        customer_routes,
+        "_get_subscriber",
+        lambda db, subscriber_id: SimpleNamespace(id=customer_id),
+    )
+
+    def _query_usage_export(db, query):
+        captured["query"] = query
+        return SimpleNamespace(
+            usage_records=(
+                UsageRecordProjection(
+                    recorded_at=datetime(2026, 5, 2, tzinfo=UTC),
+                    usage_type="=Daily Usage",
+                    amount=2.5,
+                    usage_amount=2.5,
+                    download_amount=1.5,
+                    upload_amount=1.0,
+                    unit="GB",
+                    description="Total usage",
+                ),
+            ),
+            date_range=selected_range,
+            period=UsagePeriod.custom,
+        )
+
+    monkeypatch.setattr(
+        customer_routes.customer_portal,
+        "query_usage_export",
+        _query_usage_export,
+    )
+
+    response = customer_routes.person_detail_stats_export(
+        customer_id=str(customer_id),
+        usage_period="custom",
+        usage_start_date=date(2026, 5, 1),
+        usage_end_date=date(2026, 5, 2),
+        db=db_session,
+    )
+
+    query = captured["query"]
+    assert query.period is UsagePeriod.custom
+    assert query.date_range == selected_range
+    assert response.status_code == 200
+    assert response.media_type == "text/csv"
+    assert "2026-05-01_to_2026-05-02.csv" in response.headers["content-disposition"]
+    csv_text = response.body.decode()
+    assert "Date,Type,Total usage,Download,Upload,Unit,Notes" in csv_text
+    assert "'=Daily Usage" in csv_text
+    assert "2026-05-02" in csv_text
 
 
 def test_customer_detail_snapshot_includes_pending_location_request(
@@ -1239,3 +1373,95 @@ def test_customer_financial_batch_excludes_postpaid_accounts(
     web_customer_details._build_common_financials(db_session, [subscriber])
 
     assert calls == []
+
+
+def test_customer_total_invoiced_uses_canonical_billed_cohort(db_session, subscriber):
+    from app.services import web_customer_details
+
+    subscriber.user_type = UserType.customer
+    invoices = [
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-BILLED-ISSUED",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("100.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("100.00"),
+            balance_due=Decimal("100.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-BILLED-PAID",
+            status=InvoiceStatus.paid,
+            subtotal=Decimal("50.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("50.00"),
+            balance_due=Decimal("0.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-VOID",
+            status=InvoiceStatus.void,
+            subtotal=Decimal("800.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("800.00"),
+            balance_due=Decimal("0.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-DRAFT",
+            status=InvoiceStatus.draft,
+            subtotal=Decimal("900.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("900.00"),
+            balance_due=Decimal("900.00"),
+            currency="NGN",
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-PROFORMA",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("700.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("700.00"),
+            balance_due=Decimal("700.00"),
+            currency="NGN",
+            is_proforma=True,
+            is_active=True,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-INACTIVE",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("600.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("600.00"),
+            balance_due=Decimal("600.00"),
+            currency="NGN",
+            is_active=False,
+        ),
+        Invoice(
+            account_id=subscriber.id,
+            invoice_number="INV-OTHER-CURRENCY",
+            status=InvoiceStatus.issued,
+            subtotal=Decimal("1000.00"),
+            tax_total=Decimal("0.00"),
+            total=Decimal("1000.00"),
+            balance_due=Decimal("1000.00"),
+            currency="USD",
+            is_active=True,
+        ),
+    ]
+    db_session.add_all(invoices)
+    db_session.commit()
+
+    result = web_customer_details._build_common_financials(db_session, [subscriber])
+
+    assert result["financials"]["total_invoiced"] == Decimal("150.00")

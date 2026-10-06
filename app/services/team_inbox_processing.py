@@ -233,6 +233,14 @@ def _message_payload(
             str(data["permalink_url"]) if data.get("permalink_url") else None
         ),
         media_url=str(data["media_url"]) if data.get("media_url") else None,
+        meta_referral_observation=(
+            {str(key): str(value) for key, value in referral.items()}
+            if isinstance(
+                referral := data.get("meta_referral_observation"),
+                dict,
+            )
+            else None
+        ),
         contact_profile=(
             {
                 "display_name": (
@@ -365,9 +373,11 @@ def process_provider_observation(
                                 "latitude": data.get("latitude"),
                                 "longitude": data.get("longitude"),
                             },
-                            "selected_plan": {"name": data.get("selected_plan_name")},
                         }
                     )
+                    selected_plan_name = data.get("selected_plan_name")
+                    if selected_plan_name:
+                        request_data["selected_plan"] = {"name": selected_plan_name}
                 inbound_result = team_inbox_receive.receive_fiber_inquiry(
                     db,
                     payload=FiberInquiryRequest.model_validate(
@@ -448,9 +458,14 @@ def process_provider_observation(
                             "surface": payload.surface,
                             "permalink_url": payload.permalink_url,
                             "media_url": payload.media_url,
+                            "meta_referral_observation": payload.meta_referral_observation,
                             "contact_profile": payload.contact_profile,
                             "observation_id": str(row.id),
-                            "campaign_attributed": payload.campaign_attributed,
+                            **(
+                                {"campaign_attributed": True}
+                                if payload.campaign_attributed
+                                else {}
+                            ),
                             "attachments": [
                                 _attachment_metadata(item)
                                 for item in payload.attachments

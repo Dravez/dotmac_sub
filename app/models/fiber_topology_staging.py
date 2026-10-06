@@ -54,6 +54,15 @@ class FiberTopologySourceBatch(Base):
             "length(manifest_sha256) = 64",
             name="ck_fiber_topology_batch_manifest_sha256",
         ),
+        CheckConstraint(
+            "command_key_sha256 IS NULL OR length(command_key_sha256) = 64",
+            name="ck_fiber_topology_batch_command_key_sha256",
+        ),
+        CheckConstraint(
+            "command_fingerprint_sha256 IS NULL OR "
+            "length(command_fingerprint_sha256) = 64",
+            name="ck_fiber_topology_batch_command_fingerprint_sha256",
+        ),
         Index(
             "ix_fiber_topology_batch_profile_created",
             "profile",
@@ -62,6 +71,10 @@ class FiberTopologySourceBatch(Base):
         Index(
             "ix_fiber_topology_batch_file_sha256",
             "file_sha256",
+        ),
+        UniqueConstraint(
+            "command_key_sha256",
+            name="uq_fiber_topology_batch_command_key",
         ),
     )
 
@@ -75,6 +88,8 @@ class FiberTopologySourceBatch(Base):
     external_id_key: Mapped[str] = mapped_column(String(80), nullable=False)
     file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_key_sha256: Mapped[str | None] = mapped_column(String(64))
+    command_fingerprint_sha256: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     feature_count: Mapped[int] = mapped_column(Integer, nullable=False)
     blocker_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -112,7 +127,8 @@ class FiberTopologyStagedFeature(Base):
             name="ck_fiber_topology_staged_feature_match_status",
         ),
         CheckConstraint(
-            "external_id IS NOT NULL OR match_status = 'blocked'",
+            "external_id IS NOT NULL OR display_name IS NOT NULL "
+            "OR match_status = 'blocked'",
             name="ck_fiber_topology_staged_feature_identity",
         ),
         CheckConstraint(
@@ -183,4 +199,71 @@ class FiberTopologyStagedFeature(Base):
     )
 
 
-__all__ = ["FiberTopologySourceBatch", "FiberTopologyStagedFeature"]
+class FiberTopologyFeatureClassificationReview(Base):
+    """Append-only operator classification decision for a staged feature."""
+
+    __tablename__ = "fiber_topology_feature_classification_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "staged_feature_id",
+            "revision",
+            name="uq_fiber_topology_feature_classification_revision",
+        ),
+        UniqueConstraint(
+            "batch_id",
+            "command_key_sha256",
+            "staged_feature_id",
+            name="uq_fiber_topology_feature_classification_command_row",
+        ),
+        CheckConstraint(
+            "asset_type IN ('fiber_segment', 'fiber_access_point', 'fdh_cabinet', "
+            "'splice_closure', 'service_building', 'support_structure')",
+            name="ck_fiber_topology_feature_classification_asset_type",
+        ),
+        CheckConstraint(
+            "revision > 0", name="ck_fiber_topology_feature_classification_revision"
+        ),
+        CheckConstraint(
+            "length(command_key_sha256) = 64",
+            name="ck_fiber_topology_feature_classification_command_key_sha256",
+        ),
+        CheckConstraint(
+            "length(command_fingerprint_sha256) = 64",
+            name="ck_fiber_topology_classification_fingerprint_sha256",
+        ),
+        Index(
+            "ix_fiber_topology_feature_classification_feature_revision",
+            "staged_feature_id",
+            "revision",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("fiber_topology_source_batches.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    staged_feature_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("fiber_topology_staged_features.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    command_key_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_fingerprint_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewed_by: Mapped[str] = mapped_column(String(160), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+__all__ = [
+    "FiberTopologyFeatureClassificationReview",
+    "FiberTopologySourceBatch",
+    "FiberTopologyStagedFeature",
+]

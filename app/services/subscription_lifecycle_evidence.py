@@ -156,12 +156,15 @@ def _event_type(command: RecordLifecycleEvidenceCommand) -> LifecycleEventType:
     if command.to_status is SubscriptionStatus.active:
         if command.from_status in {
             SubscriptionStatus.suspended,
+            SubscriptionStatus.paused,
             SubscriptionStatus.disabled,
         }:
             return LifecycleEventType.resume
         return LifecycleEventType.activate
     if command.to_status is SubscriptionStatus.suspended:
         return LifecycleEventType.suspend
+    if command.to_status is SubscriptionStatus.paused:
+        return LifecycleEventType.pause
     if command.to_status is SubscriptionStatus.canceled:
         return LifecycleEventType.cancel
     return LifecycleEventType.other

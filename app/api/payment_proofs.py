@@ -53,7 +53,6 @@ def _command_context(
 
 class ProofReview(BaseModel):
     review_notes: str | None = Field(default=None, max_length=2000)
-    auto_allocate: bool = True
     # Reviewer-confirmed amount (from the bank statement). Defaults to the
     # customer-claimed amount when omitted.
     amount: Decimal | None = Field(default=None, gt=0)
@@ -107,6 +106,7 @@ async def submit_my_payment_proof(
                 account
                 for account in accounts
                 if str(account.get("id")) == supplied_account_id
+                or str(account.get("account_number")) == supplied_account_id
             ),
             None,
         )
@@ -361,7 +361,6 @@ def verify_payment_proof(
             ),
             verified_by=str(principal.get("principal_id")),
             amount=payload.amount,
-            auto_allocate=payload.auto_allocate,
             review_notes=payload.review_notes,
         ).to_dict()
     except DomainError as exc:

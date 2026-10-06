@@ -7,14 +7,21 @@ updates, merges, retires, or deletes canonical network/GIS assets.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import re
 import zipfile
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from enum import StrEnum
+from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from typing import Protocol
+from urllib.parse import SplitResult, urlsplit
+from uuid import UUID
 
 from defusedxml import ElementTree as ET
 from sqlalchemy import select
@@ -35,28 +42,44 @@ from app.models.network import (
 
 KML_NS = {"kml": "http://www.opengis.net/kml/2.2"}
 SOURCE_SYSTEM = "dotmac_osp_kmz"
-NORMALIZATION_VERSION = 1
+NORMALIZATION_VERSION = 2
 MAX_KML_BYTES = 100 * 1024 * 1024
+MAX_KMZ_BYTES = 25 * 1024 * 1024
+MAX_KMZ_ENTRIES = 64
+MAX_KMZ_COMPRESSION_RATIO = 200
 NIGERIA_LONGITUDE_RANGE = (2.0, 15.0)
 NIGERIA_LATITUDE_RANGE = (4.0, 14.0)
+
+
+class FiberAssetType(StrEnum):
+    fiber_segment = "fiber_segment"
+    fiber_access_point = "fiber_access_point"
+    fdh_cabinet = "fdh_cabinet"
+    splice_closure = "splice_closure"
+    service_building = "service_building"
+    support_structure = "support_structure"
+    mixed_network_map = "mixed_network_map"
+    unsupported = "unsupported"
+    unclassified = "unclassified"
 
 
 @dataclass(frozen=True)
 class FiberSourceProfile:
     name: str
     default_filename: str
-    asset_type: str
+    asset_type: FiberAssetType
     external_id_key: str
     expected_geometry_type: str
     display_name_keys: tuple[str, ...]
     source_system: str = SOURCE_SYSTEM
+    supported_asset_types: tuple[FiberAssetType, ...] = ()
 
 
 SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_paths": FiberSourceProfile(
         name="osp_paths",
         default_filename="OSP Paths.kmz",
-        asset_type="fiber_segment",
+        asset_type=FiberAssetType.fiber_segment,
         external_id_key="spanid",
         expected_geometry_type="LineString",
         display_name_keys=("name", "spanid"),
@@ -64,7 +87,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_access_points": FiberSourceProfile(
         name="osp_access_points",
         default_filename="OSP Access point.kmz",
-        asset_type="fiber_access_point",
+        asset_type=FiberAssetType.fiber_access_point,
         external_id_key="access_pointid",
         expected_geometry_type="Polygon",
         display_name_keys=("Name",),
@@ -72,7 +95,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_cabinets": FiberSourceProfile(
         name="osp_cabinets",
         default_filename="OSP Cabinet.kmz",
-        asset_type="fdh_cabinet",
+        asset_type=FiberAssetType.fdh_cabinet,
         external_id_key="fibermngrid",
         expected_geometry_type="Polygon",
         display_name_keys=("name",),
@@ -80,7 +103,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_splice_info": FiberSourceProfile(
         name="osp_splice_info",
         default_filename="OSP Splice info.kmz",
-        asset_type="splice_closure",
+        asset_type=FiberAssetType.splice_closure,
         external_id_key="enclosureid",
         expected_geometry_type="Polygon",
         display_name_keys=("name",),
@@ -88,7 +111,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_buildings": FiberSourceProfile(
         name="osp_buildings",
         default_filename="OSP Building.kmz",
-        asset_type="service_building",
+        asset_type=FiberAssetType.service_building,
         external_id_key="buildingid",
         expected_geometry_type="Polygon",
         display_name_keys=("Name",),
@@ -96,15 +119,31 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "osp_air_fiber": FiberSourceProfile(
         name="osp_air_fiber",
         default_filename="OSP Air fiber.kmz",
-        asset_type="support_structure",
+        asset_type=FiberAssetType.support_structure,
         external_id_key="poleid",
         expected_geometry_type="Point",
         display_name_keys=("name",),
     ),
+    "mixed_network_map": FiberSourceProfile(
+        name="mixed_network_map",
+        default_filename="network-map.kmz",
+        asset_type=FiberAssetType.mixed_network_map,
+        external_id_key="dotmac_asset_id",
+        expected_geometry_type="per_asset_type",
+        display_name_keys=("name", "code", "display_name"),
+        supported_asset_types=(
+            FiberAssetType.fiber_segment,
+            FiberAssetType.fiber_access_point,
+            FiberAssetType.fdh_cabinet,
+            FiberAssetType.splice_closure,
+            FiberAssetType.service_building,
+            FiberAssetType.support_structure,
+        ),
+    ),
     "crm_fdh_cabinets": FiberSourceProfile(
         name="crm_fdh_cabinets",
         default_filename="crm_fdh_cabinets.kml",
-        asset_type="fdh_cabinet",
+        asset_type=FiberAssetType.fdh_cabinet,
         external_id_key="crm_id",
         expected_geometry_type="Point",
         display_name_keys=("name", "code", "crm_id"),
@@ -113,7 +152,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "crm_access_points": FiberSourceProfile(
         name="crm_access_points",
         default_filename="crm_access_points.kml",
-        asset_type="fiber_access_point",
+        asset_type=FiberAssetType.fiber_access_point,
         external_id_key="crm_id",
         expected_geometry_type="Point",
         display_name_keys=("name", "code", "crm_id"),
@@ -122,7 +161,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "crm_splice_closures": FiberSourceProfile(
         name="crm_splice_closures",
         default_filename="crm_splice_closures.kml",
-        asset_type="splice_closure",
+        asset_type=FiberAssetType.splice_closure,
         external_id_key="crm_id",
         expected_geometry_type="Point",
         display_name_keys=("name", "crm_id"),
@@ -131,7 +170,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "crm_fiber_segments": FiberSourceProfile(
         name="crm_fiber_segments",
         default_filename="crm_fiber_segments.kml",
-        asset_type="fiber_segment",
+        asset_type=FiberAssetType.fiber_segment,
         external_id_key="crm_id",
         expected_geometry_type="LineString",
         display_name_keys=("name", "crm_id"),
@@ -140,7 +179,7 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     "crm_service_buildings": FiberSourceProfile(
         name="crm_service_buildings",
         default_filename="crm_service_buildings.kml",
-        asset_type="service_building",
+        asset_type=FiberAssetType.service_building,
         external_id_key="crm_id",
         expected_geometry_type="Point",
         display_name_keys=("name", "code", "crm_id"),
@@ -148,11 +187,74 @@ SOURCE_PROFILES: dict[str, FiberSourceProfile] = {
     ),
 }
 
+_MIXED_TYPE_ALIASES: dict[str, FiberAssetType] = {
+    "fibersegment": FiberAssetType.fiber_segment,
+    "accesspoint": FiberAssetType.fiber_access_point,
+    "fiberaccesspoint": FiberAssetType.fiber_access_point,
+    "fdhcabinet": FiberAssetType.fdh_cabinet,
+    "spliceclosure": FiberAssetType.splice_closure,
+    "servicebuilding": FiberAssetType.service_building,
+    "supportstructure": FiberAssetType.support_structure,
+}
+_MIXED_TYPE_ID_KEYS: dict[FiberAssetType, tuple[str, ...]] = {
+    FiberAssetType.fiber_segment: ("spanid",),
+    FiberAssetType.fiber_access_point: ("access_pointid", "accesspointid"),
+    FiberAssetType.fdh_cabinet: ("fibermngrid",),
+    FiberAssetType.splice_closure: ("enclosureid",),
+    FiberAssetType.service_building: ("buildingid",),
+    FiberAssetType.support_structure: ("poleid",),
+}
+_MIXED_GEOMETRY_TYPES: dict[FiberAssetType, frozenset[str]] = {
+    FiberAssetType.fiber_segment: frozenset({"LineString"}),
+    FiberAssetType.support_structure: frozenset({"Point"}),
+    FiberAssetType.fiber_access_point: frozenset({"Point", "Polygon"}),
+    FiberAssetType.fdh_cabinet: frozenset({"Point", "Polygon"}),
+    FiberAssetType.splice_closure: frozenset({"Point", "Polygon"}),
+    FiberAssetType.service_building: frozenset({"Point", "Polygon"}),
+}
+
+
+def mixed_geometry_compatible(asset_type: FiberAssetType, geometry_type: str) -> bool:
+    """Return whether a mixed-profile feature may use this geometry."""
+
+    return geometry_type in _MIXED_GEOMETRY_TYPES.get(asset_type, frozenset())
+
+
+_MIXED_SAFE_PROPERTY_KEYS = frozenset(
+    {
+        "dotmac_asset_type",
+        "asset_type",
+        "feature_type",
+        "type",
+        "dotmac_asset_id",
+        "spanid",
+        "access_pointid",
+        "fibermngrid",
+        "enclosureid",
+        "buildingid",
+        "poleid",
+        "external_id",
+        "id",
+        "name",
+        "code",
+        "display_name",
+        "description",
+        "kml_placemark_id",
+        "icon_href",
+        "icon_color",
+        "icon_scale",
+        "line_color",
+        "line_width",
+        "polygon_color",
+        "resource_warnings",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ParsedFiberFeature:
     row_number: int
-    asset_type: str
+    asset_type: FiberAssetType
     external_id: str | None
     display_name: str | None
     geometry_type: str
@@ -161,6 +263,7 @@ class ParsedFiberFeature:
     content_sha256: str
     geometry_sha256: str
     blocker_codes: tuple[str, ...]
+    suggested_asset_type: FiberAssetType | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +360,10 @@ class _CanonicalLookup:
     by_name: dict[str, tuple[object, ...]]
 
 
+class _CanonicalIdRow(Protocol):
+    id: UUID
+
+
 def source_profile(name: str) -> FiberSourceProfile:
     try:
         return SOURCE_PROFILES[name]
@@ -285,30 +392,71 @@ def _normalized_key(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
 
 
-def _read_kml(path: Path) -> tuple[bytes, bytes, str]:
-    raw = path.read_bytes()
-    if path.suffix.casefold() == ".kml":
+def _read_kml_bytes(raw: bytes, source_name: str) -> tuple[bytes, bytes, str]:
+    suffix = Path(source_name).suffix.casefold()
+    if suffix == ".kml":
         if len(raw) > MAX_KML_BYTES:
-            raise ValueError("KML source exceeds the staging size limit")
-        return raw, raw, path.name
-    if path.suffix.casefold() != ".kmz":
-        raise ValueError("Fiber topology sources must be KMZ or KML files")
+            raise ValueError(
+                "KML document is larger than the supported 100 MB limit. "
+                "Reduce its size or split the map into smaller files."
+            )
+        return raw, raw, Path(source_name).name
+    if suffix != ".kmz":
+        raise ValueError(
+            "Choose a .kml or .kmz file. Other map formats are not supported."
+        )
+    if len(raw) > MAX_KMZ_BYTES:
+        raise ValueError(
+            "KMZ archive is larger than the supported 25 MB upload limit. "
+            "Reduce its size or export fewer map layers."
+        )
 
     try:
         with zipfile.ZipFile(BytesIO(raw)) as archive:
+            entries_all = archive.infolist()
+            if len(entries_all) > MAX_KMZ_ENTRIES:
+                raise ValueError(
+                    "KMZ archive contains more than 64 files. Re-export it with "
+                    "one KML document and only the resources it needs."
+                )
             entries = [
                 info
-                for info in archive.infolist()
+                for info in entries_all
                 if not info.is_dir() and info.filename.casefold().endswith(".kml")
             ]
             if len(entries) != 1:
-                raise ValueError("KMZ source must contain exactly one KML document")
+                raise ValueError(
+                    "KMZ archive must contain exactly one .kml document. "
+                    "Choose a KML file or re-export the KMZ with one map document."
+                )
             entry = entries[0]
             if entry.file_size > MAX_KML_BYTES:
-                raise ValueError("KMZ KML document exceeds the staging size limit")
+                raise ValueError(
+                    "KML document inside the KMZ exceeds 100 MB. Split the map "
+                    "into smaller files and export again."
+                )
+            if entry.compress_size == 0 and entry.file_size > 0:
+                raise ValueError(
+                    "KMZ KML entry has invalid compressed-size metadata. "
+                    "Re-export the archive from the map application."
+                )
+            if (
+                entry.compress_size > 0
+                and entry.file_size / entry.compress_size > MAX_KMZ_COMPRESSION_RATIO
+            ):
+                raise ValueError(
+                    "KMZ KML document expands beyond the permitted compression "
+                    "ratio. Re-export it with normal ZIP compression."
+                )
             return raw, archive.read(entry), entry.filename
     except zipfile.BadZipFile as exc:
-        raise ValueError("Invalid KMZ archive") from exc
+        raise ValueError(
+            "KMZ archive is not a valid ZIP file. Re-export the map as KML or KMZ."
+        ) from exc
+
+
+def _read_kml(path: Path) -> tuple[bytes, bytes, str]:
+    return _read_kml_bytes(path.read_bytes(), path.name)
 
 
 def _properties(placemark: ET.Element) -> dict[str, str | None]:
@@ -362,36 +510,299 @@ def _coordinates(text: str) -> tuple[list[list[float]], list[str]]:
     return coordinates, list(dict.fromkeys(blockers))
 
 
-def _geometry(placemark: ET.Element) -> tuple[str, dict, tuple[str, ...]]:
-    for geometry_type in ("Point", "LineString", "Polygon"):
-        element = placemark.find(f".//kml:{geometry_type}", KML_NS)
-        if element is None:
-            continue
-        text = element.findtext(".//kml:coordinates", default="", namespaces=KML_NS)
-        coordinates, blockers = _coordinates(text)
-        if geometry_type == "Point":
-            if len(coordinates) != 1:
-                blockers.append("invalid_point_geometry")
-            geojson = {
-                "type": "Point",
-                "coordinates": coordinates[0] if coordinates else [],
-            }
-        elif geometry_type == "LineString":
-            if len(coordinates) < 2:
-                blockers.append("invalid_linestring_geometry")
-            geojson = {"type": "LineString", "coordinates": coordinates}
-        else:
-            if coordinates and coordinates[0] != coordinates[-1]:
-                coordinates.append(coordinates[0])
-            if len(coordinates) < 4:
-                blockers.append("invalid_polygon_geometry")
-            geojson = {"type": "Polygon", "coordinates": [coordinates]}
-        return geometry_type, geojson, tuple(dict.fromkeys(blockers))
-    return (
-        "Unknown",
-        {"type": "GeometryCollection", "geometries": []},
-        ("missing_supported_geometry",),
+class _PlainTextDescription(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        value = " ".join(data.split())
+        if value:
+            self.parts.append(value)
+
+
+def _description(placemark: ET.Element) -> str | None:
+    raw = placemark.findtext("kml:description", default="", namespaces=KML_NS)
+    if not raw:
+        return None
+    parser = _PlainTextDescription()
+    parser.feed(raw[:16_384])
+    normalized = " ".join(" ".join(parser.parts).split())
+    return normalized[:4_000] or None
+
+
+def _suggested_asset_type(
+    geometry_type: str,
+    placemark_name: str | None,
+    description: str | None,
+) -> FiberAssetType | None:
+    if geometry_type == "LineString":
+        return FiberAssetType.fiber_segment
+    label = _normalized_key(f"{placemark_name or ''} {description or ''}")
+    hints: tuple[tuple[FiberAssetType, tuple[str, ...]], ...] = (
+        (FiberAssetType.fdh_cabinet, ("fdhcabinet", "cabinet")),
+        (
+            FiberAssetType.fiber_access_point,
+            ("fiberaccesspoint", "accesspoint", "fat", "fap"),
+        ),
+        (FiberAssetType.splice_closure, ("spliceclosure", "closure")),
+        (FiberAssetType.service_building, ("servicebuilding",)),
+        (
+            FiberAssetType.support_structure,
+            ("supportstructure", "supportpole", "pole"),
+        ),
     )
+    matches = {
+        asset_type
+        for asset_type, terms in hints
+        if any(term in label for term in terms)
+    }
+    if len(matches) == 1:
+        suggestion = next(iter(matches))
+        if mixed_geometry_compatible(suggestion, geometry_type):
+            return suggestion
+    return None
+
+
+def _external_icon_url(value: str) -> tuple[str | None, str | None]:
+    """Classify an HTTPS reference without DNS lookup or network access."""
+
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        if (
+            parsed.scheme.casefold() != "https"
+            or not host
+            or any(character.isspace() for character in host)
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None, "icon_reference_not_https"
+        port = parsed.port
+        if port is not None and not 1 <= port <= 65_535:
+            return None, "icon_reference_malformed"
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            normalized_host = host.casefold().rstrip(".")
+            if normalized_host in {
+                "localhost",
+                "local",
+                "internal",
+                "intranet",
+            } or normalized_host.endswith(
+                (".localhost", ".local", ".internal", ".lan", ".home")
+            ):
+                return None, "icon_reference_internal_host"
+        else:
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_reserved
+                or address.is_unspecified
+            ):
+                return None, "icon_reference_internal_address"
+        return value[:2_048], None
+    except ValueError:
+        return None, "icon_reference_malformed"
+
+
+def _geometry(placemark: ET.Element) -> tuple[str, dict, tuple[str, ...]]:
+    parsed: list[tuple[str, dict, list[str]]] = []
+    for geometry_type in ("Point", "LineString", "Polygon"):
+        for element in placemark.findall(f".//kml:{geometry_type}", KML_NS):
+            blockers: list[str] = []
+            geojson: dict[str, object]
+            if geometry_type == "Polygon":
+                rings = element.findall(".//kml:LinearRing/kml:coordinates", KML_NS)
+                if not rings:
+                    blockers.append("missing_polygon_coordinates")
+                parsed_rings: list[list[list[float]]] = []
+                for ring in rings:
+                    coordinates, ring_blockers = _coordinates(ring.text or "")
+                    blockers.extend(ring_blockers)
+                    if coordinates and coordinates[0] != coordinates[-1]:
+                        coordinates.append(coordinates[0])
+                    if len(coordinates) < 4:
+                        blockers.append("invalid_polygon_geometry")
+                    parsed_rings.append(coordinates)
+                geojson = {"type": "Polygon", "coordinates": parsed_rings}
+            else:
+                text = element.findtext(
+                    "kml:coordinates", default="", namespaces=KML_NS
+                )
+                coordinates, blockers = _coordinates(text)
+                if geometry_type == "Point":
+                    if len(coordinates) != 1:
+                        blockers.append("invalid_point_geometry")
+                    geojson = {
+                        "type": "Point",
+                        "coordinates": coordinates[0] if coordinates else [],
+                    }
+                else:
+                    if len(coordinates) < 2:
+                        blockers.append("invalid_linestring_geometry")
+                    geojson = {"type": "LineString", "coordinates": coordinates}
+            parsed.append((geometry_type, geojson, blockers))
+    if not parsed:
+        return (
+            "Unknown",
+            {"type": "GeometryCollection", "geometries": []},
+            ("missing_supported_geometry",),
+        )
+    if len(parsed) > 1:
+        return (
+            "GeometryCollection",
+            {"type": "GeometryCollection", "geometries": [item[1] for item in parsed]},
+            tuple(
+                dict.fromkeys(
+                    [
+                        "multiple_geometry_components",
+                        *[code for item in parsed for code in item[2]],
+                    ]
+                )
+            ),
+        )
+    geometry_type, geojson, blockers = parsed[0]
+    return geometry_type, geojson, tuple(dict.fromkeys(blockers))
+
+
+def _mixed_asset_type(
+    properties: dict[str, str | None],
+) -> tuple[FiberAssetType, str | None]:
+    declared = next(
+        (
+            value
+            for key in ("dotmac_asset_type", "asset_type", "feature_type", "type")
+            if (value := _property(properties, key))
+        ),
+        None,
+    )
+    if declared:
+        normalized = _normalized_key(declared)
+        return _MIXED_TYPE_ALIASES.get(normalized, FiberAssetType.unsupported), declared
+    for asset_type, keys in _MIXED_TYPE_ID_KEYS.items():
+        if any(_property(properties, key) for key in keys):
+            return asset_type, None
+    return FiberAssetType.unclassified, None
+
+
+def _style_properties(
+    root: ET.Element, placemark: ET.Element
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Read local KML style values and record HTTPS icon references without fetching."""
+
+    style = placemark.find("kml:Style", KML_NS)
+    style_url = placemark.findtext("kml:styleUrl", default="", namespaces=KML_NS)
+    if style is None and style_url.startswith("#"):
+        style_id = style_url[1:]
+        style = next(
+            (
+                candidate
+                for candidate in root.findall(".//kml:Style", KML_NS)
+                if candidate.attrib.get("id") == style_id
+            ),
+            None,
+        )
+        if style is None:
+            style_map = next(
+                (
+                    candidate
+                    for candidate in root.findall(".//kml:StyleMap", KML_NS)
+                    if candidate.attrib.get("id") == style_id
+                ),
+                None,
+            )
+            if style_map is not None:
+                normal = next(
+                    (
+                        pair.findtext("kml:styleUrl", default="", namespaces=KML_NS)
+                        for pair in style_map.findall("kml:Pair", KML_NS)
+                        if pair.findtext("kml:key", default="", namespaces=KML_NS)
+                        == "normal"
+                    ),
+                    "",
+                )
+                if normal.startswith("#"):
+                    normal_id = normal[1:]
+                    style = next(
+                        (
+                            candidate
+                            for candidate in root.findall(".//kml:Style", KML_NS)
+                            if candidate.attrib.get("id") == normal_id
+                        ),
+                        None,
+                    )
+    values: dict[str, str] = {}
+    warnings: list[str] = []
+    if style is not None:
+        for source_name, target_name in (
+            ("kml:IconStyle/kml:color", "icon_color"),
+            ("kml:IconStyle/kml:scale", "icon_scale"),
+            ("kml:LineStyle/kml:color", "line_color"),
+            ("kml:LineStyle/kml:width", "line_width"),
+            ("kml:PolyStyle/kml:color", "polygon_color"),
+        ):
+            value = style.findtext(source_name, default="", namespaces=KML_NS).strip()
+            if value:
+                values[target_name] = value[:80]
+        href = style.findtext(
+            "kml:IconStyle/kml:Icon/kml:href", default="", namespaces=KML_NS
+        ).strip()
+    else:
+        href = ""
+    inline = placemark.find("kml:Style/kml:IconStyle/kml:Icon/kml:href", KML_NS)
+    if inline is not None and (inline.text or "").strip():
+        href = (inline.text or "").strip()
+    if href:
+        safe_href, warning_code = _external_icon_url(href)
+        if safe_href:
+            # This is metadata only. The server and preview do not fetch it.
+            values["icon_href"] = safe_href
+            parsed = urlsplit(safe_href)
+            warnings.append(
+                f"remote_icon_not_checked:{parsed.hostname or ''}{parsed.path[:160]}"
+            )
+        else:
+            try:
+                parsed = urlsplit(href)
+            except ValueError:
+                parsed = SplitResult("", "", href[:200], "", "")
+            resource = f"{parsed.scheme or 'relative'}:{parsed.hostname or ''}{parsed.path[:160]}"
+            warnings.append(f"{warning_code or 'icon_not_loaded'}:{resource}")
+    if style_url and not style_url.startswith("#"):
+        try:
+            parsed_style = urlsplit(style_url)
+        except ValueError:
+            parsed_style = SplitResult("", "", style_url[:200], "", "")
+        warnings.append(
+            f"external_style_not_loaded:{parsed_style.scheme or 'relative'}:"
+            f"{parsed_style.path[:200]}"
+        )
+    if warnings:
+        values["resource_warnings"] = "|".join(dict.fromkeys(warnings))
+    return values, tuple(dict.fromkeys(warnings))
+
+
+def _mixed_external_id(
+    properties: dict[str, str | None],
+    *,
+    asset_type: FiberAssetType,
+    placemark: ET.Element,
+) -> str | None:
+    keys = (
+        "dotmac_asset_id",
+        *_MIXED_TYPE_ID_KEYS.get(asset_type, ()),
+        "external_id",
+        "id",
+    )
+    for key in keys:
+        value = _property(properties, key)
+        if value:
+            return value
+    return (placemark.attrib.get("id") or "").strip() or None
 
 
 def _parse_features(
@@ -400,45 +811,127 @@ def _parse_features(
     try:
         root = ET.fromstring(kml)
     except ET.ParseError as exc:
-        raise ValueError("Invalid KML document") from exc
+        line, column = exc.position
+        raise ValueError(
+            f"KML is malformed near line {line}, column {column}. Check the file "
+            "is a complete KML document and try exporting it again."
+        ) from exc
+    network_link = root.find(".//kml:NetworkLink", KML_NS)
+    network_link_name: str | None = None
+    if network_link is not None:
+        network_link_name = (
+            network_link.findtext(
+                "kml:name", default="NetworkLink", namespaces=KML_NS
+            ).strip()
+            or "NetworkLink"
+        )
+        if not root.findall(".//kml:Placemark", KML_NS):
+            name = network_link_name
+            raise ValueError(
+                f"KML document link '{name}' is not expanded. Download the linked "
+                "KML separately and upload it directly."
+            )
 
     parsed: list[ParsedFiberFeature] = []
     for row_number, placemark in enumerate(
         root.findall(".//kml:Placemark", KML_NS), start=1
     ):
         properties = _properties(placemark)
-        external_id = _property(properties, profile.external_id_key)
-        placemark_name = (
-            placemark.findtext("kml:name", default="", namespaces=KML_NS).strip()
-            or None
-        )
-        display_name = next(
+        suggested_asset_type: FiberAssetType | None = None
+        if profile.name == "mixed_network_map":
+            asset_type, declared_asset_type = _mixed_asset_type(properties)
+            placemark_name = (
+                placemark.findtext("kml:name", default="", namespaces=KML_NS).strip()
+                or None
+            )
+            geometry_type, geojson, geometry_blockers = _geometry(placemark)
+            if asset_type is FiberAssetType.unclassified:
+                suggested_asset_type = _suggested_asset_type(
+                    geometry_type,
+                    placemark_name,
+                    _description(placemark),
+                )
+            external_id = _mixed_external_id(
+                properties, asset_type=asset_type, placemark=placemark
+            )
+            properties = {
+                key: value
+                for key, value in properties.items()
+                if key.casefold() in _MIXED_SAFE_PROPERTY_KEYS
+            }
+        else:
+            asset_type = profile.asset_type
+            declared_asset_type = None
+            placemark_name = (
+                placemark.findtext("kml:name", default="", namespaces=KML_NS).strip()
+                or None
+            )
+            external_id = _property(properties, profile.external_id_key)
+            if not external_id:
+                external_id = (placemark.attrib.get("id") or "").strip() or None
+            geometry_type, geojson, geometry_blockers = _geometry(placemark)
+        description = _description(placemark)
+        styles, _resource_warnings = _style_properties(root, placemark)
+        if network_link_name is not None:
+            _resource_warnings = (
+                *_resource_warnings,
+                f"network_link_not_expanded:{network_link_name[:160]}",
+            )
+            styles["resource_warnings"] = "|".join(dict.fromkeys(_resource_warnings))
+        display_name = placemark_name or next(
             (
                 value
                 for key in profile.display_name_keys
                 if (value := _property(properties, key))
             ),
-            placemark_name,
+            None,
         )
-        geometry_type, geojson, geometry_blockers = _geometry(placemark)
         blockers = list(geometry_blockers)
-        if not external_id:
+        if asset_type is FiberAssetType.unclassified:
+            blockers.append("missing_asset_type")
+        elif asset_type is FiberAssetType.unsupported:
+            blockers.append("unsupported_asset_type")
+        if profile.name == "mixed_network_map":
+            if asset_type is FiberAssetType.unsupported:
+                external_id = None
+                properties = {}
+            if asset_type is not FiberAssetType.unsupported and placemark.attrib.get(
+                "id"
+            ):
+                properties["kml_placemark_id"] = placemark.attrib["id"][:255]
+            if description:
+                properties["description"] = description
+            properties.update(styles)
+            if suggested_asset_type is not None:
+                properties["suggested_asset_type"] = suggested_asset_type.value
+        if not external_id and profile.name != "mixed_network_map":
             blockers.append("missing_external_id")
-        if geometry_type != profile.expected_geometry_type:
+        if profile.name == "mixed_network_map" and asset_type not in {
+            FiberAssetType.unclassified,
+            FiberAssetType.unsupported,
+        }:
+            if not mixed_geometry_compatible(asset_type, geometry_type):
+                blockers.append("unexpected_geometry_type")
+        elif (
+            profile.name != "mixed_network_map"
+            and geometry_type != profile.expected_geometry_type
+        ):
             blockers.append("unexpected_geometry_type")
         geometry_sha256 = _sha256_json(geojson)
         normalized = {
             "normalization_version": NORMALIZATION_VERSION,
-            "asset_type": profile.asset_type,
+            "asset_type": asset_type,
+            "declared_asset_type": declared_asset_type,
             "external_id": external_id,
             "display_name": display_name,
+            "description": description,
             "geometry": geojson,
             "properties": properties,
         }
         parsed.append(
             ParsedFiberFeature(
                 row_number=row_number,
-                asset_type=profile.asset_type,
+                asset_type=asset_type,
                 external_id=external_id,
                 display_name=display_name,
                 geometry_type=geometry_type,
@@ -447,6 +940,7 @@ def _parse_features(
                 content_sha256=_sha256_json(normalized),
                 geometry_sha256=geometry_sha256,
                 blocker_codes=tuple(dict.fromkeys(blockers)),
+                suggested_asset_type=suggested_asset_type,
             )
         )
     if not parsed:
@@ -463,36 +957,78 @@ def _ids_by_key(rows, attribute: str) -> dict[str, tuple[object, ...]]:
     return {key: tuple(values) for key, values in grouped.items()}
 
 
+def _ids_by_record_id(rows: Iterable[_CanonicalIdRow]) -> dict[str, tuple[object, ...]]:
+    grouped: dict[str, list[object]] = defaultdict(list)
+    for row in rows:
+        key = _normalized_key(str(row.id))
+        if key:
+            grouped[key].append(row.id)
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _mixed_exact_external(
+    rows: Iterable[_CanonicalIdRow], external_key: str
+) -> dict[str, tuple[object, ...]]:
+    matches = _ids_by_key(rows, external_key)
+    for key, identifiers in _ids_by_record_id(rows).items():
+        matches[key] = (*matches.get(key, ()), *identifiers)
+    return matches
+
+
 def _canonical_lookup(db: Session, profile: FiberSourceProfile) -> _CanonicalLookup:
     if profile.asset_type == "fdh_cabinet":
         fdh_rows = db.scalars(select(FdhCabinet)).all()
         return _CanonicalLookup(
-            _ids_by_key(fdh_rows, "code"), _ids_by_key(fdh_rows, "name")
+            (
+                _mixed_exact_external(fdh_rows, "code")
+                if profile.name == "mixed_network_map"
+                else _ids_by_key(fdh_rows, "code")
+            ),
+            _ids_by_key(fdh_rows, "name"),
         )
     if profile.asset_type == "fiber_access_point":
         access_point_rows = db.scalars(select(FiberAccessPoint)).all()
         return _CanonicalLookup(
-            _ids_by_key(access_point_rows, "code"),
+            (
+                _mixed_exact_external(access_point_rows, "code")
+                if profile.name == "mixed_network_map"
+                else _ids_by_key(access_point_rows, "code")
+            ),
             _ids_by_key(access_point_rows, "name"),
         )
     if profile.asset_type == "service_building":
         building_rows = db.scalars(select(ServiceBuilding)).all()
         return _CanonicalLookup(
-            _ids_by_key(building_rows, "code"),
+            (
+                _mixed_exact_external(building_rows, "code")
+                if profile.name == "mixed_network_map"
+                else _ids_by_key(building_rows, "code")
+            ),
             _ids_by_key(building_rows, "name"),
         )
     if profile.asset_type == "fiber_segment":
         segment_rows = db.scalars(select(FiberSegment)).all()
-        return _CanonicalLookup({}, _ids_by_key(segment_rows, "name"))
+        return _CanonicalLookup(
+            _ids_by_record_id(segment_rows)
+            if profile.name == "mixed_network_map"
+            else {},
+            _ids_by_key(segment_rows, "name"),
+        )
     if profile.asset_type == "splice_closure":
         closure_rows = db.scalars(select(FiberSpliceClosure)).all()
-        return _CanonicalLookup({}, _ids_by_key(closure_rows, "name"))
+        return _CanonicalLookup(
+            _ids_by_record_id(closure_rows)
+            if profile.name == "mixed_network_map"
+            else {},
+            _ids_by_key(closure_rows, "name"),
+        )
     return _CanonicalLookup({}, {})
 
 
 def _prior_features(
     db: Session, profile: FiberSourceProfile
-) -> dict[str, FiberTopologyStagedFeature]:
+) -> dict[tuple[str, str], FiberTopologyStagedFeature]:
+    asset_types = profile.supported_asset_types or (profile.asset_type,)
     rows = db.scalars(
         select(FiberTopologyStagedFeature)
         .join(
@@ -502,7 +1038,7 @@ def _prior_features(
         .where(
             FiberTopologySourceBatch.source_system == profile.source_system,
             FiberTopologySourceBatch.profile == profile.name,
-            FiberTopologyStagedFeature.asset_type == profile.asset_type,
+            FiberTopologyStagedFeature.asset_type.in_(asset_types),
             FiberTopologyStagedFeature.external_id.is_not(None),
         )
         .order_by(
@@ -510,11 +1046,12 @@ def _prior_features(
             FiberTopologyStagedFeature.created_at.desc(),
         )
     ).all()
-    result: dict[str, FiberTopologyStagedFeature] = {}
+    result: dict[tuple[str, str], FiberTopologyStagedFeature] = {}
     for row in rows:
         key = _normalized_key(row.external_id)
-        if key and key not in result:
-            result[key] = row
+        identity = (row.asset_type, key)
+        if key and identity not in result:
+            result[identity] = row
     return result
 
 
@@ -523,15 +1060,21 @@ def _plan_features(
     profile: FiberSourceProfile,
     features: list[ParsedFiberFeature],
 ) -> tuple[FiberFeatureMatchPlan, ...]:
-    canonical = _canonical_lookup(db, profile)
+    canonical_by_type: dict[str, _CanonicalLookup] = {}
     prior = _prior_features(db, profile)
     external_counts = Counter(
-        key for feature in features if (key := _normalized_key(feature.external_id))
+        (feature.asset_type, key)
+        for feature in features
+        if (key := _normalized_key(feature.external_id))
     )
     name_counts = Counter(
-        key for feature in features if (key := _normalized_key(feature.display_name))
+        (feature.asset_type, key)
+        for feature in features
+        if (key := _normalized_key(feature.display_name))
     )
-    geometry_counts = Counter(feature.geometry_sha256 for feature in features)
+    geometry_counts = Counter(
+        (feature.asset_type, feature.geometry_sha256) for feature in features
+    )
 
     plans: list[FiberFeatureMatchPlan] = []
     for feature in features:
@@ -540,19 +1083,39 @@ def _plan_features(
         candidates: set[object] = set()
         canonical_id = None
         prior_id = None
+        canonical = canonical_by_type.get(feature.asset_type)
+        if canonical is None:
+            canonical = _canonical_lookup(
+                db,
+                FiberSourceProfile(
+                    name=profile.name,
+                    default_filename=profile.default_filename,
+                    asset_type=feature.asset_type,
+                    external_id_key=profile.external_id_key,
+                    expected_geometry_type=profile.expected_geometry_type,
+                    display_name_keys=profile.display_name_keys,
+                    source_system=profile.source_system,
+                ),
+            )
+            canonical_by_type[feature.asset_type] = canonical
         external_key = _normalized_key(feature.external_id)
         name_key = _normalized_key(feature.display_name)
 
-        if external_key and external_counts[external_key] > 1:
-            blockers.append("duplicate_external_id")
-        if name_key and name_counts[name_key] > 1:
+        if external_key and external_counts[(feature.asset_type, external_key)] > 1:
+            if profile.name == "mixed_network_map":
+                reasons.append("duplicate_source_external_id")
+            else:
+                blockers.append("duplicate_external_id")
+        if name_key and name_counts[(feature.asset_type, name_key)] > 1:
             reasons.append("duplicate_source_name")
-        if geometry_counts[feature.geometry_sha256] > 1:
+        if geometry_counts[(feature.asset_type, feature.geometry_sha256)] > 1:
             reasons.append("duplicate_source_geometry")
         if not feature.display_name:
             reasons.append("missing_display_name")
 
-        prior_feature = prior.get(external_key) if external_key else None
+        prior_feature = (
+            prior.get((feature.asset_type, external_key)) if external_key else None
+        )
         if prior_feature is not None:
             prior_id = prior_feature.id
             if prior_feature.content_sha256 == feature.content_sha256:
@@ -583,6 +1146,7 @@ def _plan_features(
             in {
                 "duplicate_source_name",
                 "duplicate_source_geometry",
+                "duplicate_source_external_id",
                 "missing_display_name",
             }
             for reason in reasons
@@ -606,12 +1170,21 @@ def _plan_features(
                 match_status=status,
                 match_reasons=tuple(dict.fromkeys(reasons)),
                 candidate_asset_ids=tuple(sorted(str(value) for value in candidates)),
-                canonical_asset_type=(profile.asset_type if canonical_id else None),
+                canonical_asset_type=(feature.asset_type if canonical_id else None),
                 canonical_asset_id=canonical_id,
                 prior_feature_id=prior_id,
             )
         )
     return tuple(plans)
+
+
+def revalidate_mixed_features(
+    db: Session,
+    features: tuple[ParsedFiberFeature, ...],
+) -> tuple[FiberFeatureMatchPlan, ...]:
+    """Recompute matching and blockers for effective reviewed feature values."""
+
+    return _plan_features(db, SOURCE_PROFILES["mixed_network_map"], list(features))
 
 
 def preview_fiber_source(
@@ -640,6 +1213,44 @@ def preview_fiber_source(
         source_system=profile.source_system,
         profile=profile,
         source_name=source_path.name,
+        file_sha256=_sha256_bytes(raw),
+        manifest_sha256=_sha256_json(manifest_rows),
+        features=plans,
+        status_counts=dict(Counter(plan.match_status for plan in plans)),
+        kml_entry_name=kml_entry_name,
+    )
+
+
+def preview_uploaded_fiber_source(
+    db: Session,
+    *,
+    content: bytes,
+    source_name: str,
+    profile_name: str,
+) -> FiberSourcePreview:
+    """Parse uploaded source bytes without trusting or materializing archive paths."""
+
+    profile = source_profile(profile_name)
+    raw, kml, kml_entry_name = _read_kml_bytes(content, source_name)
+    parsed = _parse_features(kml, profile)
+    manifest_rows = sorted(
+        [
+            {
+                "external_id": feature.external_id,
+                "content_sha256": feature.content_sha256,
+            }
+            for feature in parsed
+        ],
+        key=lambda row: (
+            _normalized_key(row["external_id"]),
+            row["content_sha256"],
+        ),
+    )
+    plans = _plan_features(db, profile, parsed)
+    return FiberSourcePreview(
+        source_system=profile.source_system,
+        profile=profile,
+        source_name=Path(source_name).name,
         file_sha256=_sha256_bytes(raw),
         manifest_sha256=_sha256_json(manifest_rows),
         features=plans,
@@ -698,7 +1309,7 @@ def _manifest_sha256(
     )
 
 
-def _persist_preview(
+def persist_fiber_preview(
     db: Session,
     preview: FiberSourcePreview,
     *,
@@ -706,7 +1317,11 @@ def _persist_preview(
     source_name: str,
     created_by: str,
     source_metadata: dict | None = None,
+    command_key_sha256: str | None = None,
+    command_fingerprint_sha256: str | None = None,
 ) -> FiberSourceStageResult:
+    """Persist normalized evidence in the caller-owned transaction and flush only."""
+
     manifest_sha256 = _manifest_sha256(plans, source_metadata=source_metadata)
     existing = db.scalar(
         select(FiberTopologySourceBatch).where(
@@ -738,6 +1353,8 @@ def _persist_preview(
         external_id_key=preview.profile.external_id_key,
         file_sha256=preview.file_sha256,
         manifest_sha256=manifest_sha256,
+        command_key_sha256=command_key_sha256,
+        command_fingerprint_sha256=command_fingerprint_sha256,
         status="blocked" if blocker_count else "staged",
         feature_count=len(plans),
         blocker_count=blocker_count,
@@ -772,10 +1389,35 @@ def _persist_preview(
                 prior_feature_id=plan.prior_feature_id,
             )
         )
+    db.flush()
+    return _stage_result(batch, created=True)
+
+
+def _persist_preview(
+    db: Session,
+    preview: FiberSourcePreview,
+    *,
+    plans: tuple[FiberFeatureMatchPlan, ...],
+    source_name: str,
+    created_by: str,
+    source_metadata: dict | None = None,
+) -> FiberSourceStageResult:
+    """Compatibility boundary for operator scripts pending typed CLI migration."""
+
     try:
+        result = persist_fiber_preview(
+            db,
+            preview,
+            plans=plans,
+            source_name=source_name,
+            created_by=created_by,
+            source_metadata=source_metadata,
+        )
         db.commit()
+        return result
     except IntegrityError:
         db.rollback()
+        manifest_sha256 = _manifest_sha256(plans, source_metadata=source_metadata)
         existing = db.scalar(
             select(FiberTopologySourceBatch).where(
                 FiberTopologySourceBatch.source_system == preview.source_system,
@@ -786,8 +1428,6 @@ def _persist_preview(
         if existing is None:
             raise
         return _stage_result(existing, created=False)
-    db.refresh(batch)
-    return _stage_result(batch, created=True)
 
 
 def stage_fiber_preview_batch(
@@ -852,8 +1492,12 @@ __all__ = [
     "FiberSourcePreview",
     "FiberSourceProfile",
     "FiberSourceStageResult",
+    "mixed_geometry_compatible",
+    "revalidate_mixed_features",
     "SOURCE_PROFILES",
     "preview_fiber_source",
+    "preview_uploaded_fiber_source",
+    "persist_fiber_preview",
     "source_profile",
     "stage_fiber_preview_batch",
     "stage_fiber_source",

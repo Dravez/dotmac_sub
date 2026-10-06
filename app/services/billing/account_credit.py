@@ -42,6 +42,13 @@ from app.models.billing import (
     PaymentStatus,
     TopupIntent,
 )
+from app.models.customer_subledger import (
+    CustomerPostingGroup,
+    CustomerSubledgerOpeningPosition,
+    PostingCommandKind,
+    PostingProducer,
+    PostingSourceKind,
+)
 from app.models.integration_platform import (
     IntegrationCapabilityBinding,
     IntegrationInbox,
@@ -60,7 +67,11 @@ from app.services.billing._common import (
     resolve_invoice_settlement_amounts,
 )
 from app.services.billing.ledger import LedgerEntries
-from app.services.billing.payments import PaymentAllocations
+from app.services.billing.payments import (
+    PaymentAllocationFinalizationMode,
+    PaymentAllocations,
+    resolve_payment_allocation_finalization,
+)
 from app.services.common import coerce_uuid, round_money, to_decimal
 from app.services.domain_errors import DomainError
 
@@ -81,6 +92,7 @@ class AccountCreditApplicationResult:
     invoices_settled: list[str] = field(default_factory=list)
     invoices_touched: list[str] = field(default_factory=list)
     allocation_ids: list[str] = field(default_factory=list)
+    historical_debt_invoices: list[str] = field(default_factory=list)
     unbacked_credit: Decimal = Decimal("0.00")
     invoice_remaining: Decimal = Decimal("0.00")
 
@@ -132,6 +144,34 @@ class AccountCreditInvoiceFundingPreview:
     def fully_funded(self) -> bool:
         return self.invoice_remaining > Decimal("0.00") and self.shortfall == Decimal(
             "0.00"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InvoiceIssuanceFundingSource:
+    """One exact payment amount reserved before a draft becomes receivable."""
+
+    payment_id: UUID
+    amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class InvoiceIssuanceFundingReservation:
+    """Payment-backed credit observed before an invoice posts its own debit."""
+
+    invoice_id: UUID
+    account_id: UUID
+    currency: str
+    invoice_total: Decimal
+    reserved_amount: Decimal
+    sources: tuple[InvoiceIssuanceFundingSource, ...]
+    fingerprint: str
+
+    @property
+    def fully_funded(self) -> bool:
+        return (
+            self.invoice_total > Decimal("0.00")
+            and self.reserved_amount == self.invoice_total
         )
 
 
@@ -433,9 +473,40 @@ def _source_payments(
         )
     rows = query.all()
     account_remaining: dict[str, Decimal] = {}
+    boundary_by_currency: dict[str, datetime | None] = {}
     sources: list[tuple[Payment, Decimal]] = []
     for payment in rows:
         currency = (payment.currency or "NGN").upper()
+        if currency not in boundary_by_currency:
+            opening_at = db.scalar(
+                select(CustomerSubledgerOpeningPosition.occurred_at).where(
+                    CustomerSubledgerOpeningPosition.account_id
+                    == coerce_uuid(account_id),
+                    CustomerSubledgerOpeningPosition.currency == currency,
+                )
+            )
+            boundary_by_currency[currency] = max(
+                (
+                    value.replace(tzinfo=UTC) if value.tzinfo is None else value
+                    for value in (funding_position_at, opening_at)
+                    if value is not None
+                ),
+                default=None,
+            )
+        boundary = boundary_by_currency[currency]
+        # The approved opening already includes the economic effect of earlier
+        # payments. Their apparent unallocated envelope is not new cash.
+        if boundary is not None:
+            created_at = payment.created_at
+            if created_at is None:
+                continue
+            paid_at = payment.paid_at or created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if paid_at.tzinfo is None:
+                paid_at = paid_at.replace(tzinfo=UTC)
+            if created_at <= boundary and paid_at <= boundary:
+                continue
         if currency not in account_remaining:
             account_remaining[currency] = max(
                 Decimal("0.00"),
@@ -452,7 +523,7 @@ def _source_payments(
             PaymentAllocations.available_amount_at_reviewed_boundary_for_owner(
                 db,
                 str(payment.id),
-                funding_position_at=funding_position_at,
+                funding_position_at=boundary,
             ),
             account_remaining[currency],
         )
@@ -480,6 +551,173 @@ def _invoice_funding_fingerprint(payload: dict[str, object]) -> str:
 
 class AccountCreditApplications:
     """Single orchestration owner for payment-backed account-credit use."""
+
+    @staticmethod
+    def preview_invoice_issuance_funding(
+        db: Session,
+        invoice: Invoice,
+    ) -> InvoiceIssuanceFundingReservation:
+        """Reserve exact credit before issuance introduces its receivable debit."""
+
+        if (
+            not invoice.is_active
+            or invoice.status is not InvoiceStatus.draft
+            or invoice.is_proforma
+        ):
+            raise AccountCreditApplicationError(
+                code="financial.account_credit_applications.invalid_issuance_preview",
+                message="Only an active financial draft can reserve issuance funding.",
+                details={"invoice_id": str(invoice.id), "status": invoice.status.value},
+            )
+        lock_account(db, str(invoice.account_id))
+        invoice_total = max(
+            Decimal("0.00"), round_money(to_decimal(invoice.balance_due))
+        )
+        currency = (invoice.currency or "NGN").upper()
+        sources: list[InvoiceIssuanceFundingSource] = []
+        remaining = invoice_total
+        for payment, available in _source_payments(db, str(invoice.account_id)):
+            if remaining <= Decimal("0.00"):
+                break
+            if (payment.currency or "NGN").upper() != currency:
+                continue
+            amount = min(remaining, round_money(available))
+            if amount <= Decimal("0.00"):
+                continue
+            sources.append(
+                InvoiceIssuanceFundingSource(payment_id=payment.id, amount=amount)
+            )
+            remaining = round_money(remaining - amount)
+        reserved = round_money(
+            sum((source.amount for source in sources), Decimal("0.00"))
+        )
+        payload: dict[str, object] = {
+            "kind": "invoice_issuance_funding_reservation",
+            "invoice_id": invoice.id,
+            "account_id": invoice.account_id,
+            "status": invoice.status.value,
+            "currency": currency,
+            "invoice_total": invoice_total,
+            "reserved_amount": reserved,
+            "sources": tuple((item.payment_id, item.amount) for item in sources),
+        }
+        return InvoiceIssuanceFundingReservation(
+            invoice_id=invoice.id,
+            account_id=invoice.account_id,
+            currency=currency,
+            invoice_total=invoice_total,
+            reserved_amount=reserved,
+            sources=tuple(sources),
+            fingerprint=_invoice_funding_fingerprint(payload),
+        )
+
+    @staticmethod
+    def apply_invoice_issuance_funding(
+        db: Session,
+        invoice: Invoice,
+        *,
+        reservation: InvoiceIssuanceFundingReservation,
+    ) -> AccountCreditApplicationResult:
+        """Apply the exact credit reserved before this invoice posted its debit."""
+
+        lock_account(db, str(invoice.account_id))
+        db.refresh(invoice)
+        current_remaining = round_money(to_decimal(invoice.balance_due))
+        reservation_payload: dict[str, object] = {
+            "kind": "invoice_issuance_funding_reservation",
+            "invoice_id": reservation.invoice_id,
+            "account_id": reservation.account_id,
+            "status": InvoiceStatus.draft.value,
+            "currency": reservation.currency,
+            "invoice_total": reservation.invoice_total,
+            "reserved_amount": reservation.reserved_amount,
+            "sources": tuple(
+                (item.payment_id, item.amount) for item in reservation.sources
+            ),
+        }
+        if (
+            _invoice_funding_fingerprint(reservation_payload) != reservation.fingerprint
+            or not invoice.is_active
+            or reservation.invoice_id != invoice.id
+            or reservation.account_id != invoice.account_id
+            or reservation.currency != (invoice.currency or "NGN").upper()
+            or invoice.status not in ELIGIBLE_INVOICE_STATUSES
+            or current_remaining != reservation.invoice_total
+            or reservation.reserved_amount > current_remaining
+        ):
+            raise AccountCreditApplicationError(
+                code="financial.account_credit_applications.stale_issuance_reservation",
+                message="Invoice issuance funding changed before it could be applied.",
+                details={"invoice_id": str(invoice.id)},
+            )
+
+        result = AccountCreditApplicationResult(
+            account_id=str(invoice.account_id),
+            available_credit=reservation.reserved_amount,
+        )
+        for source in reservation.sources:
+            payment = db.get(Payment, source.payment_id)
+            if payment is None:
+                raise AccountCreditApplicationError(
+                    code="financial.account_credit_applications.issuance_payment_missing",
+                    message="Reserved payment disappeared during invoice issuance.",
+                    details={"payment_id": str(source.payment_id)},
+                )
+            request = PaymentAllocationPreviewRequest(
+                payment_id=source.payment_id,
+                invoice_id=invoice.id,
+                amount=source.amount,
+            )
+            try:
+                preview = PaymentAllocations.preview_issuance_reserved_credit_for_owner(
+                    db, request
+                )
+                confirmation = (
+                    PaymentAllocations.stage_confirm_issuance_reserved_credit_for_owner(
+                        db,
+                        PaymentAllocationConfirm(
+                            **request.model_dump(),
+                            preview_fingerprint=preview.fingerprint,
+                            idempotency_key=_allocation_key(payment, invoice),
+                        ),
+                    )
+                )
+            except HTTPException as exc:
+                raise AccountCreditApplicationError(
+                    code="financial.account_credit_applications.issuance_allocation_rejected",
+                    message="Reserved invoice funding could not be applied.",
+                    details={
+                        "invoice_id": str(invoice.id),
+                        "payment_id": str(source.payment_id),
+                        "reason": str(exc.detail),
+                    },
+                ) from exc
+            applied = round_money(to_decimal(confirmation.allocation.amount))
+            _stage_application_posting(
+                db,
+                allocation=confirmation.allocation,
+                invoice=invoice,
+                payment=payment,
+                currency=reservation.currency,
+                amount=applied,
+                idempotency_suffix=":issuance",
+            )
+            result.applied = round_money(result.applied + applied)
+            result.allocation_ids.append(str(confirmation.allocation.id))
+            result.invoices_touched.append(str(invoice.id))
+
+        db.flush()
+        db.refresh(invoice)
+        result.invoice_remaining = round_money(to_decimal(invoice.balance_due))
+        if result.invoice_remaining == Decimal("0.00"):
+            result.invoices_settled.append(str(invoice.id))
+        if result.applied != reservation.reserved_amount:
+            raise AccountCreditApplicationError(
+                code="financial.account_credit_applications.incomplete_issuance_application",
+                message="Reserved invoice funding was not applied exactly.",
+                details={"invoice_id": str(invoice.id)},
+            )
+        return result
 
     @staticmethod
     def preview_invoice_funding(
@@ -604,15 +842,26 @@ class AccountCreditApplications:
         payment = db.scalar(
             select(Payment).where(Payment.id == payment_id).with_for_update()
         )
+        # The invoice issuance has already reduced the authoritative prepaid
+        # funding position. Requiring the post-issuance *spendable* balance to
+        # cover the same invoice again double-counts that charge and rejects a
+        # reviewed payment even when its unallocated envelope is exact. This
+        # selected-payment path therefore proves the reusable credit envelope
+        # and the selected payment's remaining room; callers still verify the
+        # authoritative post-settlement residual after allocation.
         account_credit = round_money(
-            get_spendable_account_credit_balance(
+            get_account_credit_balance(
                 db,
                 str(invoice.account_id),
                 currency=currency,
             )
         )
         payment_available = (
-            round_money(PaymentAllocations.available_amount(db, str(payment_id)))
+            round_money(
+                PaymentAllocations.available_amount_for_reviewed_document_correction(
+                    db, str(payment_id)
+                )
+            )
             if payment is not None
             else Decimal("0.00")
         )
@@ -648,7 +897,11 @@ class AccountCreditApplications:
             amount=expected,
         )
         try:
-            allocation_preview = PaymentAllocations.preview(db, request)
+            allocation_preview = (
+                PaymentAllocations.preview_reviewed_document_correction_for_owner(
+                    db, request
+                )
+            )
             confirmation = (
                 PaymentAllocations.stage_confirm_reviewed_document_correction(
                     db,
@@ -861,7 +1114,12 @@ class AccountCreditApplications:
         return result
 
     @staticmethod
-    def apply(db: Session, account_id: str) -> AccountCreditApplicationResult:
+    def apply(
+        db: Session,
+        account_id: str,
+        *,
+        funding_position_at: datetime | None = None,
+    ) -> AccountCreditApplicationResult:
         result = AccountCreditApplicationResult(account_id=str(account_id))
         lock_account(db, str(account_id))
 
@@ -875,7 +1133,10 @@ class AccountCreditApplications:
         credit_by_currency = {
             currency: round_money(
                 get_spendable_account_credit_balance(
-                    db, str(account_id), currency=currency
+                    db,
+                    str(account_id),
+                    currency=currency,
+                    after=funding_position_at,
                 )
             )
             for currency in currencies
@@ -889,7 +1150,11 @@ class AccountCreditApplications:
         if result.available_credit <= 0:
             return result
 
-        sources = _source_payments(db, str(account_id))
+        sources = _source_payments(
+            db,
+            str(account_id),
+            funding_position_at=funding_position_at,
+        )
         backed_by_currency: dict[str, Decimal] = {}
         for payment, room in sources:
             currency = (payment.currency or "NGN").upper()
@@ -923,6 +1188,7 @@ class AccountCreditApplications:
             invoice_remaining = round_money(to_decimal(invoice.balance_due or 0))
             if invoice_remaining <= 0:
                 continue
+            finalization = resolve_payment_allocation_finalization(db, invoice)
             for payment, _room in sources:
                 available = remaining_by_currency.get(currency, Decimal("0.00"))
                 payment_room = room_by_payment.get(payment.id, Decimal("0.00"))
@@ -936,28 +1202,73 @@ class AccountCreditApplications:
                     invoice_id=invoice.id,
                     amount=amount,
                 )
-                preview = PaymentAllocations.preview(db, request)
-                confirmation = PaymentAllocations.stage_confirm(
-                    db,
-                    PaymentAllocationConfirm(
-                        **request.model_dump(),
-                        preview_fingerprint=preview.fingerprint,
-                        idempotency_key=_allocation_key(payment, invoice),
-                    ),
+                existing = (
+                    db.query(PaymentAllocation)
+                    .filter(PaymentAllocation.payment_id == payment.id)
+                    .filter(PaymentAllocation.invoice_id == invoice.id)
+                    .filter(PaymentAllocation.is_active.is_(True))
+                    .first()
                 )
-                applied = round_money(to_decimal(confirmation.allocation.amount))
+                if existing is not None and funding_position_at is not None:
+                    previous = round_money(to_decimal(existing.amount))
+                    allocation_result = (
+                        PaymentAllocations.stage_increase_existing_at_reviewed_boundary(
+                            db,
+                            payment_id=payment.id,
+                            invoice_id=invoice.id,
+                            amount=amount,
+                            funding_position_at=funding_position_at,
+                        )
+                    )
+                    applied = round_money(
+                        to_decimal(allocation_result.allocation.amount) - previous
+                    )
+                    allocation = allocation_result.allocation
+                else:
+                    preview = PaymentAllocations.preview_at_reviewed_boundary_for_owner(
+                        db,
+                        request,
+                        funding_position_at=funding_position_at,
+                    )
+                    allocation_result = (
+                        PaymentAllocations.stage_confirm_at_reviewed_boundary_for_owner(
+                            db,
+                            PaymentAllocationConfirm(
+                                **request.model_dump(),
+                                preview_fingerprint=preview.fingerprint,
+                                idempotency_key=_allocation_key(payment, invoice),
+                            ),
+                            funding_position_at=funding_position_at,
+                            finalization_mode=finalization.mode,
+                        )
+                    )
+                    applied = round_money(
+                        to_decimal(allocation_result.allocation.amount)
+                    )
+                    allocation = allocation_result.allocation
                 result.applied = round_money(result.applied + applied)
-                result.allocation_ids.append(str(confirmation.allocation.id))
+                result.allocation_ids.append(str(allocation.id))
                 _stage_application_posting(
                     db,
-                    allocation=confirmation.allocation,
+                    allocation=allocation,
                     invoice=invoice,
                     payment=payment,
                     currency=currency,
                     amount=applied,
+                    idempotency_suffix=(
+                        f":topup:{payment.id}:{invoice.id}:{amount}"
+                        if existing is not None and funding_position_at is not None
+                        else None
+                    ),
                 )
                 if str(invoice.id) not in result.invoices_touched:
                     result.invoices_touched.append(str(invoice.id))
+                if (
+                    finalization.mode
+                    is PaymentAllocationFinalizationMode.historical_debt
+                    and str(invoice.id) not in result.historical_debt_invoices
+                ):
+                    result.historical_debt_invoices.append(str(invoice.id))
                 invoice_remaining = round_money(invoice_remaining - applied)
                 remaining_by_currency[currency] = round_money(available - applied)
                 room_by_payment[payment.id] = round_money(payment_room - applied)
@@ -1081,6 +1392,7 @@ class AccountCreditApplications:
         account_id: str,
         *,
         payments: Sequence[Payment] = (),
+        funding_position_at: datetime | None = None,
     ) -> AccountCreditApplicationResult:
         """Offer an account's now-spendable credit to its open receivables.
 
@@ -1097,7 +1409,11 @@ class AccountCreditApplications:
         for payment in payments:
             if payment in db:
                 db.expire(payment, ["settlement"])
-        return AccountCreditApplications.apply(db, str(account_id))
+        return AccountCreditApplications.apply(
+            db,
+            str(account_id),
+            funding_position_at=funding_position_at,
+        )
 
     @staticmethod
     def preview_invoice_void_release(
@@ -1107,12 +1423,74 @@ class AccountCreditApplications:
         return _invoice_void_release_preview(db, invoice_id)
 
     @staticmethod
+    def _reverse_customer_credit_application_posting_for_void(
+        db: Session,
+        *,
+        allocation: PaymentAllocation,
+    ) -> CustomerPostingGroup | None:
+        """Reverse customer-position consumption when a void releases credit.
+
+        ``release_for_invoice_void`` is still called from legacy invoice-void
+        roots that are not always wrapped by ``execute_owner_command``. The
+        customer-subledger owner supplies the bounded compatibility writer so
+        posting rows still have exactly one constructing owner.
+        """
+        original = db.scalar(
+            select(CustomerPostingGroup).where(
+                CustomerPostingGroup.source_kind
+                == PostingSourceKind.payment_allocation.value,
+                CustomerPostingGroup.source_id == allocation.id,
+                CustomerPostingGroup.command_kind
+                == PostingCommandKind.customer_credit_application,
+                CustomerPostingGroup.producer_owner
+                == PostingProducer.account_credit_applications.value,
+                CustomerPostingGroup.reverses_group_id.is_(None),
+            )
+        )
+        if original is None:
+            return None
+        existing = db.scalar(
+            select(CustomerPostingGroup).where(
+                CustomerPostingGroup.reverses_group_id == original.id
+            )
+        )
+        if existing is not None:
+            return existing
+
+        from app.services.billing.customer_subledger import (
+            StageReversalCommand,
+            stage_legacy_reversal,
+        )
+        from app.services.owner_commands import CommandContext
+
+        key = f"posting:invoice-void-release:{allocation.id}"
+        return stage_legacy_reversal(
+            db,
+            StageReversalCommand(
+                original_group_id=original.id,
+                producer_owner=PostingProducer.account_credit_applications,
+                source_kind=PostingSourceKind.payment_allocation,
+                source_id=allocation.id,
+                occurred_at=datetime.now(UTC),
+                idempotency_key=key,
+            ),
+            context=CommandContext.system(
+                actor="financial.account_credit_applications",
+                scope="invoice_void_account_credit_release",
+                reason="Invoice void released account-credit allocation",
+                causation_id=original.id,
+                idempotency_key=key,
+            ),
+        )
+
+    @staticmethod
     def release_for_invoice_void(
         db: Session,
         *,
         invoice_id: UUID,
         expected_allocation_ids: tuple[UUID, ...],
         memo: str,
+        reverse_customer_posting: bool = True,
     ) -> list[tuple[LedgerEntry, UUID]]:
         """Append reversals and retire allocations; the caller owns the commit."""
         invoice = db.get(Invoice, invoice_id)
@@ -1148,6 +1526,10 @@ class AccountCreditApplications:
             )
             reversals.append((reversal, entry.original_entry_id))
         for allocation in allocations:
+            if reverse_customer_posting:
+                AccountCreditApplications._reverse_customer_credit_application_posting_for_void(
+                    db, allocation=allocation
+                )
             allocation.is_active = False
             allocation.payment.updated_at = datetime.now(UTC)
         db.flush()
@@ -1179,6 +1561,7 @@ class AccountCreditApplications:
             invoice_id=command.invoice_id,
             expected_allocation_ids=(command.allocation_id,),
             memo=reason,
+            reverse_customer_posting=False,
         )
 
     @staticmethod
@@ -1648,6 +2031,8 @@ __all__ = [
     "AccountCreditApplications",
     "AccountCreditInvariantSummary",
     "AccountCreditInvariantViolation",
+    "InvoiceIssuanceFundingReservation",
+    "InvoiceIssuanceFundingSource",
     "ELIGIBLE_INVOICE_STATUSES",
     "eligible_invoices",
 ]
@@ -1661,6 +2046,7 @@ def _stage_application_posting(
     payment,
     currency: str,
     amount,
+    idempotency_suffix: str | None = None,
 ) -> None:
     """One shadow posting group per credit-to-invoice allocation.
 
@@ -1721,7 +2107,9 @@ def _stage_application_posting(
                     invoice_id=invoice.id,
                 ),
             ),
-            idempotency_key=f"posting:payment_allocation:{allocation.id}",
+            idempotency_key=(
+                f"posting:payment_allocation:{allocation.id}{idempotency_suffix or ''}"
+            ),
         ),
         context=current_command_context(db),
     )

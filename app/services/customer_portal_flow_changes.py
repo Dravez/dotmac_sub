@@ -575,7 +575,7 @@ def submit_change_plan(
         subscription_id=subscription_id,
         new_offer_id=offer_id,
         effective_date=eff_date,
-        requested_by_person_id=str(subscriber.id) if subscriber else None,
+        requested_by_subscriber_id=str(subscriber.id) if subscriber else None,
         notes=notes,
     )
     return {"success": True}
@@ -968,6 +968,7 @@ def confirm_service_change(
         command,
         actor_id=str(subscriber.id) if subscriber else None,
         actor_type=(AuditActorType.user if subscriber else AuditActorType.system),
+        requested_by_subscriber_id=str(subscriber.id) if subscriber else None,
     )
     if outcome.status not in {
         SubscriptionCommandOutcomeStatus.applied,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from app.models.domain_settings import DomainSetting, SettingDomain
+from app.models.event_store import EventStore
 from app.models.subscription_engine import SettingValueType
 from app.models.support import Ticket, TicketStatus
 from app.models.ticket_workflow import (
@@ -204,6 +205,14 @@ def test_check_sla_breaches_records_open_breach(db_session):
     assert (
         db_session.query(SlaBreach).filter(SlaBreach.clock_id == clock.id).count() == 1
     )
+    event = (
+        db_session.query(EventStore)
+        .filter(EventStore.event_type == "support.ticket.sla_breached")
+        .one()
+    )
+    assert event.payload["ticket_id"] == str(ticket.id)
+    assert event.payload["sla_clock_id"] == str(clock.id)
+    assert event.payload["priority"] == "normal"
 
 
 def test_latest_ticket_sla_clocks_and_status_read_model(db_session):

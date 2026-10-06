@@ -392,6 +392,7 @@ SERVICES: tuple[SOTService, ...] = (
             "customer.financial_position",
             "access.subscription_lifecycle",
             "access.walled_garden_policy",
+            "access.test_connection",
         ),
         notes=(
             "One read-only policy owner resolves customer-impact, billing, "
@@ -416,6 +417,7 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical subscriber account state",
                         "canonical subscription lifecycle state",
                         "canonical access restriction intent",
+                        "bounded test access",
                     ),
                 ),
                 ConcernContract(
@@ -440,6 +442,12 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="bounded test access",
+                    owner="access.test_connection",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source="Typed, clock-valid subscription grant; affects RADIUS only, never commercial eligibility",
+                ),
                 AuthorityInput(
                     name="canonical subscriber account state",
                     owner="customer.accounts",
@@ -998,6 +1006,7 @@ SERVICES: tuple[SOTService, ...] = (
             "payments-basis revenue definitions",
             "subscription movement and per-offer report counts",
             "upcoming charge reminder candidate selection and read model",
+            "upcoming charge payment and funding summaries",
         ),
         depends_on=(
             "financial.invoices",
@@ -1009,7 +1018,11 @@ SERVICES: tuple[SOTService, ...] = (
             "Read owner only: aggregates invoice/payment/subscription "
             "facts for dashboards and the admin reports. Upcoming Charges "
             "selects bounded candidates before composing exact prepaid charge "
-            "and funding owners for one page. It decides no financial consequences."
+            "and funding owners for one page. Optional UTC calendar periods "
+            "filter verified due or coverage-end facts. It decides no financial "
+            "consequences. Optional summary batches cover "
+            "the filtered cohort using confirmed invoice allocations or "
+            "verified account funding. It decides no financial consequences."
         ),
     ),
     SOTService(

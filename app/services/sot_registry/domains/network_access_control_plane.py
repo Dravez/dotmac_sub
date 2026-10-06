@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from app.services.automation_contracts import (
+    AutomationCatalogItem,
+    AutomationCatalogState,
+    AutomationDomainCapabilities,
+)
 from app.services.sot_manifest import (
     AuthorityInput,
     AuthorityKind,
@@ -18,13 +23,23 @@ from app.services.sot_manifest import (
     TransactionMode,
     owner_command_boundary_error_codes,
 )
+from app.services.sot_registry.domains.financial_access.test_connections import (
+    ACTIONS as TEST_CONNECTION_ACTIONS,
+)
 from app.services.sot_registry.model import DomainSOT
+from app.services.sot_registry.test_connection_contracts import (
+    SERVICE as TEST_CONNECTION_SERVICE,
+)
+from app.services.sot_registry.test_connection_contracts import (
+    TRIGGERS as TEST_CONNECTION_TRIGGERS,
+)
 
 DOMAIN = DomainSOT(
     domain="network_access_control_plane",
     setting_domains=("radius",),
     authentication_mechanisms=("radius",),
     services=(
+        TEST_CONNECTION_SERVICE,
         SOTService(
             name="access.subscription_lifecycle",
             module="app.services.account_lifecycle",
@@ -32,6 +47,11 @@ DOMAIN = DomainSOT(
                 "enforcement lock lifecycle",
                 "persisted access restriction intent",
                 "subscription access-status transitions",
+                "subscription pause episodes and independently releasable causes",
+                "scheduled customer-vacation pause and resume evidence",
+                "reviewed administrative pause and resume evidence",
+                "prepaid pause-compensation entitlement evidence",
+                "exact pause-duration billing-anchor adjustment",
                 "subscription billing-anchor projection",
                 "active subscription billing-anchor invariant",
                 "subscriber access-status projection",
@@ -60,7 +80,20 @@ DOMAIN = DomainSOT(
                 "historical only after its explicit end instant has passed. This "
                 "read classification never transitions lifecycle state. Pending-to-active "
                 "transitions invoke the typed PPPoE credential participant before the "
-                "active status and activation event are staged."
+                "active status and activation event are staged. A pause preserves "
+                "service configuration while denying access; resume releases one "
+                "cause at a time and moves the billing anchor by the exact effective "
+                "pause interval only after the final cause is released. For prepaid "
+                "service it first stages one zero-value ServiceEntitlement linked "
+                "uniquely to the pause episode, preserving paid invoice periods and "
+                "failing closed when canonical coverage evidence is ambiguous."
+                " Customer vacation holds use the same pause episode owner with a "
+                "typed customer cause and scheduled resume instant; they never "
+                "create an enforcement lock or project the service as suspended."
+                " Administrative Pause uses the typed administrative cause and "
+                "extends the billing anchor by exact elapsed pause time on resume; "
+                "Suspend is an enforcement lock that stops access and future "
+                "recurring billing without preserving unused period time."
             ),
         ),
         SOTService(
@@ -1171,6 +1204,7 @@ DOMAIN = DomainSOT(
                 "access.radius_state",
                 "access.radius_reject",
                 "access.radius_target_registry",
+                "access.test_connection",
                 "control.settings_spec",
             ),
             notes=(
@@ -1197,27 +1231,210 @@ DOMAIN = DomainSOT(
         SOTService(
             name="access.session_enforcement",
             module="app.services.enforcement",
-            owns=(
-                "typed access-state CoA/disconnect execution",
-                "NAS-evidenced accounting-session closure",
-                "single-flight access-control recovery execution",
-            ),
+            owns=("typed access-state CoA/disconnect execution",),
             depends_on=(
                 "access.radius_projection",
                 "access.radius_state",
                 "sessions.radius_resolution",
             ),
             notes=(
-                "Disconnect ACK, RFC 5176 session-not-found, rejection, timeout "
-                "and configuration failure remain distinct outcomes. Accounting "
-                "closes only when the NAS explicitly reports that the session "
-                "context is absent. Exact-old-IP projection repair issues one "
-                "disconnect and bounded-polls authoritative radacct for up to "
-                "15 seconds; it does not fall back to the lagging imported "
-                "accounting mirror, and polling never sends a second customer "
-                "interruption. "
-                "The periodic recovery loop is single-flight and caps attempts "
-                "rather than successes."
+                "Read-only transport of access-state consequences to NAS devices: "
+                "RADIUS Disconnect/CoA, RouterOS API/SSH session kicks and "
+                "address-list blocks. Disconnect ACK, RFC 5176 session-not-found, "
+                "rejection, timeout and configuration failure remain distinct "
+                "outcomes. Exact-old-IP projection repair issues one disconnect "
+                "and bounded-polls authoritative radacct for up to 15 seconds "
+                "without a second customer interruption. This concern (the "
+                "transport functions: update_subscription_sessions, "
+                "disconnect_subscription_sessions[_confirmed], "
+                "disconnect_account_sessions, the CoA senders and the "
+                "address-list block/unblock paths) writes no database row; each "
+                "final per-NAS outcome is recorded by access.enforcement_evidence "
+                "(ADR 0017). The same module ALSO performs state writes that are "
+                "not this concern (credential RADIUS profiles, cancel/suspend/"
+                "restore activation, served-IPv4 release, the FUP-lift step); "
+                "they are declared under sessions.enforcement as migration "
+                "debt, with NAS-evidenced closure and single-flight recovery."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="typed access-state CoA/disconnect execution",
+                        role=OwnerRole.TRANSPORT,
+                        input_names=(
+                            "subscription service identity",
+                            "open RADIUS accounting sessions",
+                            "NAS device inventory",
+                            "NAS response to the enforcement command",
+                        ),
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="subscription service identity",
+                        owner="access.subscription_lifecycle",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="subscriptions and access_credentials",
+                    ),
+                    AuthorityInput(
+                        name="open RADIUS accounting sessions",
+                        owner="external:freeradius",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source="authoritative radacct rows with acctstoptime IS NULL",
+                    ),
+                    AuthorityInput(
+                        name="NAS device inventory",
+                        owner="network.nas_inventory",
+                        kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                        source="nas_devices",
+                    ),
+                    AuthorityInput(
+                        name="NAS response to the enforcement command",
+                        owner="external:routeros",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "Disconnect-ACK/NAK Error-Cause and RouterOS API read-back"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.READ_ONLY,
+                    boundary=(
+                        "the transport functions read through the caller's "
+                        "session and never flush or commit; per-NAS outcome "
+                        "evidence is written by access.enforcement_evidence on "
+                        "its own unit of work (ADR 0017). Other writes in the "
+                        "same module belong to the debt concerns declared under "
+                        "sessions.enforcement, not to this contract"
+                    ),
+                    locking=(
+                        "none; a process-local CoA negative cache avoids repeating "
+                        "known-unsupported CoA"
+                    ),
+                    idempotency=(
+                        "none: each call is a new customer interruption; the "
+                        "confirmed path sends one disconnect and then only polls"
+                    ),
+                    retries=(
+                        "caller-owned; the confirmed poll is bounded to 15 seconds "
+                        "and never re-sends"
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                        "access.session_enforcement.terminal_session_timeout",
+                        "access.session_enforcement.subscription_not_found",
+                    ),
+                    mapping_owner=(
+                        "app.services.events.handlers (enforcement, "
+                        "ip_assignment_projection)"
+                    ),
+                    fail_closed_on=(
+                        "access.session_enforcement.accounting_target_unavailable",
+                        "access.session_enforcement.accounting_observation_unavailable",
+                    ),
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="access.session_enforcement",
+                ),
+                steward="network operations",
+                design_refs=(
+                    "docs/adr/0017-enforcement-application-evidence.md",
+                    "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
+                ),
+                test_refs=(
+                    "tests/test_ip_assignment_projection_handler.py",
+                    "tests/test_enforcement_gaps.py",
+                    "tests/integration/test_enforcement_application_evidence_durability.py",
+                ),
+            ),
+        ),
+        SOTService(
+            name="access.enforcement_evidence",
+            module="app.services.enforcement_evidence",
+            owns=("enforcement application evidence observation",),
+            notes=(
+                "One current-state EnforcementApplication row per "
+                "(subscription, NAS device, effect): the typed outcome of each "
+                "address-list block/unblock and session-kick attempt. Written "
+                "out-of-band so the evidence of an irreversible device effect "
+                "survives the caller's rollback. It is evidence, never the "
+                "intended access state."
+            ),
+            contract=ServiceContract(
+                concerns=(
+                    ConcernContract(
+                        name="enforcement application evidence observation",
+                        role=OwnerRole.OBSERVATION_COLLECTOR,
+                        input_names=(
+                            "final per-NAS enforcement attempt outcome",
+                            "NAS device response to the enforcement command",
+                        ),
+                        canonical_writer="access.enforcement_evidence",
+                    ),
+                ),
+                authoritative_inputs=(
+                    AuthorityInput(
+                        name="final per-NAS enforcement attempt outcome",
+                        owner="access.session_enforcement",
+                        kind=AuthorityKind.OBSERVATION,
+                        source=(
+                            "typed EnforcementOutcome from the per-NAS helpers in "
+                            "app/services/enforcement.py"
+                        ),
+                    ),
+                    AuthorityInput(
+                        name="NAS device response to the enforcement command",
+                        owner="external:routeros",
+                        kind=AuthorityKind.EXTERNAL_OBSERVATION,
+                        source=(
+                            "RouterOS API/SSH result or exception, classified once "
+                            "by app/services/nas/enforcement_failure.py"
+                        ),
+                    ),
+                ),
+                transaction=TransactionContract(
+                    mode=TransactionMode.OUT_OF_BAND_EVIDENCE,
+                    boundary=(
+                        "one db_session_adapter.create_session() unit of work "
+                        "per record, independent of the caller (ADR 0017)"
+                    ),
+                    locking=(
+                        "no foreign keys; SET LOCAL lock_timeout 2s; never waits "
+                        "on the caller's subscription row lock"
+                    ),
+                    idempotency=(
+                        "upsert ON CONFLICT (subscription_id, nas_device_id, "
+                        "effect); the row is current state, not a log"
+                    ),
+                    retries=(
+                        "none; a failed write logs ERROR and is dropped, except "
+                        "a Celery soft time limit, which is re-raised"
+                    ),
+                ),
+                errors=ErrorContract(
+                    domain_codes=(),
+                    mapping_owner="access.enforcement_evidence",
+                ),
+                migration=MigrationContract(
+                    state=AuthorityMigrationState.NATIVE,
+                    new_owner="access.enforcement_evidence",
+                ),
+                steward="network access",
+                design_refs=(
+                    "docs/adr/0017-enforcement-application-evidence.md",
+                    "docs/SOT_RELATIONSHIP_MAP.md",
+                ),
+                test_refs=(
+                    "tests/test_enforcement_application_writer.py",
+                    "tests/test_enforcement_application_outcomes.py",
+                    "tests/test_enforcement_failure_classifier.py",
+                    "tests/architecture/test_enforcement_application_single_writer.py",
+                    "tests/integration/test_enforcement_application_evidence_durability.py",
+                ),
             ),
         ),
         SOTService(
@@ -2186,4 +2403,98 @@ DOMAIN = DomainSOT(
     rule="Billing, FUP, and admin actions resolve the desired access outcome "
     "once, map it to RADIUS state once, then let enforcement apply the "
     "network-side change.",
+    automation=AutomationDomainCapabilities(
+        target_types=("access.test_connection",),
+        triggers=TEST_CONNECTION_TRIGGERS,
+        actions=TEST_CONNECTION_ACTIONS,
+        catalog_items=(
+            AutomationCatalogItem(
+                key="billing.test_connection.finance_review",
+                label="Repeated Test Connection Finance review",
+                group="Usage and access",
+                state=AutomationCatalogState.available,
+                explanation="Native customer Test Connection creation counts with staff Finance review notifications.",
+                management_path="/admin/automation/workflows",
+                trigger_keys=("billing.test_connection.created",),
+                action_keys=("billing.test_connection.notify_finance",),
+            ),
+            AutomationCatalogItem(
+                key="usage.radius_accounting_import",
+                label="RADIUS accounting import",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The existing importer reads network usage on its configured schedule; no Center schedule trigger or import action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.metering",
+                label="Usage metering",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage totals are written by the existing metering owner; rules cannot yet start or change metering safely.",
+            ),
+            AutomationCatalogItem(
+                key="usage.rating",
+                label="Usage rating",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Usage rating remains an existing scheduled owner process and has no Center trigger or action contract.",
+            ),
+            AutomationCatalogItem(
+                key="usage.fup_evaluation",
+                label="Fair Usage Policy evaluation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="FUP decisions can change service access and remain under the existing policy and enforcement owners.",
+            ),
+            AutomationCatalogItem(
+                key="usage.expired_fup_removal",
+                label="Expired FUP removal",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Expiry and removal continue through the FUP owner; no Automation Center action is registered.",
+            ),
+            AutomationCatalogItem(
+                key="usage.data_bundle_warning",
+                label="Expiring data-bundle warning",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Warning timing and delivery remain managed by the existing usage and notification owners.",
+            ),
+            AutomationCatalogItem(
+                key="access.stale_session_cleanup",
+                label="Stale session cleanup",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session cleanup is a protected maintenance job and has no business-rule action in the Center.",
+            ),
+            AutomationCatalogItem(
+                key="access.active_session_reconstruction",
+                label="Active-session reconstruction",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Session reconstruction repairs access observations through its existing owner; it is not a configurable action.",
+            ),
+            AutomationCatalogItem(
+                key="access.device_login_radius_sync",
+                label="Device-login RADIUS synchronization",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="The synchronization process remains in the existing access service and has no Center trigger/action contract.",
+            ),
+            AutomationCatalogItem(
+                key="access.enforcement_reconciliation",
+                label="Access enforcement reconciliation",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="Reconciliation may restrict or restore access and remains protected by the access lifecycle owner.",
+            ),
+            AutomationCatalogItem(
+                key="access.consistency_audits",
+                label="Access consistency audits",
+                group="Usage and access",
+                state=AutomationCatalogState.unavailable,
+                explanation="These audits remain in their existing schedule; the Center does not yet provide approved schedule rules.",
+            ),
+        ),
+    ),
 )

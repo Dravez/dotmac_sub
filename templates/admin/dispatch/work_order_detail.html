@@ -9,6 +9,9 @@
 {% call detail_header(title=work_order.title, subtitle=work_order.public_id, back_href='/admin/dispatch/work-orders', status=status_presentation_badge(work_order_status_presentation(work_order.status), size='sm'), color='cyan', color2='emerald') %}{% endcall %}
 {% if notice %}<div class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">{{ notice }}</div>{% endif %}
 {% if error %}<div class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-800">{{ error }}</div>{% endif %}
+{% if custom_field_values %}
+{% include "admin/customers/_custom_fields.html" %}
+{% endif %}
 <div class="grid gap-6 xl:grid-cols-12"><div class="space-y-6 xl:col-span-8">
 {% call card('Work order details', color='cyan') %}
 <dl class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -35,7 +38,7 @@
 {% if not origin_ticket and not project and not project_task and not outage_incident %}<p class="text-sm text-slate-500">This work order was created directly from dispatch.</p>{% endif %}
 </div>{% endcall %}
 {% if can(request, 'operations:dispatch:write') %}{% call card('Edit planning details', color='slate') %}
-<form method="post" action="/admin/dispatch/work-orders/{{ work_order.public_id }}" class="grid gap-4 sm:grid-cols-2">{% include "components/forms/csrf_input.html" %}
+<form method="post" action="/admin/dispatch/work-orders/{{ work_order.public_id }}" class="grid gap-4 sm:grid-cols-2" data-automation-target="operations.work_order" data-automation-record-id="{{ work_order.id }}">{% include "components/forms/csrf_input.html" %}
 <label class="sm:col-span-2 text-sm font-semibold">Title <span class="text-rose-600" aria-hidden="true">*</span><input name="title" value="{{ work_order.title }}" required maxlength="200" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 dark:bg-slate-900"></label>
 <label class="text-sm font-semibold">Priority<select name="priority" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 dark:bg-slate-900">{% for option in priorities %}<option value="{{ option }}" {% if work_order.priority == option %}selected{% endif %}>{{ option|title }}</option>{% endfor %}</select></label>
 <label class="text-sm font-semibold">Site<input name="address" value="{{ work_order.address or '' }}" maxlength="255" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 dark:bg-slate-900"></label>

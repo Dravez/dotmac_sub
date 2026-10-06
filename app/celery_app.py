@@ -73,6 +73,9 @@ celery_app.conf.task_routes = {
         "queue": "notifications_immediate"
     },
     "app.tasks.notifications.deliver_notification_queue": {"queue": "notifications"},
+    "app.tasks.zeptomail_delivery.reconcile_submitted_email": {
+        "queue": "notifications"
+    },
     "app.tasks.tr069.sync_all_acs_devices": {"queue": "acs"},
     "app.tasks.tr069.reconcile_command_outcomes": {"queue": "acs"},
     "app.tasks.tr069.execute_network_operation_job": {"queue": "acs"},
@@ -141,13 +144,9 @@ celery_app.conf.task_routes = {
     "app.tasks.usage.lift_expired_fup_enforcement": {"queue": "ingestion"},
     # Operator-triggered identity checks should not wait behind bulk jobs.
     "app.tasks.nin_tasks.verify_nin_task": {"queue": "nin"},
-    # CRM ticket pull paginates an external API; the default queue's backlog
-    # would push it far past its 5-minute schedule.
-    "app.tasks.crm_ticket_pull.pull_crm_tickets": {"queue": "crm"},
-    "app.tasks.crm_ticket_pull.sync_crm_ticket": {"queue": "crm"},
-    # ERP outbox delivery paces against an external API (erp.dotmac.io) like the
-    # CRM push tasks; share the externally-paced integration queue so a slow ERP
-    # never blocks the default queue.
+    # ERP outbox delivery paces against an external API (erp.dotmac.io); keep it
+    # on the externally-paced integration queue so a slow ERP never blocks the
+    # default queue.
     "app.tasks.dotmac_erp_outbox.deliver_erp_sync_events": {"queue": "crm"},
     "app.tasks.dotmac_erp_outbox.refresh_expense_claim_statuses": {"queue": "crm"},
     "app.tasks.dotmac_erp_outbox.refresh_material_request_statuses": {"queue": "crm"},
@@ -157,6 +156,8 @@ celery_app.conf.task_routes = {
     "app.tasks.dotmac_erp_outbox.refresh_purchase_invoice_statuses": {"queue": "crm"},
     "app.tasks.dotmac_erp_outbox.sync_erp_operational_domains": {"queue": "crm"},
     "app.tasks.dotmac_erp_outbox.reconcile_erp_staff_access": {"queue": "crm"},
+    "app.tasks.integration_delivery.deliver_meta_capi_lead": {"queue": "crm"},
+    "app.tasks.integration_delivery.redrive_meta_capi_leads": {"queue": "crm"},
     # Daily business runners must not sit behind the default queue's backlog —
     # a buried invoice cycle is a missed billing day (the 2026-06-10 00:55
     # dispatch sat unexecuted behind ~6.6k queued default-queue tasks).
@@ -193,7 +194,7 @@ celery_app.conf.task_queues = (
     Queue("bandwidth"),  # High-volume bandwidth processing
     Queue("monitoring"),  # Reserved device reachability/status processing
     Queue("ingestion"),  # High-volume data ingestion (usage, topology)
-    Queue("crm"),  # CRM ticket/comment pull (external API paced)
+    Queue("crm"),  # ERP outbox delivery (external API paced)
     Queue("billing"),  # Daily business runners (billing/dunning/expiry/FUP)
 )
 

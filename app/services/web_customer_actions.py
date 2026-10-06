@@ -39,18 +39,19 @@ from app.models.subscriber import (
     SubscriberChannel,
     SubscriberStatus,
 )
-from app.schemas.notification import NotificationCreate
 from app.schemas.subscriber import (
     AddressCreate,
     AddressUpdate,
     SubscriberCreate,
-    SubscriberNotificationPreferencesUpdate,
     SubscriberUpdate,
 )
-from app.services import account_status_commands, customer_portal
+from app.services import (
+    account_status_commands,
+    communication_intents,
+    customer_portal,
+)
 from app.services import billing_day as billing_day_service
 from app.services import catalog as catalog_service
-from app.services import notification as notification_service
 from app.services import radius as radius_service
 from app.services import subscriber as subscriber_service
 from app.services import web_customer_lists as web_customer_lists_service
@@ -82,9 +83,9 @@ from app.services.customer_notification_policy import (
     CustomerNotificationPolicyCohortQuery,
     evaluate_bulk_customer_notification_policy,
     quiet_hours_send_at,
-    resolve_notification_category,
 )
 from app.services.db_session_adapter import db_session_adapter
+from app.services.domain_errors import DomainError
 from app.services.integrations import whatsapp_capability
 from app.services.notification_template_conditions import (
     NotificationTemplateConditionError,
@@ -101,6 +102,49 @@ from app.services.whatsapp_notification_templates import (
     provider_template_from_template,
     sync_whatsapp_registry_templates,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateCustomerProfileCommand:
+    """Closed customer-portal profile update boundary."""
+
+    subscriber_id: UUID
+    first_name: str
+    last_name: str
+    email: str
+    billing_notifications: bool
+    sms_updates: bool
+    display_name: str | None = None
+    phone: str | None = None
+    nin: str | None = None
+    date_of_birth: str | None = None
+    gender: str | None = None
+    preferred_contact_method: str | None = None
+    address_line1: str | None = None
+    address_line2: str | None = None
+    city: str | None = None
+    region: str | None = None
+    lga: str | None = None
+    postal_code: str | None = None
+    country_code: str | None = None
+    push_notifications: bool = True
+    service_notifications: bool = True
+    account_notifications: bool = True
+    usage_notifications: bool = True
+    general_notifications: bool = True
+    locale: str | None = None
+    enforce_biodata: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerProfileUpdateOutcome:
+    subscriber_record: Subscriber
+    email_changed: bool
+
+    @property
+    def subscriber(self) -> Subscriber:
+        return self.subscriber_record
+
 
 CUSTOMER_INVOICE_PAYMENT_METHOD_PAYSTACK = "paystack"
 CUSTOMER_INVOICE_PAYMENT_METHOD_TRANSFER = "transfer"
@@ -1382,6 +1426,88 @@ _BULK_MESSAGE_PREVIEW_SAMPLE_LIMIT = 10
 _BULK_MESSAGE_RENDER_SAMPLE_LIMIT = 3
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedBulkMessageDispatch:
+    """Validated, drift-bound request ready for the task transport."""
+
+    payload_json: str
+    matched_count: int
+    created_count: int
+    queued_count: int
+    suppressed_count: int
+    skipped_count: int
+    suppressed: tuple[dict[str, str], ...]
+    skipped: tuple[dict[str, str], ...]
+
+    def accepted_response(self) -> dict[str, object]:
+        return {
+            "success": True,
+            "accepted": True,
+            "materialization_status": "queued",
+            "matched_count": self.matched_count,
+            "planned_count": self.created_count,
+            "planned_queued_count": self.queued_count,
+            "planned_suppressed_count": self.suppressed_count,
+            "skipped_count": self.skipped_count,
+            "suppressed": list(self.suppressed),
+            "skipped": list(self.skipped),
+        }
+
+
+def prepare_bulk_message_dispatch_from_payload(
+    db: Session,
+    payload: dict[str, Any],
+) -> PreparedBulkMessageDispatch:
+    """Validate a confirmed send without materializing deliveries in HTTP.
+
+    The worker re-runs the same authoritative resolution immediately before
+    writing. This first pass keeps confirmation and impact drift visible to
+    the operator while ensuring the reverse proxy never waits for thousands of
+    intent/notification inserts.
+    """
+
+    resolved = resolve_bulk_customer_scope(db, payload)
+    if not resolved.customers:
+        raise HTTPException(status_code=400, detail="No customers matched this scope")
+    _require_bulk_execution_confirmation(
+        payload,
+        resolved=resolved,
+        action_label="Bulk message",
+    )
+
+    preview_payload = dict(payload)
+    preview_payload["preview_only"] = True
+    preview = queue_bulk_message_from_payload(db, preview_payload)
+    expected_impact_token = str(payload.get("expected_impact_token") or "")
+    current_impact_token = str(preview.get("impact_token") or "")
+    if not expected_impact_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview the bulk message impact before confirming",
+        )
+    if not hmac.compare_digest(expected_impact_token, current_impact_token):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The recipients, template, or suppression impact changed after "
+                "preview. Review the updated impact before confirming again."
+            ),
+        )
+
+    task_payload = dict(payload)
+    task_payload.pop("preview_only", None)
+    return PreparedBulkMessageDispatch(
+        payload_json=json.dumps(task_payload, sort_keys=True, separators=(",", ":")),
+        matched_count=int(str(preview["matched_count"])),
+        created_count=int(str(preview["created_count"])),
+        queued_count=int(str(preview["queued_count"])),
+        suppressed_count=int(str(preview["suppressed_count"])),
+        skipped_count=int(str(preview["skipped_count"])),
+        suppressed=tuple(cast(list[dict[str, str]], preview["suppressed"])),
+        skipped=tuple(cast(list[dict[str, str]], preview["skipped"])),
+    )
+
+
 def _mask_notification_recipient(
     recipient: str,
     channel: NotificationChannel,
@@ -1469,6 +1595,7 @@ def _bulk_message_impact_token(
         "template": {
             "id": str(template.id),
             "updated_at": str(template.updated_at or ""),
+            "purpose": template.purpose.value,
             "subject": template.subject or "",
             "body": template.body or "",
             "conditions": template.conditions or {},
@@ -1599,7 +1726,7 @@ def queue_bulk_message_from_payload(
     queued_count = 0
     suppressed_count = 0
     skipped_count = len(resolved.missing_ids)
-    category = resolve_notification_category("service_bulk_message")
+    category = template.purpose.value
     quiet_send_at = quiet_hours_send_at(db)
     addressed_customers: list[tuple[Subscriber, str]] = []
     for subscriber in customers:
@@ -1804,26 +1931,35 @@ def queue_bulk_message_from_payload(
             payload_variables=payload_variables,
             required_variables=required_variables,
         )
-        notification = notification_service.notifications.queue_customer_notification(
+        intent_result = communication_intents.submit(
             db,
-            NotificationCreate(
-                template_id=template.id,
+            communication_intents.CommunicationIntent(
                 subscriber_id=subscriber.id,
-                channel=channel,
                 event_type="service_bulk_message",
                 category=category,
-                recipient=recipient,
+                template_id=template.id,
                 subject=subject if channel == NotificationChannel.email else None,
                 body=body,
-                status=(
+                channels=(channel,),
+                include_reseller=False,
+                recipients={channel: recipient},
+                requested_status=(
                     NotificationStatus.queued
                     if allowed
                     else NotificationStatus.canceled
                 ),
+                requested_last_error=condition_error or reason,
                 send_at=quiet_send_at if allowed else None,
-                last_error=condition_error or reason,
+                dedupe_key=f"admin-customer-bulk:{impact_token}:{subscriber.id}",
+                metadata={
+                    "source": "admin_customers_bulk_send",
+                    "bulk_impact_token": impact_token,
+                },
             ),
         )
+        notification = next(iter(intent_result.deliveries), None)
+        if notification is None:
+            raise RuntimeError("bulk communication intent produced no delivery")
         if notification.id:
             notification_ids.append(str(notification.id))
         if notification.status == NotificationStatus.queued:
@@ -3351,130 +3487,61 @@ def delete_customer_contact(db: Session, *, contact_id: str) -> None:
 def update_customer_profile(
     db: Session,
     *,
-    subscriber_id: str,
-    first_name: str,
-    last_name: str,
-    email: str,
-    display_name: str | None = None,
-    phone: str | None = None,
-    nin: str | None = None,
-    date_of_birth: str | None = None,
-    gender: str | None = None,
-    preferred_contact_method: str | None = None,
-    address_line1: str | None = None,
-    address_line2: str | None = None,
-    city: str | None = None,
-    region: str | None = None,
-    postal_code: str | None = None,
-    country_code: str | None = None,
-    billing_notifications: bool,
-    sms_updates: bool,
-    push_notifications: bool = True,
-    service_notifications: bool = True,
-    account_notifications: bool = True,
-    usage_notifications: bool = True,
-    general_notifications: bool = True,
-    locale: str | None = None,
-    enforce_biodata: bool = False,
-) -> Subscriber | None:
-    """Update a customer's profile fields."""
-    subscriber = db.get(Subscriber, subscriber_id)
-    if not subscriber:
-        return None
-    new_email = email.strip()
-    # A changed email address must be re-verified: reset the flag and dispatch a
-    # fresh verification link so the verified state can never lag the address.
-    email_changed = new_email.lower() != (subscriber.email or "").strip().lower()
+    command: UpdateCustomerProfileCommand,
+) -> CustomerProfileUpdateOutcome | None:
+    """Compatibility adapter for the customer portal profile command owner."""
+    from app.services import customer_portal_profile_commands as owner
 
-    display = (display_name or "").strip()
-    nin_locked = bool((subscriber.metadata_ or {}).get("nin_verified"))
-    validated_nin = validated_dob = validated_gender = None
-    if enforce_biodata:
-        validated_nin, validated_dob, validated_gender = _validate_individual_biodata(
-            subscriber,
-            nin=nin,
-            date_of_birth=date_of_birth,
-            gender=gender,
-            nin_locked=nin_locked,
+    db_session_adapter.release_read_transaction(db)
+    try:
+        outcome = owner.update_customer_profile(
+            db,
+            command=owner.UpdateCustomerProfileCommand(
+                context=CommandContext.system(
+                    actor="customer_portal_legacy_adapter",
+                    scope=owner.PORTAL_PROFILE_WRITE_SCOPE,
+                    reason="legacy customer profile service adapter",
+                ),
+                subscriber_id=UUID(str(command.subscriber_id)),
+                first_name=command.first_name,
+                last_name=command.last_name,
+                display_name=command.display_name,
+                email=command.email,
+                phone=command.phone,
+                nin=command.nin,
+                date_of_birth=command.date_of_birth,
+                gender=command.gender,
+                preferred_contact_method=command.preferred_contact_method,
+                address_line1=command.address_line1,
+                address_line2=command.address_line2,
+                city=command.city,
+                region=command.region,
+                lga=command.lga,
+                postal_code=command.postal_code,
+                country_code=command.country_code,
+                billing_notifications=command.billing_notifications,
+                sms_updates=command.sms_updates,
+                push_notifications=command.push_notifications,
+                service_notifications=command.service_notifications,
+                account_notifications=command.account_notifications,
+                usage_notifications=command.usage_notifications,
+                general_notifications=command.general_notifications,
+                locale=command.locale,
+                enforce_biodata=command.enforce_biodata,
+            ),
         )
-    update_fields: dict[str, Any] = {
-        "first_name": first_name.strip(),
-        "last_name": last_name.strip(),
-        "display_name": display or None,
-        "email": new_email,
-        "phone": phone.strip() if phone else None,
-        "locale": (locale or "").strip() or None,
-        "notification_preferences": SubscriberNotificationPreferencesUpdate(
-            billing_notifications=billing_notifications,
-            sms_updates=sms_updates,
-            push_notifications=push_notifications,
-            service_notifications=service_notifications,
-            account_notifications=account_notifications,
-            usage_notifications=usage_notifications,
-            general_notifications=general_notifications,
-        ),
-    }
-    if enforce_biodata and subscriber.category == SubscriberCategory.residential:
-        if not nin_locked:
-            update_fields["nin"] = validated_nin
-        update_fields["date_of_birth"] = validated_dob
-        update_fields["gender"] = validated_gender
-    else:
-        if not nin_locked:
-            update_fields["nin"] = (nin or "").strip() or None
-        dob = (date_of_birth or "").strip()
-        if not dob:
-            update_fields["date_of_birth"] = None
-        else:
-            try:
-                update_fields["date_of_birth"] = date.fromisoformat(dob)
-            except ValueError:
-                pass
-        gender_value = (gender or "").strip()
-        if gender_value:
-            update_fields["gender"] = gender_value
+    except DomainError as exc:
+        if exc.code.endswith("subscriber_not_found"):
+            return None
+        raise ValueError(exc.message) from exc
 
-    contact_value = (preferred_contact_method or "").strip()
-    update_fields["preferred_contact_method"] = contact_value or None
-
-    # Contact address: each blank field clears it; country is stored uppercase.
-    update_fields["address_line1"] = (address_line1 or "").strip() or None
-    update_fields["address_line2"] = (address_line2 or "").strip() or None
-    update_fields["city"] = (city or "").strip() or None
-    update_fields["region"] = (region or "").strip() or None
-    update_fields["postal_code"] = (postal_code or "").strip() or None
-    update_fields["country_code"] = (country_code or "").strip().upper() or None
-
-    # Set in the constructor so exclude_unset keeps it (post-init assignment
-    # would be dropped by model_dump(exclude_unset=True)).
-    if email_changed:
-        update_fields["email_verified"] = False
-    updated = subscriber_service.subscribers.update(
-        db=db,
-        subscriber_id=subscriber_id,
-        payload=SubscriberUpdate(**update_fields),
+    subscriber = db.get(Subscriber, outcome.subscriber_id)
+    if subscriber is None:
+        return None
+    return CustomerProfileUpdateOutcome(
+        subscriber_record=subscriber,
+        email_changed=outcome.email_changed,
     )
-
-    if email_changed and updated is not None and new_email:
-        try:
-            from app.services import auth_flow
-
-            auth_flow.send_email_verification(db, str(subscriber_id))
-        except Exception:
-            logger.warning(
-                "verification email after profile email change failed for %s",
-                subscriber_id,
-                exc_info=True,
-            )
-
-    # Back-fill service-location coordinates from the typed address (best-effort;
-    # skips when a pin already exists so it never overwrites an approved pin).
-    if updated is not None:
-        from app.services import customer_location_requests as location_service
-
-        location_service.geocode_service_address(db, updated)
-        db.commit()
-    return updated
 
 
 def approve_subscriber_name_correction(

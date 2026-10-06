@@ -1,0 +1,48 @@
+{% extends "layouts/admin.html" %}
+{% from "components/ui/macros.html" import page_header %}
+
+{% block title %}{{ detail.name }} - Automation Center{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-5xl space-y-7">
+    {% call page_header(title=detail.name, subtitle="Inspect the active version and any unpublished correction draft.", color="indigo") %}
+        <div class="flex flex-wrap gap-2">
+            <a href="{% if detail.kind.value == 'client_script' %}/admin/automation/client-scripts/manage{% else %}/admin/automation/server-scripts{% endif %}" class="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200">Back to scripts</a>
+            {% if can_update_scripts %}<a href="/admin/automation/scripts/{{ detail.script_id }}/edit" class="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-800">Edit draft</a>{% endif %}
+        </div>
+    {% endcall %}
+    {% if page_error %}<div role="alert" class="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{{ page_error }}</div>{% endif %}
+    {% if page_notice %}<div role="status" class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">{{ page_notice }}</div>{% endif %}
+
+    <section class="grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:grid-cols-2 lg:grid-cols-4 dark:border-slate-800 dark:bg-slate-900" aria-label="Script metadata">
+        <div><dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</dt><dd class="mt-1 font-semibold capitalize text-slate-900 dark:text-white">{{ detail.status.value }}</dd></div>
+        <div><dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Key</dt><dd class="mt-1 break-all font-mono text-sm text-slate-900 dark:text-white">{{ detail.key }}</dd></div>
+        <div><dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target / event</dt><dd class="mt-1 text-sm text-slate-900 dark:text-white">{{ detail.target_type }} / {{ detail.event_name }}</dd></div>
+        <div><dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">Versions</dt><dd class="mt-1 text-sm text-slate-900 dark:text-white">{% if detail.active_version %}Active v{{ detail.active_version }}{% else %}No active version{% endif %}{% if detail.draft_version %}; draft v{{ detail.draft_version }}{% endif %}</dd></div>
+    </section>
+
+    {% if detail.description %}<p class="text-sm leading-6 text-slate-600 dark:text-slate-400">{{ detail.description }}</p>{% endif %}
+
+    {% if detail.draft_version %}
+    <section class="overflow-hidden rounded-2xl border border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20" aria-labelledby="draft-heading">
+        <div class="flex flex-col gap-3 border-b border-amber-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between dark:border-amber-900"><div><h2 id="draft-heading" class="font-semibold text-amber-950 dark:text-amber-100">Unpublished draft v{{ detail.draft_version }}</h2><p class="mt-1 text-sm text-amber-900 dark:text-amber-200">The active version is unchanged until this draft is published.</p></div>{% if can_publish_scripts %}<form method="post" action="/admin/automation/scripts/{{ detail.script_id }}/publish"><input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}"><input type="hidden" name="command_token" value="{{ command_token }}"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit" class="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-800">Publish draft</button></form>{% endif %}</div>
+        <pre class="overflow-x-auto p-5 text-sm leading-6 text-slate-900"><code>{{ detail.draft_source_code }}</code></pre>
+        <p class="border-t border-amber-200 px-5 py-3 text-xs text-amber-900 dark:border-amber-900 dark:text-amber-200">SHA-256: <code>{{ detail.draft_content_sha256 }}</code></p>
+    </section>
+    {% endif %}
+
+    {% if detail.active_version %}
+    <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900" aria-labelledby="active-heading">
+        <div class="border-b border-slate-200 px-5 py-4 dark:border-slate-800"><h2 id="active-heading" class="font-semibold text-slate-950 dark:text-white">Active version v{{ detail.active_version }}</h2><p class="mt-1 text-sm text-slate-600 dark:text-slate-400">This is the source currently delivered to the declared runtime.</p></div>
+        <pre class="overflow-x-auto bg-slate-950 p-5 text-sm leading-6 text-slate-100"><code>{{ detail.active_source_code }}</code></pre>
+        <p class="border-t border-slate-200 px-5 py-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">SHA-256: <code>{{ detail.active_content_sha256 }}</code></p>
+    </section>
+    {% endif %}
+
+    <section class="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-950/40">
+        <p class="mr-auto text-sm text-slate-600 dark:text-slate-400">Published source is immutable. Edit creates or replaces a draft; lifecycle actions affect future executions.</p>
+        {% if can_update_scripts and detail.status.value == "published" %}<form method="post" action="/admin/automation/scripts/{{ detail.script_id }}/status"><input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}"><input type="hidden" name="command_token" value="{{ command_token }}"><input type="hidden" name="status" value="paused"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit" class="rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-200 dark:hover:bg-amber-950/30">Pause</button></form>{% elif can_update_scripts and detail.status.value == "paused" %}<form method="post" action="/admin/automation/scripts/{{ detail.script_id }}/status"><input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}"><input type="hidden" name="command_token" value="{{ command_token }}"><input type="hidden" name="status" value="published"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit" class="rounded-lg border border-emerald-300 px-3 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:text-emerald-200 dark:hover:bg-emerald-950/30">Resume</button></form>{% endif %}
+        {% if can_update_scripts and detail.status.value != "retired" %}<form method="post" action="/admin/automation/scripts/{{ detail.script_id }}/status"><input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}"><input type="hidden" name="command_token" value="{{ command_token }}"><input type="hidden" name="status" value="retired"><input type="hidden" name="return_to" value="{{ return_to }}"><button type="submit" class="rounded-lg border border-red-300 px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50 dark:border-red-800 dark:text-red-200 dark:hover:bg-red-950/30">Retire</button></form>{% endif %}
+    </section>
+</div>
+{% endblock %}

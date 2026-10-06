@@ -37,6 +37,7 @@ _LIVE_SUBSCRIPTION_STATUSES = (
     SubscriptionStatus.pending,
     SubscriptionStatus.active,
     SubscriptionStatus.blocked,
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
     SubscriptionStatus.stopped,
 )
@@ -63,6 +64,7 @@ _PRICE_CRITICAL_FIELDS = frozenset(
         "offer_id",
         "offer_version_id",
         "price_type",
+        "tax_application",
         "unit",
     }
 )

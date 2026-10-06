@@ -88,11 +88,22 @@ scripts/one_off/prepaid_funding_audit_restore.sh export \
   --source funding-gap-survey-2026-07-26
 ```
 
+For a bounded, separately reviewed repair, add the exact newline-delimited
+account-ID file and acknowledgement to the export command:
+
+```bash
+scripts/one_off/prepaid_funding_audit_restore.sh export \
+  --snapshot-at 2026-07-26T00:00:00+00:00 \
+  --source finance-ticket-REVIEW-ID \
+  --reviewed-account-ids-file /out/reviewed-account-ids.txt \
+  --confirm-reviewed-scope MATERIALIZE_REVIEWED_PREPAID_SCOPE
+```
+
 The export runs as a repository module through `scripts/run_repo_module.sh`, so
 the selected image checkout is the import root. It succeeds only when the
-complete candidate cohort has exact source coverage. A carried account with no
+selected candidate scope has exact source coverage. A carried account with no
 retained source identity is represented as `missing_carried_source_identity` in
-the diagnostics and blocks the whole cohort. Other missing, duplicate,
+the diagnostics and blocks the selected scope. Other missing, duplicate,
 malformed, mismatched, or unreconciled history aborts the whole artifact. A
 complete empty transaction set is zero. The diagnostics file is written before
 a classified blocked exit:
@@ -139,9 +150,14 @@ restore from that dump, and rerun the complete export. The resolver rechecks
 the stored fingerprint; newly discovered Splynx evidence or changed provenance
 invalidates the decision and blocks export.
 
-There is no partial-subset option. Correct or rebuild the isolated source
-snapshot, rerun the complete export, and use `--signing-key-ref` pointing at the
-OpenBao Ed25519 private-key reference only when the cohort is complete.
+The default export is still full-cohort. A bounded reconciliation may be
+requested only with a reviewer-owned newline-delimited account-ID file and the
+explicit acknowledgement `MATERIALIZE_REVIEWED_PREPAID_SCOPE` on both export
+and materialization. The selected accounts must be a subset of the current
+prepaid candidate cohort; the signed manifest and materializer still enforce an
+exact match to that selected scope. This is appropriate for a separately
+approved repair ticket, and does not permit arbitrary accounts or an unsigned
+partial artifact.
 
 ### 3. Destroy
 
@@ -171,12 +187,21 @@ data), and the network. Exported artifacts are kept.
 
 ### Three things that surprise people
 
-**Manifests are cohort-complete, never partial.** The materializer passes
+**Manifests are exact-scope, full-cohort by default.** Without a reviewed scope
+file, the materializer passes
 `expected_account_ids = candidate_prepaid_funding_account_ids(db)` — the whole
 cohort — and preview blocks on any `missing_reconstruction_account` or
-`unexpected_reconstruction_account`. You cannot repair 80 accounts in
-isolation; every manifest materializes every candidate. A signed manifest with
-any blocker/excluded account is rejected.
+`unexpected_reconstruction_account`. With a confirmed reviewed scope file, the
+same exact-match checks apply to that selected candidate subset. A signed
+manifest with any blocker/excluded account is rejected.
+
+The only account-scoped exception is not a reconstruction manifest at all.
+`docs/runbooks/NATIVE_PREPAID_OPENING_REPAIR.md` covers a Sub-native account
+created after the legacy handoff that was accidentally omitted despite
+existing at the original cutover. That owner independently proves zero Splynx
+evidence and fingerprints canonical Sub facts at the sealed cutover. It cannot
+repair a migrated/Splynx-linked account, alter a batch, or supply a cohort
+hash, so the complete-cohort rule above remains unchanged.
 
 **A repair batch is not the cutover.** The authority cutover already exists, so
 a new batch gets `is_authority_cutover = False`, and its `position_at` must be

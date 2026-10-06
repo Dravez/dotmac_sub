@@ -22,6 +22,47 @@ class AutomationValueType(StrEnum):
     enum = "enum"
 
 
+class AutomationCatalogState(StrEnum):
+    available = "available"
+    unavailable = "unavailable"
+    managed_elsewhere = "managed_elsewhere"
+    retired = "retired"
+
+
+class AutomationMechanism(StrEnum):
+    """Authoring mechanisms exposed by the Automation Center."""
+
+    rule = "rule"
+    client_script = "client_script"
+    server_script = "server_script"
+
+
+class AutomationScriptLanguage(StrEnum):
+    """Languages admitted by the native script control plane."""
+
+    javascript = "javascript"
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationScriptTargetCapability:
+    """Closed target contract for client/server scripts.
+
+    This is deliberately separate from rule triggers/actions. A target may be
+    scriptable without being writable, and script execution must still go
+    through the target owner's typed API.
+    """
+
+    key: str
+    label: str
+    entity_type: str
+    client_events: tuple[str, ...] = ()
+    server_events: tuple[str, ...] = ()
+    read_permission: str = ""
+    write_permission: str | None = None
+    tenant_id_field: str = "tenant_id"
+    entity_id_field: str = "id"
+
+
 class AutomationOperator(StrEnum):
     equals = "equals"
     not_equals = "not_equals"
@@ -57,6 +98,15 @@ class AutomationTriggerCapability:
     entity_id_field: str
     fields: tuple[AutomationConditionField, ...]
     author_permission: str
+    #: A trigger may be admitted for draft authoring before its durable event
+    #: producer and identity contract are ready for runtime delivery.
+    runtime_enabled: bool = False
+    #: Older condition contracts that remain safe against this event payload.
+    compatible_event_schema_versions: tuple[int, ...] = ()
+    #: Whether the trigger can be evaluated by the shared scheduled-rule runner.
+    scheduled: bool = False
+    #: Stable key for the module-owned record provider used by scheduled runs.
+    schedule_adapter_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +130,21 @@ class AutomationActionCapability:
     author_permission: str
     runtime_scope: str
     idempotency: str
+    #: Declarative mutually-exclusive consequence family. Publication rejects
+    #: overlapping rules with the same trigger and conflict scope.
+    conflict_scope: str | None = None
+    #: Retired actions may remain executable only so immutable published rule
+    #: versions can complete against their historical action key. They are not
+    #: offered to rule builders or accepted in new/updated definitions.
+    authoring_enabled: bool = True
+    #: An action may be admitted for draft authoring before its runtime
+    #: event-to-command adapter is ready. Publication must reject it until this
+    #: flag is enabled in a later reviewed slice.
+    runtime_enabled: bool = False
+    #: Optional target types for shared actions. An empty tuple preserves the
+    #: original same-entity contract; ``("*",)`` admits the action for any
+    #: trigger target after the action validates its own recipient/target.
+    target_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +157,20 @@ class LegacyAutomationSurface:
 
 
 @dataclass(frozen=True, slots=True)
+class AutomationCatalogItem:
+    """One owner-declared business automation shown in the central catalogue."""
+
+    key: str
+    label: str
+    group: str
+    state: AutomationCatalogState
+    explanation: str
+    management_path: str | None = None
+    trigger_keys: tuple[str, ...] = ()
+    action_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AutomationDomainCapabilities:
     """Automation contract declared by one canonical SOT domain."""
 
@@ -99,6 +178,8 @@ class AutomationDomainCapabilities:
     triggers: tuple[AutomationTriggerCapability, ...] = ()
     actions: tuple[AutomationActionCapability, ...] = ()
     legacy_surfaces: tuple[LegacyAutomationSurface, ...] = ()
+    catalog_items: tuple[AutomationCatalogItem, ...] = ()
+    script_targets: tuple[AutomationScriptTargetCapability, ...] = ()
     manifest_version: int = 1
 
 
@@ -114,4 +195,6 @@ class AutomationModuleManifest:
     triggers: tuple[AutomationTriggerCapability, ...]
     actions: tuple[AutomationActionCapability, ...]
     legacy_surfaces: tuple[LegacyAutomationSurface, ...]
+    catalog_items: tuple[AutomationCatalogItem, ...]
+    script_targets: tuple[AutomationScriptTargetCapability, ...]
     manifest_version: int | None

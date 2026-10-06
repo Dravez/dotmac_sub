@@ -985,6 +985,52 @@ def test_create_topup_intent_initializes_flutterwave_checkout(
     assert captured_checkout["metadata"] == {"topup_intent_id": payload["intent_id"]}
 
 
+def test_create_topup_intent_initializes_paystack_hosted_checkout(
+    monkeypatch, db_session, subscriber
+):
+    _patch_topup_settings(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.customer_portal_flow_payments.payment_gateway_adapter.build_context",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            provider_type="paystack",
+            public_key="pk_test_topup",
+            reference="topup-intent-ref-hosted",
+        ),
+    )
+    captured_checkout = {}
+
+    def fake_initialize_transaction(_db, **kwargs):
+        captured_checkout.update(kwargs)
+        return {
+            "authorization_url": (
+                "https://checkout.paystack.test/topup-intent-ref-hosted"
+            )
+        }
+
+    monkeypatch.setattr(
+        "app.services.integrations.payment_capability.initialize_transaction",
+        fake_initialize_transaction,
+    )
+
+    payload = create_topup_intent(
+        db_session,
+        {"account_id": str(subscriber.id), "username": "customer@example.com"},
+        "5000.00",
+        provider="paystack",
+        redirect_url="https://selfcare.test/api/v1/me/topup/verify",
+        preview_fingerprint=_preview_fingerprint(db_session, subscriber, "5000.00"),
+    )
+
+    assert payload["checkout_url"] == (
+        "https://checkout.paystack.test/topup-intent-ref-hosted"
+    )
+    assert captured_checkout["amount_kobo"] == 500000
+    assert captured_checkout["redirect_url"] == (
+        "https://selfcare.test/api/v1/me/topup/verify"
+        "?reference=topup-intent-ref-hosted&provider=paystack"
+    )
+
+
 def test_create_topup_intent_rejects_gateway_when_customer_email_blank(
     monkeypatch, db_session, subscriber
 ):
@@ -1379,7 +1425,15 @@ def test_direct_transfer_portal_delegates_atomic_proof_intent_submission(
                 "account_name": "Dotmac Payments",
                 "account_number": "0123456789",
                 "sort_code": "",
-            }
+            },
+            {
+                "id": "bank-secondary",
+                "enabled": "true",
+                "bank_name": "Dotmac Backup Bank",
+                "account_name": "Dotmac Payments",
+                "account_number": "9876543210",
+                "sort_code": "",
+            },
         ],
     )
 
@@ -1394,6 +1448,7 @@ def test_direct_transfer_portal_delegates_atomic_proof_intent_submission(
             _invoice_customer(subscriber),
             made_payment=True,
             file=SimpleNamespace(filename="portal-atomic.png"),
+            selected_account_id="0123456789",
         )
     )
 
@@ -1402,6 +1457,7 @@ def test_direct_transfer_portal_delegates_atomic_proof_intent_submission(
     assert proof is not None
     assert proof.status is PaymentProofStatus.submitted
     assert persisted_intent is not None
+    assert persisted_intent.metadata_["selected_bank_account"]["id"] == "bank-primary"
     assert persisted_intent.status == TopupIntentStatus.submitted.value
     assert persisted_intent.metadata_["payment_proof_id"] == str(proof.id)
 

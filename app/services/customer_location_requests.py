@@ -604,6 +604,7 @@ def geocode_service_address(
         "address_line2": subscriber.address_line2,
         "city": subscriber.city,
         "region": subscriber.region,
+        "lga": subscriber.lga,
         "postal_code": subscriber.postal_code,
         "country_code": subscriber.country_code,
     }
@@ -621,6 +622,7 @@ def geocode_service_address(
                     address_line2=subscriber.address_line2,
                     city=subscriber.city,
                     region=subscriber.region,
+                    lga=subscriber.lga,
                     postal_code=subscriber.postal_code,
                     country_code=subscriber.country_code,
                 ),

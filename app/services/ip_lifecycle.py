@@ -44,6 +44,7 @@ _NON_TERMINAL = frozenset(
         SubscriptionStatus.active,
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.pending,
         SubscriptionStatus.hidden,

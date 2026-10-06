@@ -125,14 +125,220 @@ SERVICES: tuple[SOTService, ...] = (
         name="network.fiber_source_staging",
         module="app.services.network.fiber_topology_staging",
         owns=(
-            "immutable fiber source manifests",
-            "normalized staged fiber source facts",
+            "immutable fiber source and mixed network-map manifests",
+            "normalized staged fiber plant source facts",
             "non-authoritative duplicate and canonical-match suggestions",
         ),
         depends_on=("gis.spatial_sync", "network.crm_map_source"),
         notes=(
-            "Staged map rows are observations with provenance. Match "
-            "suggestions never mutate or retire canonical assets."
+            "Staged map rows are observations with provenance. The mixed KML/KMZ "
+            "profile accepts supported fiber plant feature types in one batch, "
+            "with per-type identity and geometry validation. Match suggestions "
+            "never mutate or retire canonical assets."
+        ),
+    ),
+    SOTService(
+        name="network.map_kmz_transfer",
+        module="app.services.network_map_transfer",
+        owns=(
+            "administrative KML/KMZ source admission and staging coordination",
+            "administrative staged map feature classification review",
+            "permission-scoped Network Map KMZ export",
+        ),
+        depends_on=(
+            "auth.permission_gate",
+            "network.fiber_source_staging",
+            "ui.network_map_projection",
+            "observability.audit_log",
+        ),
+        notes=(
+            "Browser uploads become immutable non-authoritative staging evidence, "
+            "including heterogeneous supported fiber plant features. They never "
+            "write canonical plant or infer connectivity. Classification reviews "
+            "are append-only annotations and never alter the staged observations. "
+            "Eligible new point assets may be submitted to the separate asset "
+            "proposal owner, with per-feature eligibility projected by this service; "
+            "route connectivity remains a separate reviewed workflow. "
+            "Unclassified and "
+            "unsupported placemarks retain reviewable names and geometry while "
+            "private identifiers are excluded. Safe-looking HTTPS icon references "
+            "are metadata only: no DNS lookup or remote fetch occurs; document "
+            "NetworkLinks are never fetched, and local placemarks are retained "
+            "with a warning when one is present. Link-only documents are refused. "
+            "KMZ export "
+            "serializes an allowlisted, permission-scoped map projection and does "
+            "not expose management addresses, credentials, notes, or raw telemetry."
+        ),
+        contract=ServiceContract(
+            concerns=(
+                ConcernContract(
+                    name=(
+                        "administrative KML/KMZ source admission and staging coordination"
+                    ),
+                    role=OwnerRole.APPLICATION_COORDINATOR,
+                    input_names=(
+                        "authenticated KML/KMZ import intent",
+                        "normalized fiber source staging protocol",
+                    ),
+                ),
+                ConcernContract(
+                    name="administrative staged map feature classification review",
+                    role=OwnerRole.APPLICATION_COORDINATOR,
+                    input_names=(
+                        "authenticated feature classification review intent",
+                        "immutable staged map feature observations",
+                    ),
+                ),
+                ConcernContract(
+                    name="permission-scoped Network Map KMZ export",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "authorized Network Map export scope",
+                        "authoritative Network Map projection",
+                    ),
+                ),
+            ),
+            authoritative_inputs=(
+                AuthorityInput(
+                    name="authenticated KML/KMZ import intent",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "network:fiber:import permission, exact actor, reason, "
+                        "profile, uploaded bytes, and idempotency key"
+                    ),
+                ),
+                AuthorityInput(
+                    name="normalized fiber source staging protocol",
+                    owner="network.fiber_source_staging",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "checksum-bound FiberTopologySourceBatch and normalized "
+                        "FiberTopologyStagedFeature observations"
+                    ),
+                ),
+                AuthorityInput(
+                    name="authenticated feature classification review intent",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "network:fiber:import permission, actor, bounded reason, "
+                        "batch ID, feature IDs, supported asset types, and command key"
+                    ),
+                ),
+                AuthorityInput(
+                    name="immutable staged map feature observations",
+                    owner="network.fiber_source_staging",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "staged batch manifest and normalized feature rows; review "
+                        "decisions are appended separately and projected at read time"
+                    ),
+                ),
+                AuthorityInput(
+                    name="authorized Network Map export scope",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "network:map:export plus customer:read when the customer "
+                        "layer is requested, with typed layers and viewport bounds"
+                    ),
+                ),
+                AuthorityInput(
+                    name="authoritative Network Map projection",
+                    owner="ui.network_map_projection",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "typed canonical map feature projection rebuilt for each "
+                        "download request"
+                    ),
+                ),
+            ),
+            transaction=TransactionContract(
+                mode=TransactionMode.COORDINATOR_MANAGED,
+                boundary=(
+                    "Each stage or classification-review command enters "
+                    "execute_owner_command once on a transaction-free session. "
+                    "Staging evidence or append-only review rows, audit, and outbox "
+                    "event commit atomically. Export uses a read-only request session."
+                ),
+                locking=(
+                    "Import uniqueness is arbitrated by manifest and command-key "
+                    "constraints. Classification review locks the batch and staged "
+                    "features in stable order; revision and command-key constraints "
+                    "protect the append-only review history. Canonical plant rows "
+                    "are never locked or mutated by these commands."
+                ),
+                idempotency=(
+                    "Import keys bind actor, filename, digest, profile, and reason. "
+                    "Classification keys bind actor, batch, feature/type edits, and "
+                    "reason. Exact requests replay existing evidence."
+                ),
+                retries=(
+                    "Malformed archives and changed command fingerprints fail closed. "
+                    "A transaction or uniqueness failure rolls back all staging evidence."
+                ),
+            ),
+            errors=ErrorContract(
+                domain_codes=(
+                    *owner_command_boundary_error_codes("network.map_kmz_transfer"),
+                    "network.map_kmz_transfer.idempotency_key_required",
+                    "network.map_kmz_transfer.idempotency_conflict",
+                    "network.map_kmz_transfer.invalid_scope",
+                    "network.map_kmz_transfer.invalid_actor",
+                    "network.map_kmz_transfer.reason_required",
+                    "network.map_kmz_transfer.empty_file",
+                    "network.map_kmz_transfer.file_too_large",
+                    "network.map_kmz_transfer.invalid_file_type",
+                    "network.map_kmz_transfer.invalid_archive",
+                    "network.map_kmz_transfer.staging_failed",
+                    "network.map_kmz_transfer.review_idempotency_conflict",
+                    "network.map_kmz_transfer.review_size_invalid",
+                    "network.map_kmz_transfer.review_duplicate_feature",
+                    "network.map_kmz_transfer.review_asset_type_invalid",
+                    "network.map_kmz_transfer.batch_not_found",
+                    "network.map_kmz_transfer.review_feature_not_found",
+                    "network.map_kmz_transfer.empty_export",
+                ),
+                mapping_owner="app.web.admin.network",
+                fail_closed_on=(
+                    "network.map_kmz_transfer.invalid_scope",
+                    "network.map_kmz_transfer.invalid_actor",
+                    "network.map_kmz_transfer.idempotency_conflict",
+                    "network.map_kmz_transfer.invalid_archive",
+                ),
+            ),
+            events=EventContract(
+                event_types=(
+                    "network_map.kmz_import_staged",
+                    "network_map.kmz_classification_reviewed",
+                ),
+                schema_version=1,
+                delivery_owner="events.dispatcher",
+                compatibility=(
+                    "The event carries batch identity, closed profile/status values, "
+                    "digests, and bounded counts; raw KML and source properties stay "
+                    "inside the staging owner."
+                ),
+                replay=(
+                    "Consumers treat batch_id plus manifest_sha256 as immutable "
+                    "evidence and classification events as append-only review signals. "
+                    "Replaying either signal never creates canonical assets."
+                ),
+            ),
+            migration=MigrationContract(
+                state=AuthorityMigrationState.NATIVE,
+                new_owner="network.map_kmz_transfer",
+            ),
+            steward="network operations",
+            design_refs=(
+                "docs/designs/NETWORK_MAP_KMZ_IMPORT_EXPORT.md",
+                "docs/designs/FIBER_TOPOLOGY_SOT.md",
+            ),
+            test_refs=(
+                "tests/architecture/test_fiber_kmz_import_boundary.py",
+                "tests/architecture/test_network_map_projection_boundary.py",
+            ),
         ),
     ),
     SOTService(

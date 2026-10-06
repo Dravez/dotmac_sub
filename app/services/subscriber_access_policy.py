@@ -15,6 +15,7 @@ from app.models.subscriber import SubscriberStatus
 RADIUS_BLOCKING_SUBSCRIBER_STATUSES = frozenset(
     {
         SubscriberStatus.blocked,
+        SubscriberStatus.paused,
         SubscriberStatus.suspended,
         SubscriberStatus.disabled,
         SubscriberStatus.canceled,

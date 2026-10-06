@@ -916,6 +916,18 @@ _LGA_LOOKUP_BY_STATE: dict[str, dict[str, str]] = {
     for state, lgas in _NCC_STATE_LGAS.items()
 }
 
+# Captured names used by customers and map providers for the FCT's canonical
+# "Municipal Area Council" value. Aliases remain state-scoped so they cannot
+# be accepted as an LGA of any other state.
+_LGA_LOOKUP_BY_STATE["FEDERAL CAPITAL TERRITORY"].update(
+    {
+        _normalize_location_key("Abuja Municipal Area Council"): (
+            "Municipal Area Council"
+        ),
+        _normalize_location_key("AMAC"): "Municipal Area Council",
+    }
+)
+
 
 # ── Towns ───────────────────────────────────────────────────────────────────
 _NCC_ACCEPTED_TOWNS = (
@@ -1445,6 +1457,11 @@ def canonical_state(value: object) -> str:
     cleaned = _clean_basic_text(value)
     if not cleaned:
         return ""
+    if _normalize_location_key(cleaned) in {
+        "federal capital territory fct abuja",
+        "abuja federal capital territory",
+    }:
+        return "FEDERAL CAPITAL TERRITORY"
     upper = cleaned.upper()
     if upper in _NCC_STATE_LGAS:
         return upper

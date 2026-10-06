@@ -9,12 +9,14 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.subscriber import ContactMethod, Gender, Subscriber
 from app.models.system_user import SystemUser
 from app.schemas.auth_flow import AvatarUploadResponse, MeResponse, MeUpdateRequest
 from app.services import avatar as avatar_service
 from app.services import staff_provisioning
 from app.services.domain_errors import DomainError
+from app.services.file_storage import file_uploads
 from app.services.owner_commands import CommandContext
 
 logger = logging.getLogger(__name__)
@@ -221,31 +223,65 @@ def update_me(
 async def upload_avatar(
     db: Session,
     subscriber_id: UUID,
+    actor_id: UUID,
     file: UploadFile,
 ) -> AvatarUploadResponse:
     """Upload and replace the current user's avatar."""
-    person = _get_subscriber_or_404(db, subscriber_id)
-
-    # Delete old avatar if exists
-    avatar_service.delete_avatar(person.avatar_url)
-
-    # Save new avatar
-    avatar_url = await avatar_service.save_avatar(file, str(person.id))
-
-    # Update person record
-    person.avatar_url = avatar_url
-    db.flush()
-
-    return AvatarUploadResponse(avatar_url=avatar_url)
+    if actor_id != subscriber_id:
+        raise HTTPException(status_code=403, detail="Subscriber session required")
+    limit = min(
+        settings.avatar_max_size_bytes,
+        file_uploads.get_domain_config("avatars").max_size_bytes,
+    )
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(status_code=400, detail="Avatar file exceeds size limit")
+    try:
+        outcome = avatar_service.upload_avatar(
+            db,
+            avatar_service.UploadAvatarCommand(
+                context=_avatar_context(actor_id, "subscriber avatar upload"),
+                subscriber_id=subscriber_id,
+                filename=file.filename or "avatar",
+                content_type=file.content_type,
+                data=data,
+                uploaded_by=actor_id,
+            ),
+        )
+    except avatar_service.AvatarError as exc:
+        status_code = 404 if exc.code.endswith("subscriber_missing") else 400
+        raise HTTPException(status_code=status_code, detail=exc.message) from exc
+    if outcome.avatar_url is None:
+        raise RuntimeError("Avatar owner returned no selected URL")
+    return AvatarUploadResponse(avatar_url=outcome.avatar_url)
 
 
 def delete_avatar(
     db: Session,
     subscriber_id: UUID,
+    actor_id: UUID,
 ) -> None:
     """Delete the current user's avatar."""
-    person = _get_subscriber_or_404(db, subscriber_id)
+    if actor_id != subscriber_id:
+        raise HTTPException(status_code=403, detail="Subscriber session required")
+    try:
+        avatar_service.remove_avatar(
+            db,
+            avatar_service.RemoveAvatarCommand(
+                context=_avatar_context(actor_id, "subscriber avatar removal"),
+                subscriber_id=subscriber_id,
+            ),
+        )
+    except avatar_service.AvatarError as exc:
+        raise HTTPException(status_code=404, detail=exc.message) from exc
 
-    avatar_service.delete_avatar(person.avatar_url)
-    person.avatar_url = None
-    db.flush()
+
+def _avatar_context(actor_id: UUID, reason: str) -> CommandContext:
+    command_id = uuid4()
+    return CommandContext(
+        command_id=command_id,
+        correlation_id=command_id,
+        actor=f"subscriber:{actor_id}",
+        scope=f"subscriber:{actor_id}",
+        reason=reason,
+    )

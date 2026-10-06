@@ -339,14 +339,17 @@ SERVICES: tuple[SOTService, ...] = (
         owns=(
             "eligible invoice selection for evidenced account credit",
             "deterministic payment-credit source selection",
+            "approved-opening exclusion of already absorbed payment sources",
             "oldest-payable-debt application orchestration",
             "exact invoice payment-backed funding preview",
+            "pre-issuance payment-credit reservation and atomic application",
             "all-or-nothing exact invoice credit application",
             "invoice-void release of exact account-credit allocations",
             "account-credit application invariant monitoring",
             "bounded account-credit invariant summary",
             "unallocated account-credit creation",
             "offer of settled account credit to open receivables",
+            "automatic verified customer-payment application to eligible invoices",
         ),
         depends_on=("financial.payments", "financial.invoices", "financial.ledger"),
         notes=(
@@ -361,6 +364,17 @@ SERVICES: tuple[SOTService, ...] = (
             "separate commands because credit is spendable only once its "
             "settlement evidence exists; the settlement path calls "
             "offer_available_credit once it does."
+            " Verified customer settlement is always offered to eligible invoices; "
+            "customer and reviewer adapters cannot opt out. Explicitly reserved, "
+            "reviewed-correction, refund, reversal, and consolidated flows retain "
+            "their bounded consequence modes."
+            " Invoice issuance reserves eligible payment credit while the document "
+            "is still a draft, then consumes that exact reservation after the "
+            "receivable is issued in the same transaction. The new invoice's own "
+            "debit therefore cannot hide the funding that must settle it."
+            " A reviewed account opening bounds payment source selection even"
+            " when a generic caller omits an explicit funding boundary;"
+            " pre-opening payment room is historical evidence, not new credit."
         ),
     ),
 )

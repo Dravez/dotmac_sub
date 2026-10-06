@@ -5,7 +5,6 @@ access.radius_projection
 access.radius_reject
 access.radius_state
 access.radius_target_registry
-access.session_enforcement
 access.subscription_lifecycle
 ai.generation
 ai.insights
@@ -20,7 +19,6 @@ communications.customer_experience_intents
 communications.customer_read_state
 communications.eligibility
 communications.ephemeral_actions
-communications.intents
 communications.notification_service
 control.domain_settings
 control.feature_registry

@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum, StrEnum
+from types import TracebackType
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -70,6 +72,8 @@ from app.services.staff_provisioning import (
     StaffDisplayIdentityQuery,
     resolve_staff_display_identities,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ExpenseRequestAccessMode(StrEnum):
@@ -1054,13 +1058,25 @@ def submit_field_expense_request_command(
         try:
             result = _enqueue_submission_backoffice(db, request)
         except Exception as exc:
+            logger.exception(
+                "Field expense ERP delivery staging failed",
+                extra={
+                    "request_id": str(request.id),
+                    "expense_request_id": str(request.id),
+                    "command_id": str(command.context.command_id),
+                    "correlation_id": str(command.context.correlation_id),
+                    "work_order_public_id": row.public_id,
+                    "requester_system_user_id": str(system_user.id),
+                    "exception_type": type(exc).__name__,
+                },
+                exc_info=_redacted_exception_info(exc),
+            )
             raise FieldExpenseRequestError(
                 code="operations.expense_requests.erp_staging_failed",
                 message=(
                     "The expense was not submitted because its ERP delivery "
                     "could not be queued. Please retry."
                 ),
-                details={"error_type": type(exc).__name__},
             ) from exc
         if (
             result.status is not BackofficeEnqueueStatus.ENQUEUED
@@ -2789,6 +2805,18 @@ def _enqueue_submission_backoffice(
     result = enqueue_expense_submission(db, request)
     db.flush()
     return result
+
+
+def _redacted_exception_info(
+    exc: Exception,
+) -> tuple[type[BaseException], BaseException, TracebackType | None]:
+    """Retain traceback frames without serializing exception values or SQL params."""
+
+    return (
+        RuntimeError,
+        RuntimeError("ERP staging exception details redacted"),
+        exc.__traceback__,
+    )
 
 
 def _require_token_bound_request_identity(request: FieldExpenseRequest) -> None:

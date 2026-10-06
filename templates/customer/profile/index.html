@@ -170,7 +170,12 @@
                     <div>
                         <label class="{{ _lbl }}">Date of Birth</label>
                         <input type="date" name="date_of_birth"{% if individual_customer %} required{% endif %}
+                               max="{{ latest_allowed_date_of_birth }}"
+                               aria-describedby="date-of-birth-help"
                                value="{{ subscriber.date_of_birth.isoformat() if subscriber and subscriber.date_of_birth else '' }}" class="{{ _inp }}">
+                        <p id="date-of-birth-help" class="mt-2 text-xs text-stone-500 dark:text-stone-400">
+                            You must be at least {{ customer_minimum_age_years }} years old.
+                        </p>
                     </div>
                     <div>
                         <label class="{{ _lbl }}">Gender</label>
@@ -199,41 +204,58 @@
         </div>
 
         <!-- Contact Address -->
-        <div class="rounded-2xl border border-stone-200 bg-white p-6 shadow-premium dark:border-stone-700 dark:bg-stone-800">
+        <div data-profile-location-card class="rounded-2xl border border-stone-200 bg-white p-6 shadow-premium dark:border-stone-700 dark:bg-stone-800">
             <h2 class="text-xl font-display font-semibold text-stone-900 dark:text-white">Contact Address</h2>
             <p class="text-sm text-stone-500 dark:text-stone-400 mb-6">Where we reach you for correspondence and account notices</p>
 
             <div class="grid gap-5 sm:grid-cols-2">
                 <div class="sm:col-span-2">
-                    <label class="{{ _lbl }}">Address Line 1</label>
-                    <input type="text" name="address_line1"
-                           value="{{ subscriber.address_line1 if subscriber and subscriber.address_line1 else '' }}" class="{{ _inp }}">
+                    <label for="profile-address-line-1" class="{{ _lbl }}">Address Line 1</label>
+                    <input id="profile-address-line-1" type="text" name="address_line1"
+                           value="{{ profile_address_form.address_line1 }}" class="{{ _inp }}">
                 </div>
                 <div class="sm:col-span-2">
-                    <label class="{{ _lbl }}">Address Line 2 <span class="font-normal text-stone-400">(optional)</span></label>
-                    <input type="text" name="address_line2"
-                           value="{{ subscriber.address_line2 if subscriber and subscriber.address_line2 else '' }}" class="{{ _inp }}">
+                    <label for="profile-address-line-2" class="{{ _lbl }}">Address Line 2 <span class="font-normal text-stone-400">(optional)</span></label>
+                    <input id="profile-address-line-2" type="text" name="address_line2"
+                           value="{{ profile_address_form.address_line2 }}" class="{{ _inp }}">
                 </div>
                 <div>
-                    <label class="{{ _lbl }}">City</label>
-                    <input type="text" name="city"
-                           value="{{ subscriber.city if subscriber and subscriber.city else '' }}" class="{{ _inp }}">
+                    <label for="profile-city" class="{{ _lbl }}">City</label>
+                    <input id="profile-city" type="text" name="city"
+                           value="{{ profile_address_form.city }}" class="{{ _inp }}">
                 </div>
                 <div>
-                    <label class="{{ _lbl }}">State / Region</label>
-                    <input type="text" name="region"
-                           value="{{ subscriber.region if subscriber and subscriber.region else '' }}" class="{{ _inp }}">
+                    <label for="profile-postal-code" class="{{ _lbl }}">Postal Code</label>
+                    <input id="profile-postal-code" type="text" name="postal_code"
+                           value="{{ profile_address_form.postal_code }}" class="{{ _inp }}">
                 </div>
                 <div>
-                    <label class="{{ _lbl }}">Postal Code</label>
-                    <input type="text" name="postal_code"
-                           value="{{ subscriber.postal_code if subscriber and subscriber.postal_code else '' }}" class="{{ _inp }}">
+                    <label for="profile-country-search" class="{{ _lbl }}">Country</label>
+                    <input id="profile-country-search" type="text" list="profile-country-options"
+                           value="{{ 'Nigeria' if profile_address_form.country_code == 'NG' else profile_address_form.country_code }}"
+                           autocomplete="off" role="combobox" aria-autocomplete="list"
+                           aria-describedby="profile-country-help" required class="{{ _inp }}">
+                    <input type="hidden" name="country_code" value="{{ profile_address_form.country_code }}" data-profile-country-code>
+                    <datalist id="profile-country-options"></datalist>
+                    <p id="profile-country-help" class="mt-1.5 text-xs text-stone-400">Type to search all countries.</p>
                 </div>
                 <div>
-                    <label class="{{ _lbl }}">Country</label>
-                    <input type="text" name="country_code" maxlength="2" placeholder="NG"
-                           value="{{ subscriber.country_code if subscriber and subscriber.country_code else '' }}" class="{{ _inp }} uppercase">
-                    <p class="mt-1.5 text-xs text-stone-400">2-letter country code (e.g. NG).</p>
+                    <label for="profile-region" class="{{ _lbl }}">State / Region</label>
+                    <input id="profile-region" type="text" name="region"
+                           list="profile-state-options" value="{{ profile_address_form.region }}"
+                           autocomplete="off" role="combobox" aria-autocomplete="list"
+                           aria-describedby="profile-region-help" class="{{ _inp }}">
+                    <datalist id="profile-state-options"></datalist>
+                    <p id="profile-region-help" class="mt-1.5 text-xs text-stone-400">For Nigeria, type to search all states and the FCT.</p>
+                </div>
+                <div class="sm:col-span-2">
+                    <label for="profile-lga" class="{{ _lbl }}">Local Government Area (LGA)</label>
+                    <input id="profile-lga" type="text" name="lga"
+                           list="profile-lga-options" value="{{ profile_address_form.lga }}"
+                           autocomplete="off" role="combobox" aria-autocomplete="list"
+                           aria-describedby="profile-lga-help" class="{{ _inp }}">
+                    <datalist id="profile-lga-options"></datalist>
+                    <p id="profile-lga-help" class="mt-1.5 text-xs text-stone-400" aria-live="polite">Options follow the selected Nigerian state.</p>
                 </div>
             </div>
         </div>
@@ -422,4 +444,10 @@
         {% include "components/forms/csrf_input.html" %}
     </form>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script id="profile-location-catalog" type="application/json">{{ profile_location_catalog | tojson }}</script>
+<script src="/static/js/customer-profile-location.js?v=20261003a"></script>
 {% endblock %}

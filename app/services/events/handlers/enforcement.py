@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.models.catalog import Subscription
+from app.models.catalog import Subscription, SubscriptionStatus
 from app.services import fup_enforcement
 from app.services import radius as radius_service
 from app.services import radius_reject as radius_reject_service
@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 HANDLED_EVENT_TYPES = frozenset(
     {
         EventType.subscription_suspended,
+        EventType.subscription_paused,
+        EventType.subscription_pause_resumed,
         EventType.subscription_disabled,
         EventType.subscription_canceled,
         EventType.subscription_expired,
@@ -77,6 +79,8 @@ class EnforcementHandler:
     def handle(self, db: Session, event: Event) -> None:
         if event.event_type == EventType.subscription_suspended:
             self._handle_subscription_block(db, event, "suspended")
+        elif event.event_type == EventType.subscription_paused:
+            self._handle_subscription_block(db, event, "paused")
         elif event.event_type == EventType.subscription_disabled:
             self._handle_subscription_block(db, event, "disabled")
         elif event.event_type == EventType.subscription_canceled:
@@ -87,6 +91,15 @@ class EnforcementHandler:
             self._handle_subscription_restore(db, event)
         elif event.event_type == EventType.subscription_resumed:
             self._handle_subscription_restore(db, event)
+        elif event.event_type == EventType.subscription_pause_resumed:
+            if event.payload.get("to_status") == SubscriptionStatus.active.value:
+                self._handle_subscription_restore(db, event)
+            else:
+                self._handle_subscription_block(
+                    db,
+                    event,
+                    str(event.payload.get("to_status") or "restricted"),
+                )
         elif event.event_type in (
             EventType.subscription_upgraded,
             EventType.subscription_downgraded,
@@ -702,6 +715,10 @@ class EnforcementHandler:
 
     def _handle_payment_received(self, db: Session, event: Event) -> None:
         """Submit payment observation to the financial-access reconciler."""
+        if event.payload.get("access_consequence") == (
+            "historical_debt_settlement_only"
+        ):
+            return
         account_id = event.account_id or event.payload.get("account_id")
         if not account_id:
             return

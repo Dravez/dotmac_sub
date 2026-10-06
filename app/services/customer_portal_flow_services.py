@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from types import SimpleNamespace
 from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
@@ -67,6 +66,7 @@ from app.services.prepaid_service_coverage import (
 )
 from app.services.provisioning_lifecycle import latest_readiness
 from app.services.ui_contracts import StateValue
+from app.services.usage_summary import UsageDateRange, UsagePeriod, UsageQueryError
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ _PORTAL_VISIBLE_SERVICE_STATUSES = [
     SubscriptionStatus.active,
     SubscriptionStatus.blocked,
     SubscriptionStatus.suspended,
+    SubscriptionStatus.paused,
     SubscriptionStatus.stopped,
     SubscriptionStatus.disabled,
     SubscriptionStatus.canceled,
@@ -86,6 +87,7 @@ _PORTAL_RESTRICTED_SERVICE_STATUSES = frozenset(
     {
         SubscriptionStatus.blocked,
         SubscriptionStatus.suspended,
+        SubscriptionStatus.paused,
         SubscriptionStatus.stopped,
         SubscriptionStatus.disabled,
     }
@@ -107,6 +109,117 @@ class PortalServiceDateKind(StrEnum):
     paused_since = "paused_since"
     ended_on = "ended_on"
     unavailable = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class UsagePageQuery:
+    """Typed admin query for one customer's usage-record projection."""
+
+    customer_id: UUID
+    period: UsagePeriod = UsagePeriod.current
+    date_range: UsageDateRange | None = None
+    page: int = 1
+    per_page: int = 25
+    allow_postgres_fallback: bool = True
+
+    def __post_init__(self) -> None:
+        if self.page < 1:
+            raise UsageQueryError(
+                code="usage_page_invalid",
+                message="Usage page must be at least 1.",
+                retryable=False,
+            )
+        if self.per_page < 1:
+            raise UsageQueryError(
+                code="usage_page_size_invalid",
+                message="Usage page size must be at least 1.",
+                retryable=False,
+            )
+        if self.period is UsagePeriod.custom and self.date_range is None:
+            raise UsageQueryError(
+                code="usage_date_range_required",
+                message="Select both a start date and an end date.",
+                retryable=False,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class UsageRecordProjection:
+    recorded_at: datetime
+    usage_type: str
+    amount: float
+    usage_amount: float
+    download_amount: float
+    upload_amount: float
+    unit: str
+    description: str
+
+
+class UsageChartRecord(TypedDict):
+    label: str
+    full_label: str
+    value: float
+    download_value: float
+    upload_value: float
+    unit: str
+
+
+class UsageSummaryProjection(TypedDict):
+    average_daily_usage_gb: float
+    average_speed_mbps: float
+    average_download_mbps: float
+    average_upload_mbps: float
+
+
+class UsageFupProjection(TypedDict):
+    policy_name: str
+    usage_gb: float
+    allowance_gb: float | None
+    usage_pct: float
+    status_level: str
+    rules_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class UsagePageResult:
+    """Typed outcome consumed by the admin HTML and CSV adapters."""
+
+    usage_records: tuple[UsageRecordProjection, ...]
+    chart_records: tuple[UsageChartRecord, ...]
+    period: UsagePeriod
+    page: int
+    per_page: int
+    total: int
+    total_pages: int
+    usage_summary: UsageSummaryProjection
+    fup_status: UsageFupProjection | None
+    usage_source: str
+    has_subscription: bool
+    period_total_gb: float
+    date_range: UsageDateRange | None
+
+    def to_template_context(self) -> dict[str, object]:
+        """Serialize explicitly at the Jinja adapter boundary."""
+        return {
+            "usage_records": self.usage_records,
+            "chart_records": self.chart_records,
+            "period": self.period.value,
+            "page": self.page,
+            "per_page": self.per_page,
+            "total": self.total,
+            "total_pages": self.total_pages,
+            "usage_summary": self.usage_summary,
+            "fup_status": self.fup_status,
+            "usage_source": self.usage_source,
+            "has_subscription": self.has_subscription,
+            "period_total_gb": self.period_total_gb,
+            "start_date": (
+                self.date_range.start_date.isoformat() if self.date_range else ""
+            ),
+            "end_date": (
+                self.date_range.end_date.isoformat() if self.date_range else ""
+            ),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +270,7 @@ def _date_projection(
 
 def _get_fup_status(
     db: Session, offer_id: str | None, subscription_id: str
-) -> dict | None:
+) -> UsageFupProjection | None:
     """Get FUP status for a subscription's offer, if a policy exists."""
     if not offer_id:
         return None
@@ -497,7 +610,10 @@ def _usage_period_bounds(
     period: str,
     *,
     activated_at: datetime | None = None,
+    date_range: UsageDateRange | None = None,
 ) -> tuple[datetime, datetime]:
+    if date_range is not None:
+        return date_range.start_at, date_range.end_at
     now = datetime.now(UTC)
     if str(period or "").lower() == "last":
         end = now - timedelta(days=30)
@@ -540,7 +656,7 @@ def _daily_bandwidth_usage(
     end_at: datetime,
     page: int,
     per_page: int,
-) -> tuple[list[Any], int]:
+) -> tuple[list[UsageRecordProjection], int]:
     daily_records = _daily_bandwidth_usage_records(
         db,
         subscription_id=subscription_id,
@@ -563,7 +679,7 @@ def _daily_bandwidth_usage_records(
     subscription_ids: Sequence[str | UUID] | None = None,
     start_at: datetime,
     end_at: datetime,
-) -> list[Any]:
+) -> list[UsageRecordProjection]:
     subscription_uuid_list = _subscription_uuid_list(subscription_id, subscription_ids)
     if not subscription_uuid_list:
         return []
@@ -601,7 +717,7 @@ def _daily_bandwidth_usage_records(
         else {}
     )
 
-    daily_records: list[Any] = []
+    daily_records: list[UsageRecordProjection] = []
     day = end_day
     while day >= start_day:
         day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
@@ -630,7 +746,7 @@ def _daily_bandwidth_usage_records(
                 )
 
         daily_records.append(
-            SimpleNamespace(
+            UsageRecordProjection(
                 recorded_at=day_start,
                 usage_type="Daily Usage",
                 amount=total_gb,
@@ -707,7 +823,9 @@ def _daily_radius_accounting_usage(
     return usage_by_day
 
 
-def _serialize_usage_chart_records(records: list[Any]) -> list[dict[str, Any]]:
+def _serialize_usage_chart_records(
+    records: Sequence[object],
+) -> list[UsageChartRecord]:
     ordered_records = sorted(
         records,
         key=lambda record: (
@@ -716,7 +834,7 @@ def _serialize_usage_chart_records(records: list[Any]) -> list[dict[str, Any]]:
         ),
     )
 
-    chart_records: list[dict[str, Any]] = []
+    chart_records: list[UsageChartRecord] = []
     for record in ordered_records:
         recorded_at = _as_utc(getattr(record, "recorded_at", None))
         if recorded_at is None:
@@ -849,6 +967,7 @@ def get_usage_page(
     page: int = 1,
     per_page: int = 25,
     allow_postgres_fallback: bool = True,
+    date_range: UsageDateRange | None = None,
 ) -> dict:
     """Get usage page data for the customer portal."""
     subscription_ids = _resolve_usage_subscription_ids(db, customer)
@@ -897,7 +1016,11 @@ def get_usage_page(
     ]
     if activation_candidates:
         activated_at = min(activation_candidates)
-    start_at, end_at = _usage_period_bounds(period, activated_at=activated_at)
+    start_at, end_at = _usage_period_bounds(
+        period,
+        activated_at=activated_at,
+        date_range=date_range,
+    )
 
     usage_source = "postgres"
     chart_source_records: list[Any] = []
@@ -959,6 +1082,115 @@ def get_usage_page(
         "has_subscription": True,
         "period_total_gb": period_total_gb,
     }
+
+
+def _usage_record_projection(record: object) -> UsageRecordProjection:
+    recorded_at = _as_utc(getattr(record, "recorded_at", None))
+    if recorded_at is None:
+        raise UsageQueryError(
+            code="usage_record_timestamp_missing",
+            message="A usage record is missing its recorded time.",
+            retryable=False,
+        )
+    amount = float(
+        getattr(record, "amount", None) or getattr(record, "usage_amount", 0) or 0
+    )
+    return UsageRecordProjection(
+        recorded_at=recorded_at,
+        usage_type=str(getattr(record, "usage_type", None) or "Data"),
+        amount=amount,
+        usage_amount=amount,
+        download_amount=float(getattr(record, "download_amount", 0) or 0),
+        upload_amount=float(getattr(record, "upload_amount", 0) or 0),
+        unit=str(getattr(record, "unit", None) or "GB"),
+        description=str(getattr(record, "description", None) or ""),
+    )
+
+
+def _usage_fup_projection(raw: object) -> UsageFupProjection | None:
+    if not isinstance(raw, dict):
+        return None
+    return UsageFupProjection(
+        policy_name=str(raw.get("policy_name") or "Fair Usage Policy"),
+        usage_gb=float(raw.get("usage_gb") or 0),
+        allowance_gb=(
+            float(raw["allowance_gb"]) if raw.get("allowance_gb") is not None else None
+        ),
+        usage_pct=float(raw.get("usage_pct") or 0),
+        status_level=str(raw.get("status_level") or "normal"),
+        rules_count=int(raw.get("rules_count") or 0),
+    )
+
+
+def query_usage_page(db: Session, query: UsagePageQuery) -> UsagePageResult:
+    """Return the typed admin usage-record projection for one customer."""
+    raw = get_usage_page(
+        db,
+        {"subscriber_id": str(query.customer_id)},
+        period=query.period.value,
+        page=query.page,
+        per_page=query.per_page,
+        allow_postgres_fallback=query.allow_postgres_fallback,
+        date_range=query.date_range,
+    )
+    raw_records = raw.get("usage_records") or []
+    raw_chart_records = raw.get("chart_records") or []
+    raw_summary = raw.get("usage_summary") or {}
+    return UsagePageResult(
+        usage_records=tuple(_usage_record_projection(record) for record in raw_records),
+        chart_records=tuple(
+            UsageChartRecord(
+                label=str(record.get("label") or ""),
+                full_label=str(record.get("full_label") or ""),
+                value=float(record.get("value") or 0),
+                download_value=float(record.get("download_value") or 0),
+                upload_value=float(record.get("upload_value") or 0),
+                unit=str(record.get("unit") or "GB"),
+            )
+            for record in raw_chart_records
+            if isinstance(record, dict)
+        ),
+        period=query.period,
+        page=int(raw.get("page") or query.page),
+        per_page=int(raw.get("per_page") or query.per_page),
+        total=int(raw.get("total") or 0),
+        total_pages=int(raw.get("total_pages") or 1),
+        usage_summary=UsageSummaryProjection(
+            average_daily_usage_gb=float(
+                raw_summary.get("average_daily_usage_gb") or 0
+            ),
+            average_speed_mbps=float(raw_summary.get("average_speed_mbps") or 0),
+            average_download_mbps=float(raw_summary.get("average_download_mbps") or 0),
+            average_upload_mbps=float(raw_summary.get("average_upload_mbps") or 0),
+        ),
+        fup_status=_usage_fup_projection(raw.get("fup_status")),
+        usage_source=str(raw.get("usage_source") or "none"),
+        has_subscription=bool(raw.get("has_subscription")),
+        period_total_gb=float(raw.get("period_total_gb") or 0),
+        date_range=query.date_range,
+    )
+
+
+def query_usage_export(db: Session, query: UsagePageQuery) -> UsagePageResult:
+    """Return every record matching the typed filter for CSV serialization."""
+    count_query = UsagePageQuery(
+        customer_id=query.customer_id,
+        period=query.period,
+        date_range=query.date_range,
+        page=1,
+        per_page=1,
+        allow_postgres_fallback=query.allow_postgres_fallback,
+    )
+    count_result = query_usage_page(db, count_query)
+    export_query = UsagePageQuery(
+        customer_id=query.customer_id,
+        period=query.period,
+        date_range=query.date_range,
+        page=1,
+        per_page=max(count_result.total, 1),
+        allow_postgres_fallback=query.allow_postgres_fallback,
+    )
+    return query_usage_page(db, export_query)
 
 
 def get_usage_history(db: Session, customer: dict, months: int = 12) -> dict:
@@ -1070,7 +1302,9 @@ def _latest_restricted_service_dates(
         select(SubscriptionLifecycleEvent)
         .where(
             SubscriptionLifecycleEvent.subscription_id.in_(restricted_ids),
-            SubscriptionLifecycleEvent.event_type == LifecycleEventType.suspend,
+            SubscriptionLifecycleEvent.event_type.in_(
+                (LifecycleEventType.suspend, LifecycleEventType.pause)
+            ),
             SubscriptionLifecycleEvent.to_status.in_(
                 tuple(_PORTAL_RESTRICTED_SERVICE_STATUSES)
             ),
@@ -1123,6 +1357,7 @@ def _service_date_projection(
 
     if subscription.status in _PORTAL_RESTRICTED_SERVICE_STATUSES:
         paused = subscription.status in {
+            SubscriptionStatus.paused,
             SubscriptionStatus.stopped,
             SubscriptionStatus.disabled,
         }
@@ -1332,10 +1567,18 @@ def get_service_detail(
             .one_or_none()
         )
     customer_ont_is_uisp = bool(customer_ont and customer_ont.uisp_device_id)
-    account_health = build_portal_account_health(
+    account_health_projection = build_portal_account_health(
         db,
         coerce_uuid(account_id),
-    ).for_subscription(subscription.id)
+    )
+    try:
+        account_health = account_health_projection.for_subscription(subscription.id)
+    except ValueError:
+        logger.warning(
+            "portal_service_missing_from_health_projection",
+            extra={"subscription_id": str(subscription.id)},
+        )
+        return None
 
     # Renewal context: show renewal banner when contract nearing expiration
     renewal_context: dict[str, Any] = {"show_renewal": False}
@@ -1629,7 +1872,7 @@ def _vacation_reason_message(reason: str, decision) -> str:
             f"Please wait {remaining} more day(s) before using another vacation hold."
         )
     if reason == "vacation_hold_duration_out_of_range":
-        return f"Suspension must be between 1 and {decision.max_days} days"
+        return f"Pause must be between 1 and {decision.max_days} days"
     if reason == "active_customer_hold_missing":
         return "Cannot resume: no customer-initiated hold was found."
     return "This subscription is not eligible for that vacation-hold action."
@@ -1754,16 +1997,16 @@ def apply_service_suspend(
             requested_days=days,
         )
         raise ValueError(_vacation_reason_message(outcome.error_code or "", decision))
-    lock_id = outcome.artifact_ids[0] if outcome.artifact_ids else None
-    from app.models.enforcement_lock import EnforcementLock
+    cause_id = outcome.artifact_ids[0] if outcome.artifact_ids else None
+    from app.models.subscription_pause import SubscriptionPauseCause
 
-    lock = db.get(EnforcementLock, coerce_uuid(lock_id)) if lock_id else None
-    if lock is None or lock.resume_at is None:
-        raise ValueError("Vacation hold did not return exact lock evidence")
-    resume_at = lock.resume_at
+    cause = db.get(SubscriptionPauseCause, coerce_uuid(cause_id)) if cause_id else None
+    if cause is None or cause.scheduled_resume_at is None:
+        raise ValueError("Vacation hold did not return exact pause-cause evidence")
+    resume_at = cause.scheduled_resume_at
 
     logger.info(
-        "Customer %s suspended subscription %s for %d days (vacation hold, resume_at=%s)",
+        "Customer %s paused subscription %s for %d days (vacation hold, resume_at=%s)",
         subscriber_id,
         subscription_id,
         days,
@@ -1773,7 +2016,7 @@ def apply_service_suspend(
     return {
         "subscription_id": subscription_id,
         "days": days,
-        "lock_id": str(lock.id),
+        "pause_cause_id": str(cause.id),
         "resume_at": resume_at.isoformat(),
     }
 
@@ -1784,7 +2027,10 @@ def get_resume_page(
     subscription_id: str,
 ) -> dict | None:
     """Build context for the resume service confirmation page."""
-    from app.models.enforcement_lock import EnforcementLock
+    from app.models.subscription_pause import (
+        SubscriptionPauseCause,
+        SubscriptionPauseEpisode,
+    )
     from app.services.subscription_lifecycle import (
         SubscriptionCommandKind,
         resolve_vacation_hold_policy,
@@ -1800,19 +2046,22 @@ def get_resume_page(
         subscription,
         command_kind=SubscriptionCommandKind.vacation_resume,
     )
-    if not decision.eligible or decision.active_lock_id is None:
+    if not decision.eligible or decision.active_cause_id is None:
         return None
-    lock = db.get(EnforcementLock, coerce_uuid(decision.active_lock_id))
-    if lock is None:
+    cause = db.get(SubscriptionPauseCause, coerce_uuid(decision.active_cause_id))
+    if cause is None:
+        return None
+    episode = db.get(SubscriptionPauseEpisode, cause.pause_episode_id)
+    if episode is None:
         return None
 
     offer = subscription.offer
     return {
         "subscription": subscription,
         "offer_name": offer.name if offer else "Service",
-        "lock": lock,
-        "suspended_since": lock.created_at,
-        "resume_at": lock.resume_at,
+        "pause_cause": cause,
+        "paused_since": episode.effective_at,
+        "resume_at": cause.scheduled_resume_at,
     }
 
 
@@ -1823,7 +2072,7 @@ def apply_service_resume(
 ) -> dict:
     """Resume a customer-initiated vacation hold on a subscription."""
     from app.models.audit import AuditActorType
-    from app.models.enforcement_lock import EnforcementLock
+    from app.models.subscription_pause import SubscriptionPauseCause
     from app.services.subscription_lifecycle import (
         SubscriptionCommandKind,
         SubscriptionEffectiveTiming,
@@ -1845,13 +2094,13 @@ def apply_service_resume(
         subscription,
         command_kind=SubscriptionCommandKind.vacation_resume,
     )
-    if not decision.eligible or decision.active_lock_id is None:
+    if not decision.eligible or decision.active_cause_id is None:
         reason = (
             decision.reasons[0] if decision.reasons else "active_customer_hold_missing"
         )
         raise ValueError(_vacation_reason_message(reason, decision))
-    lock = db.get(EnforcementLock, coerce_uuid(decision.active_lock_id))
-    if lock is None:
+    cause = db.get(SubscriptionPauseCause, coerce_uuid(decision.active_cause_id))
+    if cause is None:
         raise ValueError("Cannot resume: exact customer-hold evidence is missing")
 
     subscriber_id = str(subscription.subscriber_id)
@@ -1865,7 +2114,7 @@ def apply_service_resume(
             effective_timing=SubscriptionEffectiveTiming.immediate,
             reason="Customer-initiated resume via portal",
             expected_head=snapshot.head,
-            idempotency_key=f"customer-vacation-resume:{lock.id}",
+            idempotency_key=f"customer-vacation-resume:{cause.id}",
         ),
         actor_id=subscriber_id,
         actor_type=AuditActorType.user,

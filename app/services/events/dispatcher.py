@@ -19,6 +19,7 @@ from app.models.event_store import EventStatus, EventStore
 from app.services import event_store as event_store_service
 from app.services.domain_errors import DomainError
 from app.services.events.types import Event, EventType
+from app.services.operator_tenant import OPERATOR_TENANT_ID
 from app.services.session_hooks import run_after_commit
 
 logger = logging.getLogger(__name__)
@@ -543,6 +544,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     from app.services.events.handlers.ip_assignment_projection import (
         IPAssignmentProjectionHandler,
     )
+    from app.services.events.handlers.lead_intake import LeadIntakeHandler
     from app.services.events.handlers.lifecycle import LifecycleHandler
     from app.services.events.handlers.materials_lifecycle_projection import (
         MaterialsLifecycleProjectionHandler,
@@ -564,6 +566,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
         SupportLifecycleProjectionHandler,
     )
     from app.services.events.handlers.surveys import SurveyTriggerHandler
+    from app.services.events.handlers.test_connection import TestConnectionHandler
     from app.services.events.handlers.webhook import WebhookHandler
 
     dispatcher.register_handler(WebhookHandler())
@@ -578,6 +581,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
     dispatcher.register_handler(MaterialsLifecycleProjectionHandler())
     dispatcher.register_handler(IdentityLifecycleProjectionHandler())
     dispatcher.register_handler(EnforcementHandler())
+    dispatcher.register_handler(TestConnectionHandler())
     dispatcher.register_handler(IPAssignmentProjectionHandler())
     dispatcher.register_handler(CredentialSessionProjectionHandler())
     dispatcher.register_handler(ArrangementHandler())
@@ -588,6 +592,7 @@ def _initialize_handlers(dispatcher: EventDispatcher) -> None:
 
     dispatcher.register_handler(SubscriptionChangeExecutionHandler())
     dispatcher.register_handler(ReferralHandler())
+    dispatcher.register_handler(LeadIntakeHandler())
     dispatcher.register_handler(PrepaidRenewalHandler())
     dispatcher.register_handler(StaffInviteHandler())
     dispatcher.register_handler(ResellerInviteHandler())
@@ -629,14 +634,18 @@ def emit_event(
     service_order_id: UUID | str | None = None,
     defer_until_commit: bool = True,
     dispatch_after_commit: bool = True,
+    record_only: bool = False,
 ) -> Event:
-    """Emit an event to all registered handlers.
+    """Emit an event to handlers, or record evidence without dispatch.
 
-    This is the main entry point for services to emit events. After calling
-    this function, the event will be:
+    This is the main entry point for services to emit events. Ordinary events
+    can be:
     - Delivered to subscribed webhook endpoints (via Celery task)
     - Recorded as a lifecycle event (if applicable)
     - Queued as a notification (if template configured)
+
+    Record-only events are stored as completed evidence in the caller's
+    transaction and are never routed to handlers.
 
     Args:
         db: Database session
@@ -649,6 +658,8 @@ def emit_event(
         subscription_id: Related subscription ID
         invoice_id: Related invoice ID
         service_order_id: Related service order ID
+        record_only: Persist completed evidence without handlers, callbacks,
+            or an outbox claim. The dispatch timing flags do not apply.
 
     Returns:
         The created Event object
@@ -666,6 +677,14 @@ def emit_event(
         )
     """
 
+    # Events are emitted by a single-operator deployment. Stamp the envelope
+    # once at the shared boundary so automation and other consumers do not
+    # have to infer tenant scope from optional transport metadata. A caller's
+    # explicit value remains authoritative and is validated by its consumer.
+    event_payload = dict(payload)
+    if isinstance(db, Session):
+        event_payload.setdefault("tenant_id", str(OPERATOR_TENANT_ID))
+
     # Normalize UUIDs
     def to_uuid(value: UUID | str | None) -> UUID | None:
         if value is None:
@@ -676,7 +695,7 @@ def emit_event(
 
     event = Event(
         event_type=event_type,
-        payload=payload,
+        payload=event_payload,
         event_id=event_id or uuid4(),
         actor=actor,
         subscriber_id=to_uuid(subscriber_id),
@@ -685,6 +704,19 @@ def emit_event(
         invoice_id=to_uuid(invoice_id),
         service_order_id=to_uuid(service_order_id),
     )
+
+    if record_only:
+        # The evidence row shares the caller's transaction but never enters
+        # the pending or failed queues. Do not initialize handlers here: even
+        # non-SQL dry adapters must not dispatch a record-only fact.
+        if isinstance(db, Session):
+            event_store_service.create_event_record(
+                db,
+                event,
+                status=EventStatus.completed,
+            )
+        logger.info("event_recorded_only", extra=_event_extra(event))
+        return event
 
     dispatcher = get_dispatcher()
 

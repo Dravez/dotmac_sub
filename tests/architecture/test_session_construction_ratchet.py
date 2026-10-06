@@ -78,7 +78,39 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: real dual-session PostgreSQL proof that the accounting-sync feed's keyset
 #: cursor does not skip a stationary row under a genuinely concurrent,
 #: independently-committing writer, with its own `sessionmaker`.
-TEST_FIXTURE_BASELINE_TOTAL = 132
+#: +4 from tests/test_chat_widget_media_transaction.py: two isolated SQLite
+#: transaction-boundary proofs each construct one disposable Engine and Session.
+#: +8 from ADR 0017 enforcement evidence proofs: the out-of-band writer tests
+#: (tests/test_enforcement_application_writer.py) each bind a disposable SQLite
+#: Engine/sessionmaker in place of db_session_adapter.create_session, and the
+#: PostgreSQL durability proofs
+#: (tests/integration/test_enforcement_application_evidence_durability.py) use
+#: their own sessionmaker to observe the evidence from a fresh connection after
+#: the caller rolls back.
+#: +2 from tests/test_enforcement_evidence_shadow_report.py: a private,
+#: per-test SQLite engine/sessionmaker for the ADR 0017 shadow-report query,
+#: isolated like the writer tests (EnforcementApplication carries no FKs).
+#: +1 from test_communication_intent_coverage_pg.py and +9 from
+#: test_payment_email_composition_pg.py: real-role, isolation and concurrency
+#: fixtures. The production construction baseline remains unchanged.
+#: +3 from the Kernel a97 machine alignment proof: one disposable SQLite
+#: engine and Session in tests/test_machine_kernel_alignment.py, plus one
+#: Connection-bound Session in tests/integration/test_machine_kernel_alignment_pg.py
+#: for a real app_user/RLS read. Exact AST count: 2 + 1.
+#: +1 from tests/integration/machine_cli_probe.py: a standalone, explicitly
+#: marked disposable-cluster probe constructs its oracle engine before it
+#: launches a child process that uses the actual app.db.SessionLocal.
+#: +3 from tests/integration/test_notification_template_seed_concurrency.py:
+#: one migrated PostgreSQL engine plus two independently committing sessions
+#: prove concurrent startup seeders safely converge on one template per key.
+#: +2 from tests/integration/test_test_connection_finance.py: independently
+#: committing sessions prove same-customer creation serialization and rollback
+#: of a request and its outbox event. They use the shared, migrated PostgreSQL
+#: engine fixture; no production engine/session construction is introduced.
+#: +5 from tests/integration/test_subscription_test_connection.py: two
+#: disposable migrated engines and three real sessions prove additive RBAC
+#: migration and serialized subscription activation. Production remains unchanged.
+TEST_FIXTURE_BASELINE_TOTAL = 170
 
 
 def _baseline() -> dict[str, int]:

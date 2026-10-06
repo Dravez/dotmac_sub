@@ -26,11 +26,15 @@ def _env_bool(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower()
+    # Explicit peer attribution gate for the standalone machine issuance CLI.
+    # Empty means no peer is accepted; there is no inferred identity.
+    accepted_source_applications: str = os.getenv("ACCEPTED_SOURCE_APPLICATIONS", "")
     database_url: str = os.getenv(
         "DATABASE_URL",
         "postgresql+psycopg://postgres:postgres@localhost:5434/dotmac_sub",
     )
-    # Used only to derive stable, non-reversible marketing subject identifiers.
+    # Legacy/developer fallback for stable, non-reversible marketing subject
+    # identifiers. Deployed environments hold this value from OpenBao at boot.
     # The raw key and customer identity must never enter an event payload or log.
     conversion_ingest_api_key: str = os.getenv("CONVERSION_INGEST_API_KEY", "")
     # Pool is per-process; the engine is recreated in every uvicorn worker and
@@ -134,11 +138,12 @@ class Settings:
         "TEAM_INBOX_CHANNEL_FALLBACK_SERVICE_TEAM_ID", ""
     ).strip()
 
-    # Avatar settings
+    # Legacy location is read-only for avatar migration. MIME and size remain
+    # runtime policy inputs while durable S3 storage owns new uploads.
     avatar_upload_dir: str = os.getenv("AVATAR_UPLOAD_DIR", "static/avatars")
     avatar_max_size_bytes: int = int(
         os.getenv("AVATAR_MAX_SIZE_BYTES", str(2 * 1024 * 1024))
-    )  # 2MB
+    )
     avatar_allowed_types: str = os.getenv(
         "AVATAR_ALLOWED_TYPES", "image/jpeg,image/png,image/gif,image/webp"
     )
@@ -178,6 +183,19 @@ class Settings:
     # env files into. XDG_RUNTIME_DIR is tmpfs and user-private on a rootless
     # host, which is what keeps materialized credentials off durable storage.
     connector_runtime_dir: str = os.getenv("XDG_RUNTIME_DIR", "")
+
+    # Native Automation Center server scripts use the same external OCI
+    # boundary as connectors. Empty values intentionally leave publication
+    # unavailable until a deployment pins and provisions the runtime image.
+    automation_script_runtime_image: str = os.getenv(
+        "AUTOMATION_SCRIPT_RUNTIME_IMAGE", ""
+    ).strip()
+    automation_script_runtime_digest: str = os.getenv(
+        "AUTOMATION_SCRIPT_RUNTIME_DIGEST", ""
+    ).strip()
+    automation_script_runtime_timeout_seconds: int = max(
+        1, min(int(os.getenv("AUTOMATION_SCRIPT_RUNTIME_TIMEOUT_SECONDS", "30")), 600)
+    )
 
     # Meta Graph API settings
     meta_graph_api_version: str = os.getenv("META_GRAPH_API_VERSION", "v21.0")

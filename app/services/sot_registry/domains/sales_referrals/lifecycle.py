@@ -211,13 +211,20 @@ SERVICES: tuple[SOTService, ...] = (
             "communications.intents",
             "communications.staff_notifications",
             "events.dispatcher",
+            "sales.quote_payment_eligibility",
             "sales.quote_payment_review",
             "sales.service",
         ),
         notes=(
-            "A completed map-pinned estimate is created as payment-review pending, "
-            "then queues the authorized staff review alert and customer under-review "
-            "notification. It never exposes payment eligibility itself."
+            "A map-pinned installation or relocation request records the typed "
+            "service choice and is created as payment-review pending. Fiber "
+            "installation may have an internal preliminary estimate; other "
+            "choices require staff pricing. Customer reads hide prices until "
+            "the current commercial snapshot is approved. Customer Quote reads "
+            "use canonical paid deposit Invoice evidence from "
+            "sales.quote_payment_eligibility so paid Quotes suppress payment "
+            "actions. The owner queues staff review and customer under-review "
+            "notifications."
         ),
     ),
     SOTService(

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
 from app.models.billing import (
     AccountAdjustment,
@@ -19,11 +20,14 @@ from app.models.billing import (
     PaymentStatus,
     ServiceEntitlement,
     ServiceEntitlementStatus,
+    TaxApplication,
     TaxRate,
 )
 from app.models.catalog import (
     BillingCycle,
     BillingMode,
+    OfferPrice,
+    PriceType,
     Subscription,
     SubscriptionStatus,
     UsageAllowance,
@@ -39,6 +43,11 @@ from app.services.domain_errors import DomainError
 from app.services.events.handlers.prepaid_renewal import PrepaidRenewalHandler
 from app.services.events.types import Event, EventType
 from app.services.owner_commands import CommandContext
+from app.services.prepaid_calendar_contracts import (
+    DocumentedPrepaidServicePeriod,
+    ReviewedPrepaidCalendarBasis,
+    ReviewedPrepaidServicePeriodQuery,
+)
 from app.services.prepaid_service_renewals import (
     CorrectLegacyRenewalTaxInvoiceCommand,
     ExecuteReviewedPrepaidServiceRenewalCommand,
@@ -56,8 +65,10 @@ from app.services.prepaid_service_renewals import (
     execute_reviewed_prepaid_service_renewal,
     preview_legacy_prepaid_renewal_tax_invoice_correction,
     preview_prepaid_service_renewal,
+    resolve_prepaid_monthly_charge_detail,
     resolve_prepaid_settlement_period,
     resolve_prepaid_subscription_settlement_period,
+    resolve_reviewed_prepaid_service_period,
     run_due_prepaid_service_renewals,
 )
 from tests.prepaid_funding_helpers import (
@@ -95,6 +106,74 @@ def test_settlement_period_preserves_declared_month_end_clamp():
     assert period.ends_on.isoformat() == "2026-03-01"
     assert period.starts_at == datetime(2026, 1, 31, 23, tzinfo=UTC)
     assert period.ends_at == datetime(2026, 2, 28, 23, tzinfo=UTC)
+
+
+def test_reviewed_dates_default_to_lagos_midnight():
+    period = resolve_reviewed_prepaid_service_period(
+        ReviewedPrepaidServicePeriodQuery(date(2026, 6, 29), date(2026, 7, 29))
+    )
+    assert period.starts_at == datetime(2026, 6, 28, 23, tzinfo=UTC)
+    assert period.ends_at == datetime(2026, 7, 28, 23, tzinfo=UTC)
+    assert period.timezone_name == "Africa/Lagos"
+
+
+def test_reviewed_documentary_continuation_preserves_utc_instants():
+    period = resolve_reviewed_prepaid_service_period(
+        ReviewedPrepaidServicePeriodQuery(
+            starts_on=date(2026, 7, 29),
+            ends_on=date(2026, 8, 28),
+            basis=ReviewedPrepaidCalendarBasis.documented_anniversary,
+            documented_period=DocumentedPrepaidServicePeriod(
+                datetime(2026, 6, 29, tzinfo=UTC),
+                datetime(2026, 7, 29, tzinfo=UTC),
+            ),
+        )
+    )
+    assert period.starts_at == datetime(2026, 7, 29, tzinfo=UTC)
+    assert period.ends_at == datetime(2026, 8, 28, tzinfo=UTC)
+    assert period.starts_on == date(2026, 7, 29)
+    assert period.ends_on == date(2026, 8, 28)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        None,
+        DocumentedPrepaidServicePeriod(datetime(2026, 6, 29), datetime(2026, 7, 29)),
+        DocumentedPrepaidServicePeriod(
+            datetime(2026, 6, 29, tzinfo=UTC), datetime(2026, 7, 29, 1, tzinfo=UTC)
+        ),
+        DocumentedPrepaidServicePeriod(
+            datetime(2026, 7, 29, tzinfo=UTC), datetime(2026, 6, 29, tzinfo=UTC)
+        ),
+    ],
+)
+def test_reviewed_documentary_calendar_requires_exact_reference(
+    reference: DocumentedPrepaidServicePeriod | None,
+):
+    with pytest.raises(PrepaidServiceRenewalError) as exc:
+        resolve_reviewed_prepaid_service_period(
+            ReviewedPrepaidServicePeriodQuery(
+                date(2026, 7, 29),
+                date(2026, 8, 28),
+                ReviewedPrepaidCalendarBasis.documented_anniversary,
+                reference,
+            )
+        )
+    assert exc.value.code == "financial.prepaid_service_renewals.invalid_period"
+
+
+def test_business_midnight_cannot_silently_accept_documentary_override():
+    with pytest.raises(PrepaidServiceRenewalError):
+        resolve_reviewed_prepaid_service_period(
+            ReviewedPrepaidServicePeriodQuery(
+                date(2026, 7, 29),
+                date(2026, 8, 28),
+                documented_period=DocumentedPrepaidServicePeriod(
+                    datetime(2026, 6, 29, tzinfo=UTC), datetime(2026, 7, 29, tzinfo=UTC)
+                ),
+            )
+        )
 
 
 def test_capped_renewal_restarts_validity_even_with_live_coverage(
@@ -443,6 +522,52 @@ def test_funding_event_without_payment_id_remains_retryable(db_session, subscrib
         PrepaidRenewalHandler().handle(db_session, event)
 
     assert exc_info.value.code.endswith("event_payment_missing")
+
+
+def test_prepaid_monthly_charge_extracts_inclusive_catalog_vat(
+    db_session, subscriber, subscription
+):
+    ensure_test_prepaid_contract(db_session, subscription, Decimal("10750.00"))
+    price = db_session.scalar(
+        select(OfferPrice).where(
+            OfferPrice.offer_id == subscription.offer_id,
+            OfferPrice.price_type == PriceType.recurring,
+            OfferPrice.is_active.is_(True),
+        )
+    )
+    assert price is not None
+    price.tax_application = TaxApplication.inclusive
+    vat = TaxRate(
+        name="Inclusive prepaid VAT",
+        code="INCLUSIVE-PREPAID-VAT",
+        rate=Decimal("7.5000"),
+        is_active=True,
+    )
+    db_session.add(vat)
+    db_session.flush()
+    subscriber.tax_rate_id = vat.id
+    db_session.flush()
+
+    detail = resolve_prepaid_monthly_charge_detail(
+        db_session,
+        subscription,
+        datetime(2026, 7, 1, tzinfo=UTC),
+    )
+
+    assert detail is not None
+    assert detail.subtotal == Decimal("10000.00")
+    assert detail.tax_total == Decimal("750.00")
+    assert detail.total == Decimal("10750.00")
+    assert detail.tax_application is TaxApplication.inclusive
+
+
+def test_historical_debt_payment_event_does_not_run_current_renewal(db_session):
+    event = Event(
+        event_type=EventType.payment_received,
+        payload={"access_consequence": "historical_debt_settlement_only"},
+    )
+
+    PrepaidRenewalHandler().handle(db_session, event)
 
 
 def test_succeeded_payment_without_settlement_evidence_remains_retryable(
@@ -1011,8 +1136,8 @@ def test_scheduled_owner_refuses_historical_catch_up(
     assert db_session.query(AccountAdjustment).count() == 0
 
 
-def test_scheduled_owner_restores_canonically_funded_prepaid_lock(
-    db_session, subscriber, subscription, monkeypatch
+def test_scheduled_owner_does_not_bill_suspended_prepaid_service(
+    db_session, subscriber, subscription
 ):
     _prepare_scheduled_cycle(db_session, subscriber, subscription)
     subscription.status = SubscriptionStatus.suspended
@@ -1027,21 +1152,6 @@ def test_scheduled_owner_restores_canonically_funded_prepaid_lock(
     )
     db_session.add(lock)
     db_session.commit()
-    monkeypatch.setattr(
-        "app.services.collections._core.resolve_prepaid_funding",
-        lambda _db, account, *, now=None: PrepaidFundingDecision(
-            account_id=str(account.id),
-            available_balance=Decimal("50.00"),
-            required_balance=Decimal("0.00"),
-            currency="NGN",
-            covered_subscription_ids=(subscription.id,),
-        ),
-    )
-    monkeypatch.setattr(
-        "app.services.account_lifecycle.emit_event",
-        lambda *_args, **_kwargs: None,
-    )
-
     summary = execute_due_prepaid_service_renewals(
         db_session,
         _scheduled_command(
@@ -1053,25 +1163,20 @@ def test_scheduled_owner_restores_canonically_funded_prepaid_lock(
 
     db_session.refresh(lock)
     db_session.refresh(subscription)
-    assert summary["prepaid_renewals_funded"] == 1
+    assert summary["prepaid_renewals_scanned"] == 0
+    assert summary["prepaid_renewals_funded"] == 0
     assert summary["prepaid_renewals_restored"] == 0
-    assert lock.is_active is False
-    assert subscription.status == SubscriptionStatus.active
-    event = (
+    assert lock.is_active is True
+    assert subscription.status == SubscriptionStatus.suspended
+    assert (
         db_session.query(EventStore)
         .filter_by(
             event_type="prepaid_service.renewed",
             subscription_id=subscription.id,
         )
-        .one()
+        .count()
+        == 0
     )
-    assert event.payload["source"] == "scheduled"
-    assert event.payload["schema_version"] == 2
-    assert event.payload["invoice_id"] is not None
-    assert event.payload["ledger_entry_id"] is None
-    assert str(event.invoice_id) == event.payload["invoice_id"]
-    assert event.payload["trigger_payment_id"] is None
-    assert event.payload["renewed_through"] == "2026-08-01T00:00:00+00:00"
 
 
 @pytest.mark.parametrize(
@@ -1162,6 +1267,40 @@ def test_funding_change_renews_suspended_due_service_from_payment_day(
     assert event.payload["schema_version"] == 2
     assert event.payload["invoice_id"] is not None
     assert str(event.invoice_id) == event.payload["invoice_id"]
+
+
+def test_funding_change_does_not_bill_administratively_suspended_service(
+    db_session, subscriber, subscription
+):
+    _prepare_scheduled_cycle(db_session, subscriber, subscription)
+    subscription.status = SubscriptionStatus.suspended
+    subscriber.status = SubscriberStatus.suspended
+    lock = EnforcementLock(
+        subscription_id=subscription.id,
+        subscriber_id=subscriber.id,
+        reason=EnforcementReason.admin,
+        source="pytest:administrative-suspension",
+        is_active=True,
+    )
+    db_session.add(lock)
+    db_session.commit()
+
+    result = apply_due_prepaid_service_after_funding_change(
+        db_session,
+        account_id=subscriber.id,
+        effective_at=datetime(2026, 7, 20, 17, 30, tzinfo=UTC),
+        funding_currency="NGN",
+        evidence_ref="pytest:unrelated-account-credit-event",
+    )
+
+    db_session.refresh(lock)
+    db_session.refresh(subscription)
+    assert result.disposition == FundingChangeRenewalDisposition.no_due_service
+    assert result.scanned == 0
+    assert result.funded == 0
+    assert lock.is_active is True
+    assert subscription.status == SubscriptionStatus.suspended
+    assert db_session.query(ServiceEntitlement).count() == 0
 
 
 def test_funding_change_leaves_service_due_while_payable_invoice_remains(

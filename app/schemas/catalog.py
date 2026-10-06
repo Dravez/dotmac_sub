@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models.billing import LedgerEntryType, LedgerSource
+from app.models.billing import LedgerEntryType, LedgerSource, TaxApplication
 from app.models.catalog import (
     AccessRequirement,
     AccessType,
@@ -239,6 +239,7 @@ class OfferPriceRead(BaseModel):
     id: UUID
     price_type: PriceType
     amount: Decimal
+    tax_application: TaxApplication
     currency: str
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -275,6 +276,7 @@ class OfferPriceCreate(BaseModel):
     offer_id: UUID
     price_type: PriceType = PriceType.recurring
     amount: Decimal = Field(gt=0, lt=100_000_000)
+    tax_application: TaxApplication = TaxApplication.exclusive
     currency: str = Field(default="NGN", min_length=3, max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -286,6 +288,7 @@ class OfferPriceUpdate(BaseModel):
     offer_id: UUID | None = None
     price_type: PriceType | None = None
     amount: Decimal | None = Field(default=None, gt=0, lt=100_000_000)
+    tax_application: TaxApplication | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -299,6 +302,7 @@ class AddOnPriceRead(BaseModel):
     id: UUID
     price_type: PriceType
     amount: Decimal
+    tax_application: TaxApplication
     currency: str
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -312,6 +316,7 @@ class AddOnPriceCreate(BaseModel):
     add_on_id: UUID
     price_type: PriceType = PriceType.recurring
     amount: Decimal = Field(gt=0, lt=100_000_000)
+    tax_application: TaxApplication = TaxApplication.exclusive
     currency: str = Field(default="NGN", min_length=3, max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -323,6 +328,7 @@ class AddOnPriceUpdate(BaseModel):
     add_on_id: UUID | None = None
     price_type: PriceType | None = None
     amount: Decimal | None = Field(default=None, gt=0, lt=100_000_000)
+    tax_application: TaxApplication | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -510,7 +516,13 @@ class SubscriptionBase(BaseModel):
 
 
 class SubscriptionCreate(SubscriptionBase):
-    pass
+    @model_validator(mode="after")
+    def _reject_owner_only_pause(self) -> SubscriptionCreate:
+        if self.status is SubscriptionStatus.paused:
+            raise ValueError(
+                "A paused subscription requires an authoritative pause episode"
+            )
+        return self
 
 
 class SubscriptionUpdate(BaseModel):
@@ -624,15 +636,19 @@ class SubscriptionRead(SubscriptionBase):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def expires_at(self) -> datetime | None:
-        """The date the service genuinely lapses, or null when it has none.
+        """The paid-through/service-expiry boundary exposed to clients.
 
-        This is an explicit contract end only. ``next_billing_at`` is the next
-        *charge* date (prepaid) / next invoice date (postpaid), NOT an expiry —
-        clients must not treat it as one. Prepaid service lapses on balance
-        exhaustion (a consumption-driven event, not a date); the real pending
-        lapse date in that case is exposed by ``GET /me/service-status``.
+        For prepaid service, ``next_billing_at`` is the projected end of the
+        currently paid entitlement and therefore the customer-visible expiry
+        boundary. For postpaid service it remains the next invoice date and must
+        never be presented as expiry; only an explicit contract ``end_at``
+        supplies a date-based expiry there.
         """
-        return self.end_at
+        if self.end_at is not None:
+            return self.end_at
+        if self.billing_mode is BillingMode.prepaid:
+            return self.next_billing_at
+        return None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -737,6 +753,7 @@ class OfferVersionPriceBase(BaseModel):
     offer_version_id: UUID
     price_type: PriceType = PriceType.recurring
     amount: Decimal
+    tax_application: TaxApplication = TaxApplication.exclusive
     currency: str = Field(default="NGN", max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -752,6 +769,7 @@ class OfferVersionPriceUpdate(BaseModel):
     offer_version_id: UUID | None = None
     price_type: PriceType | None = None
     amount: Decimal | None = None
+    tax_application: TaxApplication | None = None
     currency: str | None = Field(default=None, max_length=3)
     billing_cycle: BillingCycle | None = None
     unit: PriceUnit | None = None
@@ -1248,8 +1266,9 @@ class PlanChangePageResponse(BaseModel):
     current_offer: PlanOfferSummary | None = None
     available_offers: list[PlanOfferSummary] = Field(default_factory=list)
     prepaid_funding: Decimal | None = None
-    postpaid_receivables: Decimal = Decimal("0.00")
-    collection_blocking_balance: Decimal = Decimal("0.00")
+    postpaid_receivables: Decimal | None = None
+    collection_blocking_balance: Decimal | None = None
+    financial_position_unavailable: bool = False
     next_billing_date: datetime | None = None
     billing_message: str | None = None
     service_addresses: list[ServiceAddressOption] = Field(default_factory=list)

@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from uuid import UUID
 
 from app.services import reseller_onboarding
-from app.services.web_admin_resellers import ResellerCatalogOfferOption
+from app.services.web_admin_resellers import (
+    ResellerCatalogOfferOption,
+    ResellerPortalUserView,
+)
 from app.web.admin.resellers import templates
 
 TEMPLATE = (
@@ -34,7 +37,9 @@ class _Request:
         return "/"
 
 
-def _render_detail() -> str:
+def _render_detail(
+    portal_users: list[ResellerPortalUserView] | None = None,
+) -> str:
     reseller = SimpleNamespace(
         id=RESELLER_ID,
         name="Example Reseller",
@@ -72,8 +77,8 @@ def _render_detail() -> str:
         suspended_services=0,
         subscriptions_total=0,
         open_tickets=0,
-        reseller_portal_users=0,
-        reseller_portal_user_views=[],
+        reseller_portal_users=len(portal_users or []),
+        reseller_portal_user_views=portal_users or [],
         explicit_available_offers_total=1,
         reseller_subscribers=[],
         recent_invoices=[],
@@ -135,6 +140,33 @@ def test_reseller_detail_exposes_portal_access_evidence() -> None:
     assert "Portal access" in TEMPLATE
     assert "reseller_portal_user_views" in TEMPLATE
     assert "Invite pending" in TEMPLATE
+
+
+def test_portal_access_row_exposes_reset_and_confirmed_remove_actions() -> None:
+    principal_id = UUID("50f24270-5ae5-490a-ae5e-a2370450b91f")
+    html = _render_detail(
+        [
+            ResellerPortalUserView(
+                principal_type="reseller_user",
+                principal_id=principal_id,
+                display_name="Theresa Omali",
+                email="theresa.omali@ntel.com.ng",
+                username="theresa.omali@ntel.com.ng",
+                is_active=True,
+                invite_pending=False,
+                can_send_reset=True,
+                can_remove=True,
+            )
+        ]
+    )
+
+    base = f"/admin/resellers/{RESELLER_ID}/users/reseller_user/{principal_id}"
+    assert f'action="{base}/reset-password"' in html
+    assert "Send reset link" in html
+    assert f'action="{base}/remove"' in html
+    assert "Remove user" in html
+    assert "Current reseller sessions will end" in html
+    assert "identity and audit history are retained" in html
 
 
 def test_first_class_reseller_invite_does_not_offer_subscriber_roles() -> None:

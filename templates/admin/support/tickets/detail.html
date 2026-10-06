@@ -50,6 +50,10 @@
     </div>
     {% endif %}
 
+    {% if custom_field_values %}
+    {% include "admin/customers/_custom_fields.html" %}
+    {% endif %}
+
     <div class="grid gap-6 xl:grid-cols-12">
         <div class="space-y-6 xl:col-span-8">
             {% call support_card(title='Description', subtitle='Issue context and ticket-level files.', icon='<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h6m-6 4h10M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>') %}
@@ -361,6 +365,18 @@
                 <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Subscriber</dt><dd class="break-all text-right">{{ subscriber_lookup.get(ticket.subscriber_id|string, ticket.subscriber_id or '-') if subscriber_lookup is defined else (ticket.subscriber_id or '-') }}</dd></div>
             </dl>
             {% endcall %}
+
+            {% if ticket_linked_pause %}
+            {% call support_card(title='Linked service pause', subtitle='Read-only SLA consequence and resume eligibility.') %}
+            <dl class="space-y-2 text-xs">
+                <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Subscription</dt><dd class="break-all text-right"><a href="/admin/catalog/subscriptions/{{ ticket_linked_pause.subscription_id }}" class="text-emerald-700 hover:underline dark:text-emerald-400">{{ ticket_linked_pause.subscription_id }}</a></dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Service status</dt><dd class="text-right font-semibold text-slate-800 dark:text-slate-100">{{ ticket_linked_pause.subscription_status | replace('_', ' ') | title }}</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Pause status</dt><dd class="text-right text-slate-800 dark:text-slate-100">{{ ticket_linked_pause.episode_status | replace('_', ' ') | title }}</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Effective</dt><dd class="text-right text-slate-800 dark:text-slate-100">{{ ticket_linked_pause.effective_at | app_datetime('%Y-%m-%d %H:%M:%S', '-') }}</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-slate-500 dark:text-slate-400">Manual resume</dt><dd class="text-right text-slate-800 dark:text-slate-100">{{ 'Eligible' if ticket_linked_pause.resume_eligible else 'Not eligible' }}</dd></div>
+            </dl>
+            {% endcall %}
+            {% endif %}
 
             {% call support_card(title='Related Outage / Links', subtitle='Ticket relationships and outage references.') %}
             {% if ticket_links %}

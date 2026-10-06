@@ -90,6 +90,7 @@ DEFAULT_PERMISSIONS = [
     ("system:write", "Manage system administration resources"),
     ("notification:read", "View notification templates, queue, and history"),
     ("notification:write", "Manage notification templates and delivery"),
+    ("support:ticket_service_pause:resume", "Resume a ticket-linked service pause"),
     (
         "communications:customer:send",
         "Send customer notifications to selected customer scopes",
@@ -193,6 +194,10 @@ DEFAULT_PERMISSIONS = [
     ("catalog:offer:write", "Manage catalog offers"),
     # Subscriptions
     ("subscription:read", "View subscriptions"),
+    (
+        "subscription:test_connection",
+        "Temporarily enable subscription connectivity testing",
+    ),
     ("subscription:create", "Create subscriptions"),
     ("subscription:update", "Update subscriptions"),
     (
@@ -572,6 +577,7 @@ ROLE_PERMISSIONS = {
         "reports:support:read",
     ],
     "customer_experience_manager": [
+        "subscription:test_connection",
         "customer:read",
         "reseller:read",
         "support:ticket:read",
@@ -582,6 +588,7 @@ ROLE_PERMISSIONS = {
         "reports:support:read",
     ],
     "finance_manager": [
+        "subscription:test_connection",
         "billing:invoice:read",
         "billing:invoice:create",
         "billing:invoice:update",

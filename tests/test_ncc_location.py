@@ -83,6 +83,12 @@ def test_lgas_for_state_is_empty_for_an_unknown_state():
             "municipal area council",
             "Municipal Area Council",
         ),
+        (
+            "Federal Capital Territory (FCT) - Abuja",
+            "Abuja Municipal Area Council",
+            "Municipal Area Council",
+        ),
+        ("FCT", "AMAC", "Municipal Area Council"),
     ],
 )
 def test_canonical_lga_canonicalises_a_captured_lga(state, captured, expected):
@@ -98,6 +104,8 @@ def test_canonical_lga_canonicalises_a_captured_lga(state, captured, expected):
         ("Atlantis", "Ikeja"),  # unknown state
         ("LAGOS", ""),
         ("LAGOS", "n/a"),
+        ("LAGOS", "Abuja Municipal Area Council"),
+        ("LAGOS", "AMAC"),
     ],
 )
 def test_unknown_lga_is_rejected(state, captured):

@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import get_type_hints
 from uuid import uuid4
 
+import pytest
+from fastapi import Request
 from fastapi.routing import APIRoute
 
 from app.models.network import FiberSegment, FiberSegmentType, FiberTerminationPoint
@@ -19,7 +21,7 @@ from app.web.templates import templates
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REVIEWED_BASE_MAP_NORMALIZED_SHA256 = (
-    "a2ca0a8d108ded394e93d7f3349caede0680c7e96f1f6e0823cdc5051f6ab2fc"
+    "09b2f0d7bf138336dcbb4097bed022f66595e07f321e07996ba71fbbaa55b14f"
 )
 
 
@@ -103,11 +105,87 @@ def test_v2_route_is_isolated_and_uses_the_original_map_permission():
     )
 
 
+@pytest.mark.parametrize(
+    "endpoint_name", ("comprehensive_network_map", "comprehensive_network_map_v2")
+)
+@pytest.mark.parametrize("transfer_allowed", (True, False))
+def test_map_pages_render_permission_scoped_transfer_controls(
+    db_session, monkeypatch, endpoint_name, transfer_allowed
+):
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/admin/network/map-v2",
+            "query_string": b"",
+            "headers": [],
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+    )
+    monkeypatch.setattr(
+        web_network,
+        "_base_context",
+        lambda request, db, active_page: {
+            "request": request,
+            "active_page": active_page,
+        },
+    )
+    monkeypatch.setattr(
+        web_network, "has_permission", lambda auth, db, permission: transfer_allowed
+    )
+    response = getattr(web_network, endpoint_name)(request, db=db_session, auth={})
+    assert response.status_code == 200
+    assert (b'id="btn-import-kmz"' in response.body) is transfer_allowed
+    assert (b'id="btn-export-kmz"' in response.body) is transfer_allowed
+    assert response.context["network_map_transfer"]["can_propose"] is transfer_allowed
+
+
 def test_network_map_v2_extends_the_reviewed_base_template():
     original = (PROJECT_ROOT / "templates/admin/network/map.html").read_bytes()
     normalized = original.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     assert hashlib.sha256(normalized).hexdigest() == REVIEWED_BASE_MAP_NORMALIZED_SHA256
+
+
+def test_network_map_import_help_explains_staging_and_supported_kml_types():
+    template = (PROJECT_ROOT / "templates/admin/network/map.html").read_text(
+        encoding="utf-8"
+    )
+    sample = (PROJECT_ROOT / "static/samples/network-map-import-sample.kml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "No asset ID or type is required just to stage geometry" in template
+    assert "Staging never changes the live map" in template
+    assert "NetworkLinks are not expanded" in template
+    assert 'href="/static/samples/network-map-import-sample.kml"' in template
+    assert "dotmac_asset_type" in sample
+    assert "LineString" in sample
+    assert "Point" in sample
+
+
+def test_network_map_import_exposes_audited_classification_and_proposal_handoff():
+    template = (PROJECT_ROOT / "templates/admin/network/map.html").read_text(
+        encoding="utf-8"
+    )
+    transfer = (PROJECT_ROOT / "static/js/admin/network_map_transfer.js").read_text(
+        encoding="utf-8"
+    )
+    route = next(
+        item
+        for item in web_network.router.routes
+        if isinstance(item, APIRoute)
+        and item.path == "/network/map/imports/{batch_id}/classifications"
+    )
+
+    assert "network-map-import-save-classifications" in template
+    assert "network-map-import-apply" in template
+    assert "Classification review recorded" in transfer
+    assert "proposal_eligibility === 'eligible'" in transfer
+    assert "network/map-v2/proposals" in transfer
+    assert "POST" in route.methods
 
 
 def test_nearby_unrelated_endpoints_are_not_inferred_as_connected():

@@ -8,7 +8,10 @@
 
 Which channels a customer notification goes out on is decided in exactly one
 place. Callers state *intent* — template code, event type, category — plus their
-own fallback, and the policy answers with an ordered channel tuple.
+own fallback, and the policy answers with an ordered channel tuple. Manual
+customer-page sends use the selected template's persisted purpose as their
+account-status policy category; this selects an existing category and does not
+bypass the status policy. Automated event categories remain event-owned.
 
 A feature area must not carry its own "delivery channel" setting. Two settings
 that both claim to pick a channel cannot be reconciled, and in practice one of

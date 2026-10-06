@@ -502,6 +502,7 @@ def _eligible_notification_query(
 def _empty_delivery_stats(*, expired: int = 0) -> dict[str, int]:
     return {
         "delivered": 0,
+        "submitted": 0,
         "retried": 0,
         "failed": 0,
         "expired": expired,
@@ -547,6 +548,7 @@ def _deliver_notification_queue_stats(
     )
     stats = _empty_delivery_stats(expired=expired)
     delivered = stats["delivered"]
+    submitted = stats["submitted"]
     retried = stats["retried"]
     failed = stats["failed"]
     reclaimed = stats["reclaimed"]
@@ -612,6 +614,12 @@ def _deliver_notification_queue_stats(
                 notification.retry_count,
                 max_retries,
             )
+        # The queue owner retains its row lock while the payment owner checks
+        # every covered source and rebuilds only from still-eligible content.
+        from app.services.payment_email_episodes import prepare_claimed_payment_email
+
+        prepare_claimed_payment_email(db, notification)
+
         # The consent gate. This is the ONLY place all four transports are
         # called, so it is the only place the check is guaranteed to run --
         # putting it in each caller means the one that forgets is the one that
@@ -619,11 +627,14 @@ def _deliver_notification_queue_stats(
         #
         # A marketing suppression stops marketing and nothing else: an
         # unsubscribe must never stop an invoice. `may_send` owns that rule.
-        if not communication_eligibility.may_send(
-            db,
-            channel=notification.channel,
-            address=notification.recipient,
-            category=notification.category,
+        if (
+            notification.status is NotificationStatus.canceled
+            or not communication_eligibility.may_send(
+                db,
+                channel=notification.channel,
+                address=notification.recipient,
+                category=notification.category,
+            )
         ):
             notification.status = NotificationStatus.canceled
             notification.last_error = "suppressed"
@@ -1439,10 +1450,16 @@ def _deliver_notification_queue_stats(
                 notification.last_error = str(exc)
 
         if success:
-            notification.status = NotificationStatus.delivered
-            notification.sent_at = datetime.now(UTC)
-            notification.last_error = None
-            delivered += 1
+            if (
+                notification.channel == NotificationChannel.email
+                and notification.status == NotificationStatus.submitted
+            ):
+                submitted += 1
+            else:
+                notification.status = NotificationStatus.delivered
+                notification.sent_at = datetime.now(UTC)
+                notification.last_error = None
+                delivered += 1
         else:
             notification.retry_count = (notification.retry_count or 0) + 1
             if notification.retry_count >= max_retries:
@@ -1501,6 +1518,7 @@ def _deliver_notification_queue_stats(
         )
     delivery_stats: dict[str, int] = {
         "delivered": delivered,
+        "submitted": submitted,
         "retried": retried,
         "failed": failed,
         "expired": expired,
@@ -1606,6 +1624,44 @@ def _notification_queue_operational_event(
             "talk_reconciled": result.get("talk_reconciled", 0),
         },
     )
+
+
+@celery_app.task(name="app.tasks.notifications.materialize_customer_bulk_message")
+def materialize_customer_bulk_message(payload_json: str) -> dict[str, object]:
+    """Materialize a validated admin bulk-message request outside HTTP."""
+
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid customer bulk-message task payload") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Customer bulk-message task payload must be an object")
+
+    from app.services import web_customer_actions
+    from app.services.queue_adapter import enqueue_task
+
+    with db_session_adapter.owner_command_session() as session:
+        result = web_customer_actions.queue_bulk_message_from_payload(
+            session,
+            payload,
+        )
+
+    dispatch = enqueue_task(
+        "app.tasks.notifications.deliver_notification_queue",
+        queue="notifications",
+        correlation_id=str(result.get("impact_token") or "") or None,
+        source="admin_customers_bulk_send_materialized",
+    )
+    return {
+        "matched_count": int(str(result.get("matched_count") or 0)),
+        "created_count": int(str(result.get("created_count") or 0)),
+        "queued_count": int(str(result.get("queued_count") or 0)),
+        "suppressed_count": int(str(result.get("suppressed_count") or 0)),
+        "skipped_count": int(str(result.get("skipped_count") or 0)),
+        "delivery_dispatch_queued": dispatch.queued,
+        "delivery_dispatch_task_id": dispatch.task_id,
+        "delivery_dispatch_error": dispatch.error,
+    }
 
 
 @celery_app.task(name="app.tasks.notifications.deliver_notification_queue")

@@ -3499,6 +3499,19 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "GET /api/v1/custom-fields/{target_type}/{target_id}": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key",
+    "path:target_id!",
+    "path:target_type!"
+   ],
+   "request": null,
+   "responses": {
+    "200": "cec3259880c5",
+    "422": "a11c9d9b2af8"
+   }
+  },
   "GET /api/v1/customer-experience/handoffs": {
    "params": [
     "header:authorization",
@@ -6046,6 +6059,19 @@
    "request": null,
    "responses": {
     "200": "8bd97beb0d9c",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "GET /api/v1/me/subscriptions/{subscription_id}/relocation-plans": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key",
+    "path:subscription_id!",
+    "query:access_type!"
+   ],
+   "request": null,
+   "responses": {
+    "200": "f22cf13c6355",
     "422": "a11c9d9b2af8"
    }
   },
@@ -15819,6 +15845,18 @@
     "422": "a11c9d9b2af8"
    }
   },
+  "POST /api/v1/me/quotes/{quote_id}/relocation/prepare": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key",
+    "path:quote_id!"
+   ],
+   "request": null,
+   "responses": {
+    "200": "2a62a7c22e5e",
+    "422": "a11c9d9b2af8"
+   }
+  },
   "POST /api/v1/me/referrals": {
    "params": [
     "header:authorization",
@@ -15945,6 +15983,18 @@
    "request": "3d4b4b44a107",
    "responses": {
     "200": "5df6252c9a40",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "POST /api/v1/me/topup/intents/{intent_id}/cancel": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key",
+    "path:intent_id!"
+   ],
+   "request": null,
+   "responses": {
+    "200": "ef3baaf811cd",
     "422": "a11c9d9b2af8"
    }
   },
@@ -16909,6 +16959,28 @@
    "request": "89a61596d85a",
    "responses": {
     "201": "f693da784b68",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "POST /api/v1/payment-allocation-reversals/confirm": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "7a9f97898313",
+   "responses": {
+    "200": "2d48d08f916e",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "POST /api/v1/payment-allocation-reversals/preview": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key"
+   ],
+   "request": "2a74c4b6ab9a",
+   "responses": {
+    "200": "d57139ee5ee1",
     "422": "a11c9d9b2af8"
    }
   },
@@ -18761,13 +18833,6 @@
     "422": "a11c9d9b2af8"
    }
   },
-  "POST /api/v1/webhooks/crm": {
-   "params": [],
-   "request": null,
-   "responses": {
-    "200": "81656e6decf1"
-   }
-  },
   "POST /api/v1/webhooks/crm/customers": {
    "params": [],
    "request": null,
@@ -18834,6 +18899,13 @@
    "request": null,
    "responses": {
     "200": "ea0d95a95ab9"
+   }
+  },
+  "POST /api/v1/webhooks/zeptomail/delivery": {
+   "params": [],
+   "request": null,
+   "responses": {
+    "200": "d17815b9f4dc"
    }
   },
   "POST /api/v1/wireguard-provision/register": {
@@ -18935,6 +19007,19 @@
    "request": "9083bd6264bd",
    "responses": {
     "200": "8ccc2e7d683c",
+    "422": "a11c9d9b2af8"
+   }
+  },
+  "PUT /api/v1/custom-fields/{target_type}/{target_id}": {
+   "params": [
+    "header:authorization",
+    "header:x-api-key",
+    "path:target_id!",
+    "path:target_type!"
+   ],
+   "request": "8db3a6997209",
+   "responses": {
+    "200": "bacbad5c3274",
     "422": "a11c9d9b2af8"
    }
   },
@@ -19299,9 +19384,9 @@
   "AccountingStatus": "92c82211b61f",
   "ActiveAddon": "3e485cc4f158",
   "AddOnCreate": "b547fc466c9e",
-  "AddOnPriceCreate": "2496b149f761",
-  "AddOnPriceRead": "ac218a9f96a6",
-  "AddOnPriceUpdate": "ef2e06a14186",
+  "AddOnPriceCreate": "bc486142ed58",
+  "AddOnPriceRead": "73c9a896b72e",
+  "AddOnPriceUpdate": "0cfd74bf0144",
   "AddOnRead": "f23ed9c3dada",
   "AddOnType": "a1cda8a9a5c3",
   "AddOnUpdate": "b06fa8669b9b",
@@ -19367,7 +19452,7 @@
   "BankAccountRead": "9a9818c5b222",
   "BankAccountType": "6e5f8b5516f2",
   "BankAccountUpdate": "9b4a7f6b07e0",
-  "BankTransferAccount": "a2e9dc6a108e",
+  "BankTransferAccount": "ee98fb65ba6a",
   "BillingAccountCreate": "dcfcb9a07aa6",
   "BillingAccountCreditAllocationConfirm": "dd5cac4fa213",
   "BillingAccountCreditAllocationPreviewRead": "00d620f43bcf",
@@ -19528,6 +19613,10 @@
   "CreditNoteVoidPreviewRead": "d5406fcd111e",
   "CreditNoteVoidRequest": "7591fdab7cef",
   "CurrencySettingsResponse": "914ef6200eb8",
+  "CustomFieldValueItem": "376cacc9d5de",
+  "CustomFieldValueList": "77ee77d65990",
+  "CustomFieldValueResult": "95a711d8d526",
+  "CustomFieldValueWrite": "5f5f664acd5f",
   "CustomerActionKey": "cfaea899bd65",
   "CustomerDefaultsResponse": "c0892eba5f8c",
   "CustomerDeviceCommandKind": "cb81f2ec8d71",
@@ -19603,7 +19692,7 @@
   "FdhCabinetUpdate": "a8c79b38e60a",
   "FiberCableType": "929ddf0d24c3",
   "FiberCoverageResult": "8b020a864fdf",
-  "FiberCoverageStatus": "170fd73249f0",
+  "FiberCoverageStatus": "2ea647011755",
   "FiberEndpointRef": "8e2b70ce82d1",
   "FiberEndpointType": "7331104f0c8f",
   "FiberFieldVerificationJobPlanCommandRead": "25171123b62d",
@@ -19730,8 +19819,8 @@
   "FieldMaterialRequestCancel": "00daeee69caa",
   "FieldMaterialRequestCreate": "beb591240e6a",
   "FieldMaterialRequestItemCreate": "04759e76cb22",
-  "FieldMaterialRequestItemRead": "1e218709f934",
-  "FieldMaterialRequestRead": "881af457f920",
+  "FieldMaterialRequestItemRead": "d04dea5dd7cd",
+  "FieldMaterialRequestRead": "6aad073795fb",
   "FieldMaterialRequestSubmit": "0bac3c573aa7",
   "FieldMeResponse": "92ccd05b3f23",
   "FieldMovementRead": "e6afbc3e60fc",
@@ -19918,6 +20007,7 @@
   "IpPoolCreate": "e65b5896ac52",
   "IpPoolRead": "6feed1c5aefd",
   "IpPoolUpdate": "21a949c9cfb8",
+  "JsonValue": "44136fa355b3",
   "JumpHostCreate": "1e899b5ee0b9",
   "JumpHostRead": "7deddb7a22f2",
   "JumpHostUpdate": "044c2505f8b9",
@@ -19930,7 +20020,7 @@
   "KanbanMoveRequest": "ba9dd0df6436",
   "LeadAccountConversionRead": "94d5d95d495f",
   "LeadAccountConversionRequest": "292359031b02",
-  "LeadCaptureMethod": "33e99952a65e",
+  "LeadCaptureMethod": "3fb30c871bc0",
   "LeadCapturePartyCreate": "439ed8f1b382",
   "LeadCaptureRead": "f7cb35f6879c",
   "LeadCaptureRequest": "22e37bb92c10",
@@ -20193,10 +20283,11 @@
   "NotificationDeliveryRead": "35de3a12d809",
   "NotificationDeliveryUpdate": "6e0eaee67ab3",
   "NotificationRead": "c4d3c42ac632",
-  "NotificationStatus": "f5434418b4b8",
-  "NotificationTemplateCreate": "6c702deb5b87",
-  "NotificationTemplateRead": "559866507b94",
-  "NotificationTemplateUpdate": "05eed01689f4",
+  "NotificationStatus": "0ff606574696",
+  "NotificationTemplateCreate": "8f4ab3aec626",
+  "NotificationTemplatePurpose": "d5e4a938f84f",
+  "NotificationTemplateRead": "724a2ad2492a",
+  "NotificationTemplateUpdate": "dd50d0ff1251",
   "NotificationUpdate": "5813bf32590a",
   "ODNEndpointType": "4848866856f3",
   "OLTDeviceCreate": "3fbf11d6798d",
@@ -20205,9 +20296,9 @@
   "ObservedFee": "a4bc2b958df6",
   "ObservedMoney": "07cb484fbebf",
   "OfferAddOnRead": "45dfa9f2b19f",
-  "OfferPriceCreate": "1b52c00cb824",
-  "OfferPriceRead": "d19faa8f8e42",
-  "OfferPriceUpdate": "5333e830f8d0",
+  "OfferPriceCreate": "6ed5a7a94ca3",
+  "OfferPriceRead": "d81f02802d47",
+  "OfferPriceUpdate": "636cdd84ef75",
   "OfferRadiusProfileCreate": "52ff5987fd46",
   "OfferRadiusProfileLinkRead": "3a4613e75e77",
   "OfferRadiusProfileRead": "a9cd7edb58e4",
@@ -20218,9 +20309,9 @@
   "OfferValidationRequest": "ca191dd147a7",
   "OfferValidationResponse": "c123f21da732",
   "OfferVersionCreate": "477cd5d5da42",
-  "OfferVersionPriceCreate": "2e5db28ea0fc",
-  "OfferVersionPriceRead": "e2d4b1465627",
-  "OfferVersionPriceUpdate": "76a6a7553426",
+  "OfferVersionPriceCreate": "52ac12d59207",
+  "OfferVersionPriceRead": "d70476eeba16",
+  "OfferVersionPriceUpdate": "2ad65d5ef6ee",
   "OfferVersionRead": "25b4f9e6e327",
   "OfferVersionUpdate": "11490ba66298",
   "OidcMobileExchangeRequest": "cf1ec8732fcf",
@@ -20301,6 +20392,10 @@
   "PaymentAllocationPreviewRead": "378a3d01d4e2",
   "PaymentAllocationPreviewRequest": "a36f13eb689e",
   "PaymentAllocationRead": "e66bef702266",
+  "PaymentAllocationReversalConfirm": "cb778e689ea6",
+  "PaymentAllocationReversalPreviewRead": "554fed822ce2",
+  "PaymentAllocationReversalPreviewRequest": "3ddf156d9e29",
+  "PaymentAllocationReversalRead": "898daeca0670",
   "PaymentChannelAccountCreate": "2a5c5725785b",
   "PaymentChannelAccountRead": "278a859a05dd",
   "PaymentChannelAccountUpdate": "191f2e0e5d23",
@@ -20312,7 +20407,7 @@
   "PaymentCreationAllocationEffectRead": "0a67d93a8b24",
   "PaymentCreationPreviewRead": "b79bae168af8",
   "PaymentInitiateRequest": "e559675b8226",
-  "PaymentInitiateResponse": "a174d4f35569",
+  "PaymentInitiateResponse": "ec8f57961cbd",
   "PaymentMethodCreate": "2bfc785da28d",
   "PaymentMethodRead": "79a083174c04",
   "PaymentMethodType": "b0c210102540",
@@ -20358,7 +20453,7 @@
   "PipelineStageUpdate": "0229c1f4ad1f",
   "PipelineUpdate": "c8204907f5dd",
   "PlanCategory": "2dda6b51303f",
-  "PlanChangePageResponse": "2068e44dbc6f",
+  "PlanChangePageResponse": "be87079eef6b",
   "PlanChangeSubmitRequest": "b34494ee5b1c",
   "PlanChangeSubmitResponse": "75b8e6d7a4a9",
   "PlanOfferSummary": "8169cadb9660",
@@ -20419,7 +20514,7 @@
   "ProjectTaskUpdate": "be5ae31b8297",
   "ProjectType": "a29853f91876",
   "ProjectUpdate": "53c319e44d41",
-  "ProofReview": "419d3ee08c88",
+  "ProofReview": "f8be89429b4e",
   "ProrationPolicy": "d107683093f4",
   "ProviderEventOrderBy": "92e8a0fc9bbe",
   "ProviderEventOrderDirection": "3f8ccdc43687",
@@ -20460,13 +20555,13 @@
   "QuoteDepositVerifyResponse": "5300be93edda",
   "QuoteDiscountType": "33882226f0db",
   "QuoteFeasibility": "76535422c34b",
-  "QuoteItem": "d8b460559e46",
+  "QuoteItem": "81f0accd5304",
   "QuoteLineItem": "b665cdd08dac",
   "QuoteLineItemCreate": "ef183023a2dc",
   "QuoteLineItemRead": "4b18876d8e37",
   "QuoteLineItemUpdate": "0100c6777de1",
   "QuoteRead": "7ab8c1255ca6",
-  "QuoteRequestCreate": "162e1e5d1fd3",
+  "QuoteRequestCreate": "366a6373d9b0",
   "QuoteStatus": "62c779ee038e",
   "QuoteUpdate": "d59ce59d151b",
   "RadiusAccountingSessionCreate": "bd7f8b12df68",
@@ -20500,6 +20595,7 @@
   "RegionZoneCreate": "cceb7e1541b2",
   "RegionZoneRead": "e15adfa11f2a",
   "RegionZoneUpdate": "468a00a54a8c",
+  "RelocationQuotePrepareResponse": "c250d0421380",
   "ResellerCreate": "cb6783563989",
   "ResellerProfileUpdate": "9021c76df1e0",
   "ResellerQuoteRequest": "5ab28ff46b5a",
@@ -20551,6 +20647,7 @@
   "ServiceQualificationRead": "d37809c76348",
   "ServiceQualificationRequest": "80672e742fbe",
   "ServiceRequestCreate": "0fdc40f240eb",
+  "ServiceRequestOption": "4fbffcc12b4f",
   "ServiceRequestStatusUpdate": "6b8d192fc527",
   "ServiceState": "8dacc76c5ad7",
   "ServiceStateTransitionCreate": "1cf319d3093d",
@@ -20630,7 +20727,7 @@
   "SubscriberRoleCreate": "14354d9a4521",
   "SubscriberRoleRead": "ce3c778333ed",
   "SubscriberRoleUpdate": "fb77a484b0b4",
-  "SubscriberStatus": "04f90e59577f",
+  "SubscriberStatus": "30943a16cf63",
   "SubscriberSyncRead": "18be3aa27af4",
   "SubscriberUpdate": "4e2c01041b7a",
   "SubscriptionAddOnCreate": "254584caf81b",
@@ -20639,8 +20736,8 @@
   "SubscriptionBillingTreatment": "6f669e9e59a6",
   "SubscriptionCreate": "74d292a7c6ce",
   "SubscriptionDefaultsResponse": "3e153d9f51b0",
-  "SubscriptionRead": "fc8ee2012673",
-  "SubscriptionStatus": "55da6209c756",
+  "SubscriptionRead": "e2fea35c57bc",
+  "SubscriptionStatus": "20a80d40cdef",
   "SubscriptionTechnicalUpdate": "cf9d7e2a90c6",
   "SuppressionCreate": "875f5ad57243",
   "SuppressionReason": "e3c4e28c7028",
@@ -20701,10 +20798,12 @@
   "TicketWorkOrderIssueRequest": "4c4c1217d48d",
   "TokenResponse": "b55a164b5612",
   "TopUserEntry": "a8f50c81e200",
+  "TopupActiveRequestResponse": "4e23fb9c979e",
+  "TopupCancelResponse": "62e318933b22",
   "TopupEligibleInvoice": "f867f52b262b",
   "TopupInitiateRequest": "7a3f8d729837",
   "TopupInitiateResponse": "7c8ce7063dd5",
-  "TopupPageResponse": "70b5f0de03bc",
+  "TopupPageResponse": "8376632762b8",
   "TopupPreviewInvoiceApplication": "62758d89ad99",
   "TopupPreviewRequest": "0cb61a5ccab3",
   "TopupPreviewResponse": "9443f05ef4e7",

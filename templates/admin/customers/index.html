@@ -612,6 +612,7 @@
                         <div class="mt-2 space-y-2">
                             <p class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedTemplate().label || selectedTemplate().name"></p>
                             <p class="text-xs text-slate-500 dark:text-slate-400" x-text="selectedTemplate().code"></p>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 capitalize" x-text="'Purpose: ' + (selectedTemplate().purpose || 'general').replace('_', ' ')"></p>
                             <p class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300" x-show="selectedTemplate().subject" x-text="selectedTemplate().subject"></p>
                         </div>
                     </template>
@@ -1946,6 +1947,14 @@ function customersPage(bulkContract) {
                         this.applySelectionToDom();
                     } else {
                         this.clearSelection();
+                    }
+                    if (result.accepted) {
+                        const matched = result.matched_count || 0;
+                        const planned = result.planned_queued_count || 0;
+                        const skipped = result.skipped_count || 0;
+                        const suppressed = result.planned_suppressed_count || 0;
+                        alert(`Bulk send accepted for ${matched} customer(s). ${planned} delivery request(s) are being queued in the background.${skipped ? ` ${skipped} skipped due to missing contact details.` : ''}${suppressed ? ` ${suppressed} suppressed by preferences, dedupe, or template conditions.` : ''}`);
+                        return;
                     }
                     const dispatch = result.delivery_dispatch || {};
                     const deliveryMessage = dispatch.queued

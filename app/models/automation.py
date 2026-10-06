@@ -48,6 +48,12 @@ class AutomationStepStatus(StrEnum):
     blocked = "blocked"
 
 
+class AutomationRunRetryStatus(StrEnum):
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+
+
 class AutomationRule(Base):
     __tablename__ = "automation_rules"
     __table_args__ = (
@@ -77,6 +83,7 @@ class AutomationRule(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     trigger_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    trigger_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default=AutomationRuleStatus.draft.value
     )
@@ -131,12 +138,16 @@ class AutomationRuleVersion(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     trigger_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    conditions: Mapped[list[dict[str, object]]] = mapped_column(
+    trigger_schema_versions: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    conditions: Mapped[list[dict[str, object]] | dict[str, object]] = mapped_column(
         JSONB, nullable=False, default=list
     )
     actions: Mapped[list[dict[str, object]]] = mapped_column(
         JSONB, nullable=False, default=list
     )
+    schedule: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -144,6 +155,45 @@ class AutomationRuleVersion(Base):
     )
     published_by: Mapped[str | None] = mapped_column(String(255))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AutomationScheduledRun(Base):
+    """Idempotency ledger for one scheduled rule/version time slot."""
+
+    __tablename__ = "automation_scheduled_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "rule_version_id",
+            "slot_key",
+            name="uq_automation_scheduled_runs_version_slot",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "rule_id"],
+            ["automation_rules.tenant_id", "automation_rules.id"],
+            ondelete="CASCADE",
+            name="fk_automation_scheduled_runs_rule_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "rule_version_id"],
+            ["automation_rule_versions.tenant_id", "automation_rule_versions.id"],
+            ondelete="CASCADE",
+            name="fk_automation_scheduled_runs_version_tenant",
+        ),
+        Index("ix_automation_scheduled_runs_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    rule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    rule_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    slot_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
 
 
 class AutomationRun(Base):
@@ -188,6 +238,7 @@ class AutomationRun(Base):
     matched: Mapped[bool | None] = mapped_column(Boolean)
     payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(160))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -235,8 +286,54 @@ class AutomationStepRun(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(160))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+
+
+class AutomationRunRetry(Base):
+    """Actor-attributed history for administrator initiated run retries."""
+
+    __tablename__ = "automation_run_retries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_automation_run_retries_tenant_id"),
+        UniqueConstraint(
+            "run_id", "attempt_number", name="uq_automation_run_retries_run_attempt"
+        ),
+        UniqueConstraint("command_id", name="uq_automation_run_retries_command"),
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["automation_runs.tenant_id", "automation_runs.id"],
+            ondelete="CASCADE",
+            name="fk_automation_run_retries_run_tenant",
+        ),
+        CheckConstraint("attempt_number > 0", name="ck_automation_run_retries_attempt"),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')",
+            name="ck_automation_run_retries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default=AutomationRunRetryStatus.running.value
+    )
+    error_code: Mapped[str | None] = mapped_column(String(160))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    resulting_run_status: Mapped[str | None] = mapped_column(String(24))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

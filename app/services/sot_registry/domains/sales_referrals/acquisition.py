@@ -492,8 +492,8 @@ SERVICES: tuple[SOTService, ...] = (
         module="app.services.sales.lead_intake",
         owns=(
             "versioned lead-intake template lifecycle",
-            "sales lead eligibility and invitation lifecycle",
-            "atomic Inbox form to Party and Lead conversion",
+            "classified Inbox sales candidate materialization and invitation lifecycle",
+            "optional Inbox form enrichment and legacy form conversion",
         ),
         depends_on=(
             "ai.intake",
@@ -515,7 +515,9 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "The general ai.intake owner classifies and routes every eligible "
             "customer message. Only its final high-confidence sales result is "
-            "handed to this owner for a single form invitation and Party-first Lead."
+            "handed to this owner through a durable event. This owner atomically "
+            "creates and links the provisional Party-first Lead whether or not a "
+            "form is configured or delivered. A form is optional profile enrichment."
         ),
         contract=ServiceContract(
             concerns=(
@@ -528,7 +530,10 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 ConcernContract(
-                    name="sales lead eligibility and invitation lifecycle",
+                    name=(
+                        "classified Inbox sales candidate materialization and "
+                        "invitation lifecycle"
+                    ),
                     role=OwnerRole.APPLICATION_COORDINATOR,
                     input_names=(
                         "canonical unknown Inbox conversation state",
@@ -538,7 +543,7 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 ConcernContract(
-                    name="atomic Inbox form to Party and Lead conversion",
+                    name="optional Inbox form enrichment and legacy form conversion",
                     role=OwnerRole.APPLICATION_COORDINATOR,
                     input_names=(
                         "validated public Lead intake submission",
@@ -573,7 +578,12 @@ SERVICES: tuple[SOTService, ...] = (
                     name="shared customer intake sales handoff",
                     owner="ai.intake",
                     kind=AuthorityKind.DERIVED_PROJECTION,
-                    source="classified new-connection or coverage intent, customer type and message identity",
+                    source=(
+                        "durable ai.intake_lead_candidate_classified event carrying "
+                        "a final new-connection or coverage classification, customer "
+                        "type, operator tenant identity, message identity, and "
+                        "allowlisted Meta attribution"
+                    ),
                 ),
                 AuthorityInput(
                     name="explicit Lead intake rollout configuration",
@@ -615,14 +625,21 @@ SERVICES: tuple[SOTService, ...] = (
                     name="canonical Lead lifecycle state",
                     owner="sales.lead_lifecycle",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                    source="Party-first Lead and immutable Inbox-form origin",
+                    source=(
+                        "Party-first Lead and immutable Inbox-classification or "
+                        "legacy Inbox-form origin"
+                    ),
                 ),
             ),
             transaction=TransactionContract(
                 mode=TransactionMode.COORDINATOR_MANAGED,
                 boundary="Each mutation enters execute_owner_command once and commits or rolls back atomically.",
                 locking="Templates, conversation, message, invitation, participant and actor are locked before mutation.",
-                idempotency="One assessment per message, one automatic invite per conversation and one completion per token.",
+                idempotency=(
+                    "One deterministic classified Lead per conversation, one "
+                    "assessment per message, one automatic invite per conversation "
+                    "and one completion per token."
+                ),
                 retries="Adapters retry only the complete owner command after rollback.",
             ),
             errors=ErrorContract(
@@ -642,28 +659,42 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.lead_intake.address_outside_nigeria",
                     "sales.lead_intake.state_unresolved",
                     "sales.lead_intake.privacy_acknowledgement_required",
+                    "sales.lead_intake.lead_endpoint_binding_missing",
+                    "sales.lead_intake.provisional_lead_incomplete",
+                    "sales.lead_intake.provisional_representative_missing",
+                    "sales.lead_intake.provisional_contact_missing",
+                    "sales.lead_intake.provisional_contact_mismatch",
                 ),
                 mapping_owner="Inbox, Sales admin and public Lead intake adapters",
                 fail_closed_on=(
                     "known or ambiguous customer identity",
                     "unsupported channel or missing account scope",
-                    "disabled rollout, missing templates or low confidence",
+                    "low-confidence or ambiguous classification",
                     "invalid token or service address",
                 ),
             ),
             events=EventContract(
-                event_types=("lead.created",),
+                event_types=("lead.created", "lead.updated"),
                 schema_version=1,
                 delivery_owner="events.dispatcher",
                 compatibility="No form values, endpoints or tokens are emitted.",
-                replay="Invitation completion and immutable origin reproduce the outcome.",
+                replay=(
+                    "The deterministic conversation Lead id, active link, assessment, "
+                    "invitation completion, and immutable origin reproduce the outcome."
+                ),
             ),
             migration=MigrationContract(
                 state=AuthorityMigrationState.COMPLETE,
                 old_owner="none; additive Inbox-to-Lead capability",
                 new_owner="sales.lead_intake",
-                verification="Focused template, invite, form, handoff and boundary tests.",
-                cutover_gate="Both templates are published and automatic sends are explicitly enabled.",
+                verification=(
+                    "Focused event handoff, classified Lead, optional form "
+                    "enrichment, resolution-gate, and boundary tests."
+                ),
+                cutover_gate=(
+                    "The classified-candidate event consumer and Lead-origin "
+                    "constraint are deployed before the producer is enabled."
+                ),
                 fallback_retirement="No adapter directly creates Lead, Party, invitation or routing state.",
             ),
             steward="sales operations",
@@ -844,6 +875,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.service.lead_won_transition_forbidden",
                     "sales.service.lead_origin_immutable",
                     "sales.service.converted_lead_reseller_immutable",
+                    "sales.lead_authoring.metadata_invalid",
                 ),
                 mapping_owner="admin sales Lead web adapter",
                 fail_closed_on=(
@@ -1069,6 +1101,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.quote_authoring.quote_not_found",
                     "sales.quote_authoring.submission_conflict",
                     "sales.quote_authoring.tax_rate_not_active",
+                    "sales.quote_authoring.accepted_status_controlled",
+                    "sales.quote_authoring.lines_required",
                 ),
                 mapping_owner="admin sales Quote form adapter",
                 fail_closed_on=(
@@ -1481,6 +1515,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.quote_payment_review.customer_required",
                     "sales.quote_payment_review.quote_not_found",
                     "sales.quote_payment_review.quote_status_invalid",
+                    "sales.quote_payment_review.price_required",
                     "sales.quote_payment_review.reason_invalid",
                     "sales.quote_payment_review.reason_required",
                     "sales.quote_payment_review.review_not_pending",
@@ -1539,10 +1574,13 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "This read owner resolves authorized Subscriber ownership, active "
             "Draft/Sent state, current staff approval of the exact commercial "
-            "snapshot, expiry, paid-deposit evidence, the authoritative "
-            "deposit amount, and Paystack availability. Quote email delivery "
-            "consumes the same typed query before presenting the immutable PDF "
-            "payment route; GET rendering creates no invoice or payment intent."
+            "snapshot, expiry, paid-deposit evidence from scoped structural "
+            "Invoice links, the authoritative deposit amount, and Paystack "
+            "availability. Customer quote-list reads use the typed settlement "
+            "query so payment state cannot drift from the billing ledger. Quote "
+            "email delivery consumes the same eligibility query before presenting "
+            "the immutable PDF payment route; GET rendering creates no invoice "
+            "or payment intent."
         ),
         contract=ServiceContract(
             concerns=(
@@ -1606,7 +1644,9 @@ SERVICES: tuple[SOTService, ...] = (
                 mode=TransactionMode.READ_ONLY,
                 boundary=(
                     "quote_payment_page resolves authorization, state, amount, "
-                    "settlement, and provider eligibility without writing state"
+                    "settlement, and provider eligibility; the typed settlement "
+                    "query projects paid Invoice evidence for customer Quote lists "
+                    "without writing state"
                 ),
                 locking=(
                     "The query takes no lock; the protected POST command locks and "
@@ -2318,6 +2358,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "sales.order_waiver.sales_order_not_found",
                     "sales.order_waiver.unregistered_reason_code",
                     "sales.order_waiver.waiver_already_active",
+                    "sales.orders.not_found",
+                    "sales.orders.evidence_controlled_status",
                 ),
                 mapping_owner="sales order adapters",
                 fail_closed_on=(

@@ -213,14 +213,17 @@ SERVICES: tuple[SOTService, ...] = (
             "exact settlement allocation and unallocated-credit links",
             "confirmed payment funding-change outbox event",
             "settled account-credit allocation preview and confirmation",
+            "historical prepaid debt settlement consequence classification",
             "exact invoice-credit and account-credit-consumption links",
             "native unallocated-credit reconciliation transactions",
             "historical payment settlement evidence reconciliation",
+            "reviewed historical payment-allocation consumption evidence repair",
             "payment settlement access-reconciliation handoff",
             "payment-originated ledger postings",
             "cash-first verified provider settlement evidence",
             "settlement-aware customer receipt application summary",
             "payment allocation reconciliation exception lifecycle",
+            "reviewed payment-allocation reversal",
             "payment refund eligibility and preview",
             "payment refund confirmation and exact ledger evidence",
             "payment refund idempotency and audit evidence",
@@ -1190,9 +1193,13 @@ SERVICES: tuple[SOTService, ...] = (
     SOTService(
         name="financial.historical_invoice_tax_corrections",
         module="app.services.historical_invoice_tax_corrections",
-        owns=("reviewed historical invoice tax correction coordination",),
+        owns=(
+            "reviewed historical invoice tax correction coordination",
+            "reviewed VAT correction using an existing replacement invoice",
+        ),
         depends_on=(
             "financial.account_credit_applications",
+            "financial.customer_subledger_opening_positions",
             "financial.customer_tax_policies",
             "financial.invoices",
             "financial.payments",
@@ -1201,11 +1208,15 @@ SERVICES: tuple[SOTService, ...] = (
         notes=(
             "This correction-only coordinator never edits issued invoice lines or "
             "creates a tax-only revenue charge. It binds one paid base-only invoice, "
-            "one pristine subscription draft, one voided Finance-authored VAT draft, "
-            "one succeeded native payment, and one active tax rate. Confirmation "
-            "voids and releases the incorrect invoice through financial.invoices, "
-            "settles the subscription, creates the full VAT-correct replacement, and "
-            "consumes the selected payment exactly in one transaction."
+            "one succeeded native payment, and one active tax rate. The original "
+            "command settles a separately reviewed subscription draft and constructs "
+            "a replacement. Its existing-replacement command instead validates and "
+            "reuses one VAT-inclusive Finance draft, repairs missing non-position "
+            "legacy allocation evidence through financial.payments, voids the source, "
+            "amends an approved opening through the customer-subledger opening owner "
+            "when the released allocation predates that opening, "
+            "and settles only the replacement while preserving the exact residual "
+            "customer credit in one transaction."
         ),
         contract=ServiceContract(
             concerns=(
@@ -1220,8 +1231,29 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical tax-rate evidence",
                     ),
                 ),
+                ConcernContract(
+                    name="reviewed VAT correction using an existing replacement invoice",
+                    role=OwnerRole.APPLICATION_COORDINATOR,
+                    input_names=(
+                        "reviewed existing-replacement tax correction command",
+                        "canonical source and replacement invoices",
+                        "canonical selected payment and settlement evidence",
+                        "canonical customer-subledger opening position",
+                        "canonical customer VAT policy",
+                        "canonical tax-rate evidence",
+                    ),
+                ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical customer-subledger opening position",
+                    owner="financial.customer_subledger_opening_positions",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "the exact approved opening and append-only correction required "
+                        "when a reviewed source allocation predates that opening"
+                    ),
+                ),
                 AuthorityInput(
                     name="reviewed historical tax correction command",
                     owner="financial.historical_invoice_tax_corrections",
@@ -1231,6 +1263,37 @@ SERVICES: tuple[SOTService, ...] = (
                         "evidence invoice, subscription draft, selected payment, tax "
                         "rate, issue/due instants, permission, actor, reason, preview "
                         "fingerprint, command identity, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="reviewed existing-replacement tax correction command",
+                    owner="financial.historical_invoice_tax_corrections",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed account, source invoice and line, existing VAT draft, "
+                        "payment, tax rate, issuance instants, Finance approver and "
+                        "ticket, permission, actor, preview fingerprint, command "
+                        "identity, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical source and replacement invoices",
+                    owner="financial.invoices",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "locked paid source and existing VAT-inclusive draft, active "
+                        "lines, source closure, replacement issuance, and typed "
+                        "replacement correction metadata"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical selected payment and settlement evidence",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "selected succeeded Payment, exact source allocation and "
+                        "unallocated-credit ledger rows, reconciled PaymentSettlement, "
+                        "and paired allocation-consumption evidence"
                     ),
                 ),
                 AuthorityInput(
@@ -1272,15 +1335,20 @@ SERVICES: tuple[SOTService, ...] = (
             transaction=TransactionContract(
                 mode=TransactionMode.COORDINATOR_MANAGED,
                 boundary=(
-                    "correct_historical_invoice_tax enters execute_owner_command once "
+                    "Both public correction commands each enter execute_owner_command exactly once "
                     "on a transaction-free session; invoice void/release, subscription "
-                    "issuance and allocation, replacement construction/issuance and "
-                    "allocation, typed lineage, audit, and event commit together."
+                    "issuance and allocation or existing-draft issuance, replacement "
+                    "allocation, typed lineage, audit, and event commit together. "
+                    "Historical payment settlement and non-position consumption evidence "
+                    "repair flush through financial.payments in that same transaction; "
+                    "a fingerprinted pre-opening release correction flushes through "
+                    "financial.customer_subledger_opening_positions."
                 ),
                 locking=(
                     "Locks the customer account first, then the three reviewed invoices "
                     "in UUID order, their active lines and source allocation, followed "
-                    "by the selected payment and tax rate before re-previewing."
+                    "by the selected payment, selected ledger evidence, and tax rate "
+                    "before re-previewing."
                 ),
                 idempotency=(
                     "The bounded correction key reserves one replacement invoice; the "
@@ -1289,7 +1357,8 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 retries=(
                     "Exact replay returns the recorded replacement and linked closure "
-                    "and allocations. Stale, conflicting, partial, refunded, exempt, or "
+                    "and allocations. The existing-draft path also verifies its exact "
+                    "residual credit. Stale, conflicting, partial, refunded, exempt, or "
                     "otherwise ambiguous evidence fails closed."
                 ),
             ),
@@ -1310,11 +1379,16 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.historical_invoice_tax_corrections.invoice_missing",
                     "financial.historical_invoice_tax_corrections.not_actionable",
                     "financial.historical_invoice_tax_corrections.permission_denied",
+                    "financial.historical_invoice_tax_corrections.payment_consumption_evidence_rejected",
+                    "financial.historical_invoice_tax_corrections.payment_settlement_evidence_rejected",
+                    "financial.historical_invoice_tax_corrections.preopening_release_rejected",
                     "financial.historical_invoice_tax_corrections.preview_invalid",
                     "financial.historical_invoice_tax_corrections.reason_invalid",
                     "financial.historical_invoice_tax_corrections.replay_conflict",
                     "financial.historical_invoice_tax_corrections.replacement_document_mismatch",
                     "financial.historical_invoice_tax_corrections.replacement_settlement_incomplete",
+                    "financial.historical_invoice_tax_corrections.source_void_evidence_mismatch",
+                    "financial.historical_invoice_tax_corrections.correction_balance_mismatch",
                     "financial.historical_invoice_tax_corrections.scope_invalid",
                     "financial.historical_invoice_tax_corrections.stale_preview",
                     "financial.historical_invoice_tax_corrections.subscription_settlement_incomplete",
@@ -1324,7 +1398,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "missing or ambiguous document, payment, allocation, or tax evidence",
                     "customer VAT exemption or changed tax snapshot",
                     "stale preview, permission failure, or idempotency conflict",
-                    "any non-zero selected-payment or customer-credit remainder",
+                    "any mismatch between the reviewed post-settlement customer-credit remainder and the resulting payment/account balance",
                 ),
             ),
             events=EventContract(
@@ -1345,12 +1419,13 @@ SERVICES: tuple[SOTService, ...] = (
                 old_owner="none; historical tax corrections required manual review",
                 new_owner="financial.historical_invoice_tax_corrections",
                 verification=(
-                    "Focused preview, exact settlement, rollback, replay, drift, "
-                    "permission, registry, and architecture-boundary tests."
+                    "Focused preview, exact settlement, preserved-residual settlement, "
+                    "rollback, replay, drift, permission, registry, and architecture-"
+                    "boundary tests."
                 ),
                 cutover_gate=(
-                    "Only the fingerprinted CLI confirmation may invoke this owner, "
-                    "and it requires one explicitly named customer evidence chain."
+                    "Only fingerprinted CLI confirmation may invoke either correction "
+                    "mode, each with one explicitly named customer evidence chain."
                 ),
                 fallback_retirement=(
                     "No tax-only invoice, paid-invoice mutation, raw SQL, generic "
@@ -1379,6 +1454,7 @@ SERVICES: tuple[SOTService, ...] = (
         owns=(
             "compatibility subscription VAT treatment policy",
             "bounded subscription VAT treatment resolution",
+            "catalog-price VAT-basis application",
             "recorded-percent active tax-rate identity resolution",
         ),
         depends_on=(
@@ -1395,7 +1471,9 @@ SERVICES: tuple[SOTService, ...] = (
             "VAT precedence while dotmac-tax adoption is "
             "in progress. Customer exemption wins before address, account, catalog, "
             "or configured defaults. Rate identity, percentage, and application "
-            "come only from owned records and settings; no VAT code or percentage "
+            "come only from owned records and settings. Each catalog price then "
+            "supplies its explicit inclusive, exclusive, or exempt amount basis; "
+            "customer exemption and a missing rate still win. No VAT code or percentage "
             "is built into a caller. It owns neither statutory tax policy nor "
             "custom-tax determination and is retired when dotmac-tax cuts over."
             " Its recorded-percent adapter returns an identity only when exactly "
@@ -1411,6 +1489,7 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical customer VAT exemption policy",
                         "active legacy tax-rate records",
                         "catalog compatibility VAT fields",
+                        "canonical catalog price VAT basis",
                         "configured compatibility VAT defaults",
                     ),
                 ),
@@ -1422,7 +1501,16 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical customer VAT exemption policy",
                         "active legacy tax-rate records",
                         "catalog compatibility VAT fields",
+                        "canonical catalog price VAT basis",
                         "configured compatibility VAT defaults",
+                    ),
+                ),
+                ConcernContract(
+                    name="catalog-price VAT-basis application",
+                    role=OwnerRole.POLICY,
+                    input_names=(
+                        "resolved subscription VAT treatment",
+                        "canonical catalog price VAT basis",
                     ),
                 ),
                 ConcernContract(
@@ -1469,6 +1557,25 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
+                    name="canonical catalog price VAT basis",
+                    owner="service_intent.catalog_policy",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "non-null OfferPrice, OfferVersionPrice, or AddOnPrice "
+                        "tax_application declaring whether the stored amount is "
+                        "exclusive, inclusive, or exempt"
+                    ),
+                ),
+                AuthorityInput(
+                    name="resolved subscription VAT treatment",
+                    owner="financial.billing_tax_resolution",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "typed BillingTaxResolution derived from canonical customer, "
+                        "rate, catalog-taxability, and compatibility-setting inputs"
+                    ),
+                ),
+                AuthorityInput(
                     name="configured compatibility VAT defaults",
                     owner="control.settings_spec",
                     kind=AuthorityKind.CONTROL_INPUT,
@@ -1493,7 +1600,8 @@ SERVICES: tuple[SOTService, ...] = (
                 idempotency=(
                     "The same visible subscription scope, customer policy, active "
                     "rates, catalog compatibility values, and settings produce the "
-                    "same typed result and provenance."
+                    "same typed result and provenance; applying the same catalog "
+                    "price basis produces the same effective line treatment."
                 ),
                 retries=(
                     "Transient database reads may be retried; missing or inactive "
@@ -1534,10 +1642,13 @@ SERVICES: tuple[SOTService, ...] = (
             design_refs=(
                 "docs/SOT_RELATIONSHIP_MAP.md",
                 "docs/PLAN_FAMILY_ARCHITECTURE.md",
+                "docs/designs/CATALOG_PRICE_TAX_BASIS.md",
             ),
             test_refs=(
                 "tests/test_billing_tax_resolution.py",
                 "tests/test_billing_automation_services.py",
+                "tests/test_invoice_issued_at_invariant.py",
+                "tests/test_prepaid_service_renewals.py",
                 "tests/test_prepaid_threshold_resolver.py",
                 "tests/test_web_catalog_subscriptions.py",
                 "tests/architecture/test_billing_tax_resolution_boundary.py",
@@ -2505,7 +2616,10 @@ SERVICES: tuple[SOTService, ...] = (
             "Classifies the complete current administrative service scope as "
             "billable, confirmed non-billable, review-required, or no-current-"
             "service. Missing or contradictory pricing is visible review work "
-            "and never becomes authority to suppress customer billing."
+            "and never becomes authority to suppress customer billing. This is "
+            "commercial price/treatment classification, not recurring-run "
+            "eligibility: access.subscription_lifecycle excludes suspended, "
+            "paused, stopped, and disabled services from future billing."
         ),
         contract=ServiceContract(
             concerns=(

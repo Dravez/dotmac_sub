@@ -439,11 +439,22 @@ def _sync_billing_health_snapshot_schedule(session) -> None:
     )
 
 
+def _sync_automation_scheduled_rules_schedule(session) -> None:
+    _sync_scheduled_task(
+        session,
+        name="automation_scheduled_rule_runner",
+        task_name="app.tasks.automation.run_scheduled_automation_rules",
+        enabled=True,
+        interval_seconds=60,
+    )
+
+
 def build_beat_schedule() -> dict:
     schedule: dict[str, dict] = {}
     session = SessionLocal()
     try:
         _sync_billing_health_snapshot_schedule(session)
+        _sync_automation_scheduled_rules_schedule(session)
         enabled = control_registry.is_enabled(session, "gis.sync")
         interval_minutes = resolve_integer(
             session, SettingDomain.gis, "sync_interval_minutes"
@@ -1082,6 +1093,23 @@ def build_beat_schedule() -> dict:
             enabled=True,
             interval_seconds=notification_queue_interval_seconds,
         )
+        zeptomail_tracking_enabled = _scheduler_setting_enabled(
+            session,
+            SettingDomain.notification,
+            "zeptomail_delivery_tracking_enabled",
+        )
+        zeptomail_tracking_interval_seconds = resolve_integer(
+            session,
+            SettingDomain.notification,
+            "zeptomail_delivery_tracking_interval_seconds",
+        )
+        _sync_scheduled_task(
+            session,
+            name="zeptomail_delivery_reconciliation",
+            task_name=("app.tasks.zeptomail_delivery.reconcile_submitted_email"),
+            enabled=zeptomail_tracking_enabled,
+            interval_seconds=max(zeptomail_tracking_interval_seconds, 30),
+        )
         campaign_processing_interval_seconds = max(
             resolve_integer(
                 session, SettingDomain.comms, "campaign_processing_interval_seconds"
@@ -1225,13 +1253,9 @@ def build_beat_schedule() -> dict:
             ),
             interval_seconds=max(queue_notification_scan_interval, 10),
         )
-        _sync_scheduled_task(
-            session,
-            name="team_inbox_reply_reminders",
-            task_name="app.tasks.team_inbox.send_reply_reminders",
-            enabled=True,
-            interval_seconds=60,
-        )
+        # Reply reminders are retired; disable any existing database rows so
+        # an upgrade cannot leave the old email task running.
+        _retire_scheduled_task(session, "app.tasks.team_inbox.send_reply_reminders")
         _sync_scheduled_task(
             session,
             name="team_inbox_ai_intake_recovery",
@@ -1277,13 +1301,16 @@ def build_beat_schedule() -> dict:
             logger.info("EMAIL_POLL_EXIT reason=no_jobs")
         for job in integration_jobs:
             binding = getattr(job, "capability_binding", None)
+            # The CRM ticket-observation capability is retired (see
+            # docs/runbooks/CRM_TICKET_CAPABILITY_CUTOVER.md) and has no sync
+            # handler; a job still bound to it must never be scheduled.
             if (
                 binding is not None
                 and getattr(binding, "capability_id", None)
                 == "crm.ticket_observation.v1"
             ):
                 logger.info(
-                    "integration_interval_job_skipped_dedicated_crm_pull job_id=%s",
+                    "integration_interval_job_skipped_retired_crm_capability job_id=%s",
                     getattr(job, "id", ""),
                 )
                 continue
@@ -1797,11 +1824,25 @@ def build_beat_schedule() -> dict:
             interval_seconds=max(olt_profile_sync_interval_seconds, 60),
         )
 
+        # These task names were removed from the codebase. Retire any
+        # persisted rows left by older deployments so beat cannot keep reporting
+        # them as enabled scheduler drift or attempt to enqueue dead tasks.
         for removed_task_name in (
             "app.tasks.olt_capture.capture_olt_samples_task",
             "app.tasks.olt_capture.validate_all_parsers_task",
             "app.tasks.olt_capture.capture_all_olts_task",
             "app.tasks.provisioning_enforcement.run_enforcement",
+            "app.tasks.olt_queue.process_deferred_olt_operations",
+            "app.tasks.olt_queue.retry_failed_operations",
+            "app.tasks.prepaid_billing.run_prepaid_charges",
+            "app.tasks.collections.run_prepaid_enforcement",
+            "app.tasks.projects.reconcile_project_mirror",
+            "app.tasks.splynx_sync.run_refresh_radius_from_subs",
+            "app.tasks.splynx_sync.run_incremental_sync",
+            "app.tasks.splynx_sync.run_new_subscriptions_sync",
+            "app.tasks.splynx_sync.run_password_freshness_sync",
+            "app.tasks.splynx_sync.run_subscription_status_sync",
+            "app.tasks.work_orders.reconcile_work_order_mirror",
         ):
             _retire_scheduled_task(session, removed_task_name)
 
@@ -2145,41 +2186,6 @@ def build_beat_schedule() -> dict:
                     "args": [str(sync_job.id)],
                 }
 
-        # CRM ticket pull: inbound CRM tickets/comments into local support tickets.
-        crm_ticket_pull_enabled = control_registry.is_enabled(
-            session, "crm.ticket_pull"
-        )
-        crm_ticket_pull_interval = resolve_integer(
-            session, SettingDomain.scheduler, "crm_ticket_pull_interval_minutes"
-        )
-        crm_ticket_pull_interval = max(crm_ticket_pull_interval, 1)
-        from app.services.integrations.crm_ticket_readiness import (
-            resolve_crm_ticket_pull_readiness,
-        )
-
-        crm_ticket_readiness = resolve_crm_ticket_pull_readiness(
-            session,
-            control_enabled=crm_ticket_pull_enabled,
-        )
-        if crm_ticket_readiness.schedule_enabled:
-            schedule["crm_ticket_pull"] = {
-                "task": "app.tasks.crm_ticket_pull.pull_crm_tickets",
-                "schedule": timedelta(minutes=crm_ticket_pull_interval),
-            }
-            # Daily full reconciliation: heals drift the incremental runs
-            # can't see (CRM comments don't bump ticket updated_at; closed
-            # tickets are excluded from the incremental comment sweep).
-            schedule["crm_ticket_pull_full"] = {
-                "task": "app.tasks.crm_ticket_pull.pull_crm_tickets",
-                "schedule": crontab(hour=3, minute=40),
-                "kwargs": {"full": True},
-            }
-        elif crm_ticket_pull_enabled:
-            logger.error(
-                "crm_ticket_pull_not_ready issue_codes=%s",
-                ",".join(crm_ticket_readiness.issue_codes),
-            )
-
         # ERP schedules derive from validated capability bindings. Per-flow
         # single-writer ownership remains the independent business cutover gate.
         from app.services.integrations.backoffice_contracts import (
@@ -2370,6 +2376,11 @@ def build_beat_schedule() -> dict:
             }
 
         _append_enabled_scheduled_task_entries(schedule, session)
+        schedule["meta_capi_lead_redrive"] = {
+            "task": "app.tasks.integration_delivery.redrive_meta_capi_leads",
+            "schedule": timedelta(seconds=60),
+            "options": {"queue": "crm", "expires": 55},
+        }
     except Exception:
         logger.exception("Failed to build Celery beat schedule.")
         try:

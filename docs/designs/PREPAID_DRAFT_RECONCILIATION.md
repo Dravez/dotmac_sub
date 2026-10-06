@@ -51,6 +51,16 @@ allocation is posted to the same document, its ledger consumption and
 customer-subledger settlement duplicate an economic effect that the opening
 already absorbed, leaving false partial debt and understating customer credit.
 
+The inverse risk also exists: a pre-opening payment can still appear to have
+unused allocation room even though its economic effect was incorporated in the
+approved customer opening. Generic account-credit application must not offer
+that historical payment to a later invoice. Source selection uses the later of
+the caller's reviewed funding boundary and the approved opening for the
+account/currency; a payment counts only if its creation or paid instant is
+after that boundary. This prevention does not itself reclassify an existing
+allocation or create a documentary invoice for service already funded by a
+direct renewal adjustment. Those require separately previewed repair commands.
+
 ## Canonical policy
 
 ### Reviewed paid-coverage correction
@@ -198,6 +208,97 @@ the selected native Payment alone fully backs the invoice, the missing
 historical baseline is unrelated to that exact cash application. Mixed or
 underfunded repairs continue to require the reviewed opening-funding workflow.
 
+### Finance-approved existing periodless draft settlement
+
+An existing draft that has the correct amount but no subscription or service
+period is repaired by `settle_reviewed_existing_prepaid_draft`. This is a
+separate, permission-gated owner command; changing the invoice status or billing
+anchor directly is not an approved repair.
+
+Preview requires one operator-named draft, unlinked positive line, prepaid
+subscription, successful unreturned Payment and settlement, explicit service
+start and next-billing dates, expected invoice total, expected remaining
+account credit, payment reference, active Finance approver, approval timestamp,
+ticket reference, and SHA-256 evidence digest. The period must match the
+contracted cadence in Africa/Lagos and the selected Payment must retain enough
+unallocated capacity to fund the whole document. Existing invoice activity,
+competing coverage, changed tax or contract terms, an overlapping anchor, or a
+changed cutoff balance leaves the invoice unchanged for manual review.
+
+Confirmation locks and re-previews the entire chain, adopts the missing
+document identity through the invoice participant, issues the draft, allocates
+only the selected Payment, creates one canonical entitlement, and asks the
+renewal owner to project `next_billing_at` to the reviewed period end. Access
+restoration is requested only when the approved period is current. Invoice
+metadata, an audit event, `prepaid_reviewed_draft.settled`, and the idempotency
+reservation retain the payment reference, approver, timestamp, ticket, evidence
+digest, dates, allocation, entitlement, and preview fingerprint in the same
+transaction.
+
+On idempotent replay, those metadata values remain provenance only. The owner
+reconstructs settlement identity from the invoice's active subscription line,
+the selected Payment's active allocation, the invoice-backed entitlement, and
+the subscription billing anchor. For a supersession, it resolves the named
+invoice and Payment from the reviewed command and checks their allocation and
+entitlement rows; any successor period is reconstructed from its active
+allocation, invoice line, invoice, entitlement, and released Payment.
+
+One narrow supersession shape may be included in that same reviewed command.
+The operator must name both the wrongly paid future-period invoice and the
+verified payment-proof Payment that solely funded it. Preview requires one
+full-value active allocation, one exact invoice-backed active entitlement,
+matching invoice/entitlement dates, and a subscription anchor equal to that
+entitlement end. The wrong period must start no earlier than the reviewed
+draft's period end, and surviving coverage must end exactly at the reviewed
+draft's start. Confirmation first voids the named invoice through the invoice
+owner, releases only its allocation and reverses its ledger effects, retires
+only its entitlement, and asks the renewal owner to retract the anchor to the
+end of surviving coverage. It then settles the reviewed draft from the selected
+Payment. Both document transitions, both allocation projections, entitlement
+replacement, anchor projection, audit/event evidence, and idempotency evidence
+commit or roll back together. Generic void, reallocation, and direct anchor
+updates are not substitutes.
+
+When Finance explicitly selects continuous-period funding, preview also proves
+that the released payment-proof Payment exactly matches the canonical charge
+for the immediately following period and that no other invoice or entitlement
+overlaps it. Confirmation uses the Paystack Payment only for the historical
+draft and the released payment-proof Payment only for that next period. The
+renewal owner creates the second paid invoice, allocation, entitlement,
+outcome, and anchor projection inside the repair owner's transaction. Expected
+remaining credit is the balance after both periods, not the intermediate
+balance after the historical draft.
+
+The operational procedure and post-settlement checks are in
+`docs/runbooks/REVIEWED_EXISTING_PREPAID_DRAFT_SETTLEMENT.md`.
+
+If the reviewed period contains the current instant, preview also resolves the
+verified prepaid-funding prerequisite before it can return
+`exact_reviewed_draft`. A missing approved opening is reported only as
+`manual_review` with the safe reason `verified prepaid funding prerequisite is
+missing`; internal baseline exceptions are not exposed. Apply retains the same
+check after locks and the existing all-or-nothing rollback remains defense in
+depth.
+
+### Account-scoped Sub-native opening omission repair
+
+`financial.customer_subledger_opening_positions` owns one separate repair for
+an account that was created after the fixed legacy handoff, existed at the
+original prepaid-funding authority cutover, remains in the prepaid cohort, and
+has neither Splynx identity/transactions nor an approved baseline/opening. It
+does not reopen or append to the signed full-cohort reconstruction batch.
+
+Preview calculates the original-cutover amount from canonical Sub-native facts
+and fingerprints every admitted event, the source-identity classification, the
+sealed authority batch/time, and the shadow posting position at that instant.
+Apply accepts no balance, locks and recomputes all evidence, and requires active
+Finance approval plus a permissioned system-user operator. It appends a native
+repair record, an immutable opening linked through its distinct provenance
+column, the residual customer-subledger posting, audit evidence, and a durable
+event in one owner transaction. It never edits ledger entries, invoices,
+payments, subscriptions, access state, or billing anchors. See
+`docs/runbooks/NATIVE_PREPAID_OPENING_REPAIR.md`.
+
 An existing prepaid draft has first claim on the service-period document
 boundary. A funding-change consequence checks it before creating a new funded
 renewal invoice:
@@ -273,6 +374,19 @@ money is never hidden.
 No path rounds a shortfall, invents a payment, represents opening funding as a
 Payment, marks an underfunded invoice paid, double-spends an opening baseline,
 or creates a second entitlement.
+
+### Reviewed payment-allocation reversal
+
+`financial.payments` owns a separate, fingerprint-bound correction for an
+evidence-backed allocation whose target invoice was voided. Preview accepts
+only one active allocation with both ledger links, an active succeeded Payment,
+and a void Invoice. Confirmation locks the allocation, Payment, Invoice, and
+both ledger rows; appends one linked reversal for each ledger row; retires only
+the allocation projection; records actor, reason, preview fingerprint, and
+idempotency evidence; and leaves the Payment active for later allocation.
+The original allocation and ledger rows are never edited or deleted. A stale
+preview, refund/reversal evidence, missing ledger pair, non-void invoice, or
+replay with changed inputs fails closed.
 
 ## Atomic mixed-source settlement
 
@@ -476,6 +590,92 @@ draft creation remains owned by `financial.prepaid_recovery_billing`, while
 every resulting prepaid draft is classified and reconciled here regardless of
 which approved path created it.
 
+## Reviewed multi-invoice sequence reconstruction
+
+Some cutover defects span several consecutive invoices and payments. Repairing
+those documents one at a time is unsafe when a pre-opening payment is partly
+represented by the approved opening position and later payments cross the same
+sequence. The owner therefore exposes one separate, Finance-approved sequence
+command. It is not an extension of automatic draft discovery.
+
+The typed query names every invoice and line, half-open service interval,
+expected contract total, payment-to-invoice split, settlement ledger row, and
+legacy allocation ledger pair. `financial.prepaid_service_renewals` owns the
+typed reviewed calendar reader; the reconciler and CLI never independently
+round these periods. Date-only manifests default to Africa/Lagos midnight.
+An explicit `documented_anniversary` selection also names the expected initial
+anchor. It requires the first invoice's exact existing linked period, equal
+reviewed Lagos dates, equal endpoint clocks, and an anchor exactly equal to its
+end. Later intervals preserve that documentary clock. A UTC-midnight historical
+boundary therefore remains 01:00 Lagos rather than being silently shifted an
+hour. The preceding paid invoice is unchanged; real overlap still fails closed.
+This continuation mode is not the paid-period calendar correction workflow.
+
+The preview fingerprints the calendar selection, resolved intervals and initial
+anchor, and reports each UTC/local interval and expected final reusable credit.
+Apply consumes those same typed intervals after locking and re-previewing; it
+does not recalculate dates in a participant. Missing or inconsistent calendar
+evidence remains manual review without guessed bounds. New lapsed renewals still
+use the canonical settlement-day Lagos-midnight policy, while uninterrupted
+funded coverage preserves its exact anniversary as before.
+
+Preview requires all of these invariants:
+
+- periods are positive, contiguous, and already expired;
+- each invoice has one exact recurring line and matches canonical contract and
+  tax terms;
+- the allocation plan plus reviewed legacy allocations settles every invoice
+  and consumes every selected payment exactly, except that a late-recorded
+  one-document repair may retain an explicitly previewed payment residual;
+- selected pre-opening payment value minus allocations to invoices ending at
+  the opening boundary equals the unconsumed approved opening position;
+- the remainder of those pre-opening payments allocated to later invoices is
+  the same opening value;
+- selected post-opening payments equal both their planned allocations and the
+  native post-boundary account credit;
+- settlement, refund/reversal, overlap, named approver, ticket reference,
+  operator permission, and billing-anchor evidence remain exact.
+
+Confirmation reconciles missing settlement structure without posting money,
+adopts missing invoice identity through the invoice participant, and records
+payment allocations through a historical reclassification participant. Its
+invoice-credit and account-credit-consumption ledger rows are explicitly
+non-position structural evidence: the cash and receivable already crossed the
+reviewed cutover, so a new customer-position entry would count them twice.
+For an invoice whose coverage ended on or before the opening boundary, the
+customer-financial projection recognizes a later-recorded reclassification as
+already absorbed only when both exact paired ledger rows are active,
+non-position, amount-matched, and carry an effective time at or before that
+boundary. The allocation's actual record timestamp remains unchanged. An
+allocation to coverage ending after the boundary still consumes the signed
+opening value after cutover.
+Invoice finalization creates one entitlement per paid document, and the renewal
+owner projects the anchor onto the final coverage end. Because the command only
+accepts an expired final interval, it never requests access restoration.
+
+The whole sequence runs once inside `execute_owner_command`. Account, invoices,
+subscription, payments, settlement evidence, legacy allocations, ledger rows,
+and Finance approver are locked before the preview is recomputed. One
+idempotency reservation, invoice metadata on every target, audit event, and
+`prepaid_invoice_sequence.reconstructed` event record the result. Any changed
+cent, missing row, extra allocation, overlap, non-zero customer-position delta,
+or unexpected remaining credit rolls back the complete command.
+
+The same reviewed command accepts a one-document sequence for an expired issued
+or overdue prepaid invoice whose receivable debit already reduced the customer
+position. That manifest must select the exact unallocated native payment and
+the complete remaining reviewed opening source. Confirmation records the
+payment allocation and opening-funding consumption as settlement evidence,
+adopts the service identity, and requires the customer-position delta to remain
+zero. The selected payment may exceed the invoice balance only when the preview
+proves the exact allocation and residual; the residual remains reusable account
+credit and must equal the manifest's post-repair expectation. When a provider
+payment's captured amount includes a gateway fee, the selected funding total is
+the exact settlement-backed customer credit rather than the captured gross; the
+preview fingerprints both values. If a later funded period has already advanced
+the billing anchor, the command preserves that anchor rather than moving it
+backwards.
+
 ## Rollout
 
 1. Deploy the funding-change draft-first guard and funded-renewal invoice path.
@@ -504,6 +704,9 @@ which approved path created it.
 13. After every canary, verify invoice and ledger facts, opening consumption,
    entitlement and billing anchor, enforcement locks, billing events, and
    RADIUS access. Stop on any mismatch.
+14. Use the sequence-reconstruction runbook only when one preview proves the
+    entire pre/post-opening conservation equation; never decompose that shape
+    into independent invoice writes.
 
 This change does not mutate historical customer records during deployment.
 Backlog state changes occur only through an explicit reviewed apply command.

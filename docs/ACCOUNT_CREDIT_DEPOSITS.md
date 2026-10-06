@@ -88,6 +88,14 @@ against a current succeeded payment is repair drift, not an active customer
 request, so the active-request owner does not block a replacement deposit while
 `financial.topup_intent_proof_reconciliation` remains the repair owner.
 
+The self-care `GET /api/v1/me/topup` response includes both `deposit_allowed`
+and the owner's `active_deposit_request` projection. The mobile Top Up page
+shows the request's message, amount, and reference when deposits are blocked,
+and does not request an allocation preview or offer another checkout. Refresh
+re-reads the owner projection. When a preview request fails for another reason,
+the page shows the API's safe error message and offers a retry; online checkout
+still requires a fresh preview fingerprint.
+
 The owner-generated preview is mandatory before checkout starts. For the exact
 requested amount it reports:
 
@@ -103,6 +111,14 @@ invoice set with the balances and ordering facts that affect application.
 Gateway and direct-transfer intent creation must present that reviewed
 fingerprint back to the owner. If the reviewed preview is stale, intent
 creation fails closed and the customer must review the updated preview first.
+
+Mobile direct transfer follows the same owner sequence as the web flow: create
+the exact typed intent, present the collection-account identities returned by
+the server, and submit the receipt with both `intent_id` and
+`selected_account_id`. Direct transfer is not an online gateway option. If the
+customer explicitly abandons the receipt step, the mobile adapter calls the
+canonical unsubmitted-intent cancellation command so the abandoned request
+does not block a later deposit.
 
 If an invoice appears after intent creation, confirmed cash is accepted and the
 new credit is immediately applied to eligible invoices. Duplicate callbacks and
@@ -122,11 +138,23 @@ owner preserves gross and fee evidence while crediting the authorized net
 amount. Changing that policy requires a new owner contract and preview, not an
 adapter-side net calculation.
 
-Eligible invoices are active `issued`, `partially_paid` or `overdue` invoices
-with a positive same-currency balance. Draft, void, written-off, inactive, and
-incompatible-currency invoices consume nothing. Oldest due debt wins; creation
-time and ID are stable tiebreakers. Partial credit leaves an invoice partially
-paid. Only a fully paid invoice reaches the existing entitlement/access owner.
+Eligible invoices are active, non-proforma `issued`, `partially_paid` or
+`overdue` invoices with a positive same-currency balance. Draft, void,
+written-off, inactive, proforma, fully paid, and incompatible-currency invoices
+consume nothing. Oldest due debt wins; creation time and ID are stable
+tiebreakers. Partial credit leaves an invoice partially paid. This allocation
+policy is system-owned for verified customer payments; customer and reviewer
+adapters cannot retain usable payment credit while eligible debt remains.
+
+Fully paid prepaid invoices then use a typed finalization decision. Native
+current or genuinely lapsed renewals retain the standard settlement behavior.
+Carried-in prepaid periods that precede the current subscription anchor,
+explicitly marked historical debt, and periods that authoritative later
+entitlement proves were superseded use
+`historical_debt`: allocation and receivable settlement remain normal, but the
+recorded period, billing anchor, current entitlement, and access state do not
+change. Merely being late, having a stale anchor, or having a canceled extension
+does not classify a renewal as historical.
 
 ## Refunds, reversals, void and access
 

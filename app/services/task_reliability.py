@@ -120,6 +120,13 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.alert_evaluation.evaluate_alert_rules": _c(
         "monitoring", SWEEP, IDEMP, STATUS
     ),
+    "app.tasks.automation.run_scheduled_automation_rules": _c(
+        "automation",
+        SWEEP,
+        GUARDED,
+        STATUS,
+        "Each rule/version slot is claimed transactionally before events are emitted; a later sweep retries unclaimed work.",
+    ),
     "app.tasks.arrangements.check_overdue_arrangements": _c(
         "billing", SWEEP, GUARDED, HEALTH
     ),
@@ -221,8 +228,6 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.collections.run_bundle_reconcile": _c(
         "collections", STATE, GUARDED, HEALTH
     ),
-    "app.tasks.crm_ticket_pull.pull_crm_tickets": _c("crm", SWEEP, IDEMP, HEALTH),
-    "app.tasks.crm_ticket_pull.sync_crm_ticket": _c("crm", SWEEP, IDEMP, STATUS),
     "app.tasks.cross_app_drift.run_cross_app_drift_detection": _c(
         "monitoring",
         SWEEP,
@@ -366,6 +371,22 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
         "Durable delivery state, stable Meta event ID, bounded retry, and "
         "dead-letter evidence.",
     ),
+    "app.tasks.integration_delivery.deliver_meta_capi_lead": _c(
+        "integrations",
+        STATE,
+        STATEFUL,
+        DEAD,
+        "Stable inquiry-derived event ID, row lock, bounded backoff, and durable "
+        "success or dead-letter evidence.",
+    ),
+    "app.tasks.integration_delivery.redrive_meta_capi_leads": _c(
+        "integrations",
+        SWEEP,
+        IDEMP,
+        STATUS,
+        "Beat redrives pending, due retryable, and expired-lease Meta Lead rows; "
+        "the delivery row serializes duplicate worker execution.",
+    ),
     "app.tasks.integration_inbox.reclaim_stale_claims": _c(
         "integrations",
         SWEEP,
@@ -437,6 +458,24 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     ),
     "app.tasks.notifications.deliver_notification_queue": _c(
         "notifications", STATE, GUARDED, STATUS
+    ),
+    "app.tasks.zeptomail_delivery.reconcile_submitted_email": _c(
+        "notifications",
+        SWEEP,
+        IDEMP,
+        LOG,
+        "A bounded status sweep; each provider observation has a stable "
+        "idempotency key, failed lookups are logged, and the next scheduled "
+        "sweep retries unresolved emails.",
+    ),
+    "app.tasks.notifications.materialize_customer_bulk_message": _c(
+        "notifications",
+        NONE,
+        GUARDED,
+        LOG,
+        "Admin bulk-message materialization is atomic and uses deterministic "
+        "per-customer communication-intent dedupe keys. A replay either returns "
+        "the existing deliveries or fails closed when the impact token drifted.",
     ),
     "app.tasks.oauth.check_token_health": _c("integrations", SWEEP, IDEMP, HEALTH),
     "app.tasks.oauth.refresh_expiring_tokens": _c(
@@ -646,7 +685,7 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
     "app.tasks.radius.reap_radacct_ghosts": _c("radius", SWEEP, IDEMP, HEALTH),
     "app.tasks.radius.reconcile_active_sessions": _c(
         "radius",
-        SWEEP,
+        AUTORETRY,
         IDEMP,
         HEALTH,
         "Permanent rebuild of the live-session projection from external accounting.",
@@ -722,14 +761,6 @@ TASK_RELIABILITY_CONTRACTS: dict[str, TaskReliabilityContract] = {
         "Scans persisted queue-notification next_due_at rows; each logical "
         "notice has a database dedupe key and failed deliveries retry the same "
         "ledger row.",
-    ),
-    "app.tasks.team_inbox.send_reply_reminders": _c(
-        "support",
-        SWEEP,
-        IDEMP,
-        STATUS,
-        "A durable assignment reminder row owns the next due time and repeat count; "
-        "an agent reply settles it and re-runs before next_due_at are no-ops.",
     ),
     "app.tasks.team_inbox.recover_stale_ai_intake": _c(
         "support",

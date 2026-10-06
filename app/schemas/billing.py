@@ -1262,6 +1262,7 @@ class PaymentInitiateRequest(BaseModel):
 
 
 class PaymentInitiateResponse(BaseModel):
+    intent_id: UUID | None = None
     invoice_id: UUID
     invoice_number: str | None = None
     amount: Decimal
@@ -1305,6 +1306,7 @@ class PaymentProviderOption(BaseModel):
 
 
 class BankTransferAccount(BaseModel):
+    id: str | None = None
     bank_name: str
     account_name: str
     account_number: str
@@ -1353,6 +1355,41 @@ class TopupPreviewResponse(BaseModel):
     preview_fingerprint: str = Field(min_length=64, max_length=64)
 
 
+class TopupActiveRequestResponse(BaseModel):
+    """Owner-projected deposit that currently blocks a replacement checkout."""
+
+    intent_id: UUID
+    phase: Literal[
+        "awaiting_receipt",
+        "awaiting_provider_confirmation",
+        "processing",
+        "confirmation_unavailable",
+        "under_review",
+        "receipt_rejected",
+    ]
+    next_action: Literal[
+        "upload_receipt", "wait_for_provider", "wait_for_review", "contact_support"
+    ]
+    provider_type: str
+    reference: str
+    amount: Decimal
+    currency: str
+    created_at: datetime
+    expires_at: datetime | None = None
+    observed_at: datetime
+    message: str
+    rejection_reason: str | None = None
+    can_cancel: bool = False
+
+
+class TopupCancelResponse(BaseModel):
+    """Customer-visible result of canceling an unsubmitted transfer intent."""
+
+    intent_id: UUID
+    status: Literal["canceled"]
+    changed: bool
+
+
 class TopupPageResponse(BaseModel):
     provider_type: str
     provider_public_key: str | None = None
@@ -1360,14 +1397,15 @@ class TopupPageResponse(BaseModel):
     prepaid_balance: Decimal | None = None
     account_credit: Decimal | None = None
     deposit_allowed: bool = True
+    active_deposit_request: TopupActiveRequestResponse | None = None
     eligible_unpaid_total: Decimal = Decimal("0.00")
     eligible_unpaid_invoices: list[TopupEligibleInvoice] = Field(default_factory=list)
     min_amount: int
     max_amount: int
     preset_amounts: list[int] = Field(default_factory=list)
     customer_email: str | None = None
-    # The customer pay-with selector: online gateways (Paystack/Flutterwave),
-    # saved-card flows, and configured direct bank transfer.
+    # Online gateway options only. Saved cards are fetched separately and
+    # direct bank transfer has its own typed config below.
     payment_options: list[PaymentProviderOption] = Field(default_factory=list)
     direct_bank_transfer: DirectBankTransferConfig | None = None
 
@@ -1481,6 +1519,47 @@ class PaymentAllocationPreviewRead(BaseModel):
 class PaymentAllocationConfirm(PaymentAllocationPreviewRequest):
     preview_fingerprint: str = Field(min_length=64, max_length=64)
     idempotency_key: str = Field(min_length=16, max_length=120)
+
+
+class PaymentAllocationReversalPreviewRequest(BaseModel):
+    allocation_id: UUID
+
+
+class PaymentAllocationReversalPreviewRead(BaseModel):
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    invoice_number: str | None = None
+    account_id: UUID
+    amount: Decimal
+    currency: str
+    invoice_status: InvoiceStatus
+    payment_status: PaymentStatus
+    invoice_balance_before: Decimal
+    invoice_balance_after: Decimal
+    payment_available_before: Decimal
+    payment_available_after: Decimal
+    reverses_ledger_entry_id: UUID
+    reverses_consumption_ledger_entry_id: UUID
+    fingerprint: str
+
+
+class PaymentAllocationReversalConfirm(BaseModel):
+    allocation_id: UUID
+    preview_fingerprint: str = Field(min_length=64, max_length=64)
+    idempotency_key: str = Field(min_length=16, max_length=120)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PaymentAllocationReversalRead(BaseModel):
+    allocation_id: UUID
+    payment_id: UUID
+    invoice_id: UUID
+    amount: Decimal
+    reversal_ledger_entry_id: UUID
+    reversal_consumption_ledger_entry_id: UUID
+    reversed_at: datetime
+    idempotent_replay: bool = False
 
 
 class PaymentAllocationRead(PaymentAllocationBase):

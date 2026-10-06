@@ -57,6 +57,15 @@ class SubscriberAccountImportRow(CSVRowModel):
     status: SubscriberStatus = SubscriberStatus.active
     notes: str | None = None
 
+    @field_validator("status")
+    @classmethod
+    def _reject_derived_pause(cls, value: SubscriberStatus) -> SubscriberStatus:
+        if value is SubscriberStatus.paused:
+            raise ValueError(
+                "Paused account status must be derived from a pause episode"
+            )
+        return value
+
 
 class SubscriberCustomFieldImportRow(CSVRowModel):
     subscriber_id: UUID
@@ -78,6 +87,13 @@ class SubscriptionImportRow(CSVRowModel):
     next_billing_at: datetime | None = None
     canceled_at: datetime | None = None
     cancel_reason: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _reject_owner_only_pause(cls, value: SubscriptionStatus) -> SubscriptionStatus:
+        if value is SubscriptionStatus.paused:
+            raise ValueError("Paused status requires an authoritative pause episode")
+        return value
 
 
 class CPEDeviceImportRow(CSVRowModel):

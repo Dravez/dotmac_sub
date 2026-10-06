@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import NotRequired, TypedDict
 from uuid import UUID
 
 from sqlalchemy.orm import Session, selectinload
@@ -63,6 +64,43 @@ class ExpenseErpAction(StrEnum):
     APPROVE_V4 = "expense_approve_v4"
     REJECT_V3 = "expense_reject_v3"
     INITIATE_PAYMENT = "initiate_payment"
+
+
+class ExpenseClaimLinePayload(TypedDict):
+    source_line_id: str
+    category_code: str
+    description: str
+    claimed_amount: str
+    expense_date: str
+    vendor_name: NotRequired[str]
+    receipt_url: NotRequired[str]
+    notes: NotRequired[str]
+
+
+class ExpenseReceiptAttachmentPayload(TypedDict):
+    source_line_id: str
+    source_attachment_id: str
+
+
+class ExpenseClaimPayload(TypedDict):
+    _expense_action: str
+    source_claim_id: str
+    purpose: str
+    claim_date: str
+    requested_by_email: str | None
+    requested_approver_id: str | None
+    payment_destination_token: str | None
+    ticket_source_reference: str | None
+    project_source_reference: str | None
+    currency_code: str
+    remarks: str
+    reference_number: str | None
+    items: list[ExpenseClaimLinePayload]
+
+
+class ExpenseSubmissionPayload(ExpenseClaimPayload):
+    _expense_contract_version: str
+    _receipt_attachments: list[ExpenseReceiptAttachmentPayload]
 
 
 # The sub-side statuses a claim can still change while ERP owns settlement;
@@ -141,7 +179,16 @@ def _requester_email(request: FieldExpenseRequest) -> str | None:
     return email or None
 
 
-def build_expense_claim_payload(request: FieldExpenseRequest) -> dict:
+def _optional_source_reference(value: object | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def build_expense_claim_payload(
+    request: FieldExpenseRequest,
+) -> ExpenseClaimPayload:
     """Map a ``FieldExpenseRequest`` to ERP's ``SubExpenseClaimPayload`` shape.
 
     Ports the historical mapper into a neutral contract: ``source_claim_id`` is
@@ -152,9 +199,9 @@ def build_expense_claim_payload(request: FieldExpenseRequest) -> dict:
     work-order provenance and ``reference_number`` from the retained imported
     expense-request reference (Sub has no native expense number).
     """
-    item_rows: list[dict[str, object]] = []
+    item_rows: list[ExpenseClaimLinePayload] = []
     for item in request.items:
-        row: dict[str, object] = {
+        row: ExpenseClaimLinePayload = {
             "source_line_id": str(item.id),
             "category_code": item.category_code,
             "description": item.description,
@@ -176,7 +223,7 @@ def build_expense_claim_payload(request: FieldExpenseRequest) -> dict:
     ).isoformat()
 
     mirror = request.work_order_mirror
-    reference_number = request.crm_expense_request_id or None
+    reference_number = _optional_source_reference(request.crm_expense_request_id)
 
     return {
         "_expense_action": ExpenseErpAction.SUBMIT.value,
@@ -190,8 +237,12 @@ def build_expense_claim_payload(request: FieldExpenseRequest) -> dict:
             else None
         ),
         "payment_destination_token": request.payment_destination_token,
-        "ticket_source_reference": getattr(mirror, "crm_ticket_id", None),
-        "project_source_reference": getattr(mirror, "crm_project_id", None),
+        "ticket_source_reference": _optional_source_reference(
+            getattr(mirror, "crm_ticket_id", None)
+        ),
+        "project_source_reference": _optional_source_reference(
+            getattr(mirror, "crm_project_id", None)
+        ),
         "currency_code": request.currency,
         "remarks": request.notes or "",
         "reference_number": reference_number[:50] if reference_number else None,
@@ -199,24 +250,25 @@ def build_expense_claim_payload(request: FieldExpenseRequest) -> dict:
     }
 
 
-def build_expense_submission_payload(request: FieldExpenseRequest) -> dict:
+def build_expense_submission_payload(
+    request: FieldExpenseRequest,
+) -> ExpenseSubmissionPayload:
     require_expense_delivery_identity(request)
     payload = build_expense_claim_payload(request)
-    payload.update(
-        {
-            "_expense_action": ExpenseErpAction.SUBMIT_V3.value,
-            "_expense_contract_version": "work-order-expense.v3",
-            "_receipt_attachments": [
-                {
-                    "source_line_id": str(item.id),
-                    "source_attachment_id": str(item.receipt_attachment_id),
-                }
-                for item in request.items
-                if item.receipt_attachment_id is not None
-            ],
-        }
-    )
-    return payload
+    submission: ExpenseSubmissionPayload = {
+        **payload,
+        "_expense_action": ExpenseErpAction.SUBMIT_V3.value,
+        "_expense_contract_version": "work-order-expense.v3",
+        "_receipt_attachments": [
+            {
+                "source_line_id": str(item.id),
+                "source_attachment_id": str(item.receipt_attachment_id),
+            }
+            for item in request.items
+            if item.receipt_attachment_id is not None
+        ],
+    }
+    return submission
 
 
 def build_approved_expense_release_payload(
@@ -226,8 +278,8 @@ def build_approved_expense_release_payload(
     decided_by_email: str,
     decided_at: datetime,
     notes: str | None = None,
-) -> dict:
-    payload = build_expense_claim_payload(request)
+) -> dict[str, object]:
+    payload: dict[str, object] = dict(build_expense_claim_payload(request))
     payload["_expense_action"] = ExpenseErpAction.RELEASE_APPROVED.value
     payload["_expense_contract_version"] = "work-order-expense.v2"
     payload["_receipt_attachments"] = [
@@ -355,7 +407,7 @@ def enqueue_expense_submission(
         entity_type=ENTITY_TYPE,
         entity_id=request.id,
         idempotency_key=expense_submission_idempotency_key(request),
-        payload=build_expense_submission_payload(request),
+        payload=dict(build_expense_submission_payload(request)),
         isolate=isolate,
     )
 

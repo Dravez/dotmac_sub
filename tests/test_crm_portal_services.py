@@ -204,27 +204,6 @@ def test_resolve_crm_subscriber_ids_deduplicates_and_skips_blanks(monkeypatch) -
     assert resolved == ["crm-1", "crm-3"]
 
 
-def test_reseller_open_tickets_count_returns_none_when_crm_unavailable(
-    monkeypatch,
-    db_session,
-) -> None:
-    client = Mock()
-    client.list_tickets.side_effect = crm_portal.CRMClientError("down")
-    monkeypatch.setattr(
-        "app.services.crm_portal.resolve_crm_subscriber_id",
-        lambda _db, _account_id: "crm-sub-1",
-    )
-    monkeypatch.setattr("app.services.crm_portal.capability_client", lambda *_: client)
-
-    count = crm_portal.reseller_open_tickets_count(
-        db_session,
-        "reseller-1",
-        ["account-1"],
-    )
-
-    assert count is None
-
-
 # ── Customer Portal: Tickets (sourced from the local support module) ──────
 
 
@@ -607,7 +586,10 @@ def test_profile_save_preserves_undeclared_historical_metadata(
     db_session: Session, subscriber: Subscriber
 ) -> None:
     """Frozen import provenance survives a live profile/preferences save."""
-    from app.services.web_customer_actions import update_customer_profile
+    from app.services.web_customer_actions import (
+        UpdateCustomerProfileCommand,
+        update_customer_profile,
+    )
 
     historical = {
         "crm_billing_snapshot": {"balance": "1200.00"},
@@ -623,18 +605,21 @@ def test_profile_save_preserves_undeclared_historical_metadata(
     subscriber.metadata_ = dict(historical)
     db_session.commit()
 
-    updated = update_customer_profile(
+    outcome = update_customer_profile(
         db_session,
-        subscriber_id=str(subscriber.id),
-        first_name="Updated",
-        last_name="Customer",
-        email=subscriber.email,
-        phone="+2348000000012",
-        billing_notifications=False,
-        sms_updates=True,
+        command=UpdateCustomerProfileCommand(
+            subscriber_id=subscriber.id,
+            first_name="Updated",
+            last_name="Customer",
+            email=subscriber.email,
+            phone="+2348000000012",
+            billing_notifications=False,
+            sms_updates=True,
+        ),
     )
 
-    assert updated is not None
+    assert outcome is not None
+    updated = outcome.subscriber
     assert updated.first_name == "Updated"
     assert updated.phone == "+2348000000012"
     assert {key: (updated.metadata_ or {}).get(key) for key in historical} == historical

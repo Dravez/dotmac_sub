@@ -39,9 +39,10 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.services import conversation_lead_relationships
 from app.services import customer_search as customer_search_service
+from app.services import web_custom_fields as web_custom_fields_service
 from app.services import web_sales as web_sales_service
 from app.services import web_sales_dashboard as dashboard_service
-from app.services.auth_dependencies import can, require_permission
+from app.services.auth_dependencies import can, load_permission_keys, require_permission
 from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.file_storage import build_content_disposition
@@ -304,6 +305,14 @@ def lead_new(
             db, actor_system_user_id=_lead_actor_system_user_id(request)
         )
     )
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="lead",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     context["inbox_conversation_id"] = inbox_conversation_id
     return templates.TemplateResponse("admin/sales/leads/new_form.html", context)
 
@@ -313,7 +322,7 @@ def lead_new(
     response_class=HTMLResponse,
     dependencies=[Depends(require_permission("crm:lead:write"))],
 )
-def lead_create(
+async def lead_create(
     request: Request,
     submission_id: str | None = Form(default=None),
     display_name: str | None = Form(default=None),
@@ -351,6 +360,7 @@ def lead_create(
     inbox_conversation_id: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    raw_form = await request.form()
     if inbox_conversation_id and not can(request, "support:ticket:read"):
         raise HTTPException(status_code=403, detail="Inbox access is required.")
     active = is_active is not None
@@ -428,6 +438,15 @@ def lead_create(
             is_active=active,
             inbox_conversation_id=inbox_conversation_id,
         )
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="lead",
+            target_id=outcome.lead_id,
+            form=raw_form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=actor_system_user_id,
+        )
         result = "existing" if outcome.replayed else "created"
         if inbox_conversation_id:
             return RedirectResponse(
@@ -454,6 +473,15 @@ def lead_create(
                 actor_system_user_id=actor_system_user_id,
                 field_errors=_lead_field_errors(exc),
                 **fields,
+            )
+        )
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="lead",
+                permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+                form=raw_form,
             )
         )
         return templates.TemplateResponse(
@@ -521,6 +549,16 @@ def lead_detail(
             raise HTTPException(status_code=404, detail="Conversation not found.")
     context = _ctx(request, db, "sales-leads")
     context.update(web_sales_service.build_lead_detail_context(db, lead_id=lead_id))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="lead",
+            target_id=context["lead"].id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
+    )
     context["inbox_conversation_id"] = inbox_conversation_id
     result = request.query_params.get("result")
     if result == "created":
@@ -1255,6 +1293,14 @@ def quote_new(
 ):
     context = _ctx(request, db, "sales-quotes")
     context.update(web_sales_service.build_quote_new_context(db, lead_id=lead_id))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="quote",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     return templates.TemplateResponse("admin/sales/quotes/form.html", context)
 
 
@@ -1295,7 +1341,7 @@ def quote_customer_search(q: str = Query(min_length=2), db: Session = Depends(ge
     response_class=HTMLResponse,
     dependencies=[Depends(require_permission("crm:quote:write"))],
 )
-def quote_create(
+async def quote_create(
     request: Request,
     submission_id: str | None = Form(default=None),
     lead_id: str | None = Form(default=None),
@@ -1322,6 +1368,7 @@ def quote_create(
     item_inventory_item_id: list[str] = Form(default=[]),
     db: Session = Depends(get_db),
 ):
+    raw_form = await request.form()
     active = is_active is not None
     items = web_sales_service.quote_form_item_rows(
         descriptions=item_description,
@@ -1352,7 +1399,7 @@ def quote_create(
         "items": items,
     }
     try:
-        web_sales_service.create_quote_from_form(
+        quote_id = web_sales_service.create_quote_from_form(
             db,
             actor_system_user_id=_quote_actor_system_user_id(request),
             submission_id=submission_id,
@@ -1379,6 +1426,15 @@ def quote_create(
             sub_offer_ids=item_sub_offer_id,
             inventory_item_ids=item_inventory_item_id,
         )
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="quote",
+            target_id=UUID(str(quote_id)),
+            form=raw_form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=_quote_actor_system_user_id(request),
+        )
         return RedirectResponse(url="/admin/sales/quotes", status_code=303)
     except (DomainError, ValidationError, ValueError) as exc:
         error = _error_detail(exc)
@@ -1387,6 +1443,15 @@ def quote_create(
     context.update(
         web_sales_service.build_quote_form_error_context(
             db, mode="create", quote_id=None, **fields
+        )
+    )
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="quote",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            form=raw_form,
         )
     )
     context["error"] = error
@@ -1403,6 +1468,16 @@ def quote_create(
 def quote_detail(request: Request, quote_id: str, db: Session = Depends(get_db)):
     context = _ctx(request, db, "sales-quotes")
     context.update(web_sales_service.build_quote_detail_context(db, quote_id=quote_id))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="quote",
+            target_id=context["quote"].id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
+    )
     return templates.TemplateResponse("admin/sales/quotes/detail.html", context)
 
 
@@ -1661,9 +1736,46 @@ def quote_line_item_delete(
         web_sales_service.delete_quote_line_item(
             db,
             item_id,
+            quote_id=quote_id,
             context=_quote_command_context(request, quote_id, action="line-remove"),
         )
     except (DomainError, ValidationError, ValueError) as exc:
+        context = _ctx(request, db, "sales-quotes")
+        context.update(
+            web_sales_service.build_quote_detail_context(db, quote_id=quote_id)
+        )
+        context["error"] = _error_detail(exc)
+        return templates.TemplateResponse(
+            "admin/sales/quotes/detail.html", context, status_code=400
+        )
+    return RedirectResponse(url=f"/admin/sales/quotes/{quote_id}", status_code=303)
+
+
+@router.post(
+    "/quotes/{quote_id}/line-items/{item_id}/edit",
+    dependencies=[Depends(require_permission("crm:quote:write"))],
+)
+def quote_line_item_update(
+    request: Request,
+    quote_id: str,
+    item_id: str,
+    description: str | None = Form(default=None),
+    quantity: str | None = Form(default=None),
+    unit_price: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        web_sales_service.update_quote_line_item_from_form(
+            db,
+            quote_id=quote_id,
+            item_id=item_id,
+            description=description,
+            quantity=quantity,
+            unit_price=unit_price,
+            context=_quote_command_context(request, quote_id, action="line-update"),
+        )
+    except (DomainError, ValidationError, ValueError) as exc:
+        db_session_adapter.discard_failed_transaction(db)
         context = _ctx(request, db, "sales-quotes")
         context.update(
             web_sales_service.build_quote_detail_context(db, quote_id=quote_id)
@@ -1863,6 +1975,14 @@ def sales_orders_list(
 def sales_order_new(request: Request, db: Session = Depends(get_db)):
     context = _ctx(request, db, "sales-orders")
     context.update(web_sales_service.build_sales_order_form_context(db))
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_creation_form_context(
+            db,
+            target_type="sales_order",
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        )
+    )
     return templates.TemplateResponse("admin/sales/sales_orders/form.html", context)
 
 
@@ -1892,9 +2012,27 @@ async def sales_order_create(request: Request, db: Session = Depends(get_db)):
                 str(item) for item in form.getlist("subscription_plan_id")
             ],
         )
-    except (ValueError, ValidationError) as exc:
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="sales_order",
+            target_id=order.id,
+            form=form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=_quote_actor_system_user_id(request),
+        )
+    except (ValueError, ValidationError, DomainError) as exc:
         context = _ctx(request, db, "sales-orders")
         context.update(web_sales_service.build_sales_order_form_context(db))
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        context.update(
+            web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="sales_order",
+                permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+                form=form,
+            )
+        )
         context.update({"form_error": _error_detail(exc), "form_data": dict(form)})
         return templates.TemplateResponse(
             "admin/sales/sales_orders/form.html", context, status_code=422
@@ -1985,5 +2123,15 @@ def sales_order_detail(request: Request, order_id: str, db: Session = Depends(ge
     context = _ctx(request, db, "sales-orders")
     context.update(
         web_sales_service.build_sales_order_detail_context(db, sales_order_id=order_id)
+    )
+    auth = getattr(getattr(request, "state", None), "auth", None) or {}
+    context.update(
+        web_custom_fields_service.build_target_value_context(
+            db,
+            target_type="sales_order",
+            target_id=context["order"].id,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            auth=auth,
+        )
     )
     return templates.TemplateResponse("admin/sales/sales_orders/detail.html", context)

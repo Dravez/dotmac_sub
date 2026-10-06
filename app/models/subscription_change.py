@@ -168,7 +168,7 @@ class SubscriptionChangeRequest(Base):
     # those paths either predate the contract or produce no immediate money.
     confirmation_preview_fingerprint: Mapped[str | None] = mapped_column(String(64))
     confirmation_idempotency_key: Mapped[str | None] = mapped_column(String(120))
-    confirmation_origin: Mapped[str | None] = mapped_column(String(40))
+    confirmation_origin: Mapped[str | None] = mapped_column(String(120))
     confirmation_snapshot: Mapped[dict | None] = mapped_column(JSON)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Structural links to the exact owner result. At most one document owner is

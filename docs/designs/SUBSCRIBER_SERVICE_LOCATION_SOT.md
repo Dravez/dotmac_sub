@@ -151,6 +151,29 @@ for date of birth, gender, and NIN. If any value is missing or invalid, the
 portal returns to the location page with a blocking biodata dialog and a button
 to `/portal/profile`.
 The profile owner validates the values server-side: DOB must be a valid
-non-future date, gender cannot be unknown, and NIN must contain exactly 11
-ASCII digits. Business, government, and NGO subscriber categories are not
-subject to this individual biodata gate.
+non-future date for a customer who meets the operator-controlled minimum age,
+gender cannot be unknown, and NIN must contain exactly 11 ASCII digits. The
+database-authoritative subscriber setting `customer_minimum_age_years` owns the
+minimum-age input, defaults to 13, and is editable from the Subscriber system
+settings page. The profile owner supplies the same effective age and latest
+allowed DOB to the customer form; browser constraints are guidance and the
+owner revalidates the exact date on every write. Business, government, and NGO
+subscriber categories are not subject to the individual biodata completion
+gate, but any DOB they submit still must satisfy the minimum-age policy.
+
+## Customer profile contact-address capture
+
+The Contact Address card on `/portal/profile` edits the legacy Subscriber
+contact-address fields through the typed
+`customer.portal_profile_commands` boundary; it does not move an approved
+service-location pin. Country selection uses the
+checked-in ISO 3166-1 alpha-2 catalog. When Nigeria is selected, the State /
+Region typeahead uses the NCC state/FCT catalog and the LGA typeahead is rebuilt
+from the selected state. Other countries retain a free-text Region field and do
+not accept a Nigerian LGA.
+
+The browser controls are guidance only. The command owner validates the country
+code, canonicalizes Nigerian state and LGA values, and rejects mismatched pairs.
+`Abuja Municipal Area Council` and `AMAC` are admitted FCT-only aliases for the
+canonical stored value `Municipal Area Council`. Address lines, City, and Postal
+Code remain ordinary contact-address fields.

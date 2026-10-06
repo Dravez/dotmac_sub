@@ -23,12 +23,16 @@
 # ADDED deliberately. It is the registered `customer.canonical_profile_patch`
 # participant, isolated from `customer.accounts`, and applies only an explicit
 # typed field set inside its calling coordinator's transaction.
+#
+# 2026-10-03 — `service|app/services/customer_portal_profile_commands.py`
+# ADDED deliberately. It is the registered owner for portal profile writes;
+# its two direct Subscriber writes reset email verification and persist the
+# seven declared notification preference keys atomically with the profile.
 
 cli_script|scripts/migration/backfill_crm_subscriber_links.py
 cli_script|scripts/migration/backfill_party_status.py
 cli_script|scripts/migration/import_crm_phase3.py
 cli_script|scripts/migration/kernel_lineage_rehearsal_canaries.py
-cli_script|scripts/one_off/backfill_crm_subscriber_ids.py
 cli_script|scripts/seed/seed_test_fixtures.py
 migration|alembic/versions/045_contact_channels_without_name.py
 migration|alembic/versions/116_add_billing_accounts.py
@@ -42,11 +46,11 @@ service|app/services/billing_cleanup_remediation.py
 service|app/services/brand_profiles.py
 service|app/services/crm_customer_name_repair.py
 service|app/services/crm_portal.py
-service|app/services/crm_ticket_pull.py
 service|app/services/customer_canonical_profile_patch.py
 service|app/services/customer_location_requests.py
 service|app/services/customer_portal_contacts.py
 service|app/services/customer_portal_notifications.py
+service|app/services/customer_portal_profile_commands.py
 service|app/services/gis_sync.py
 service|app/services/mrr_snapshot.py
 service|app/services/network_subscriber_bridge.py

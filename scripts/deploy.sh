@@ -42,9 +42,9 @@
 #   migrate + verify -> warm candidate -> recreate app+workers ->
 #   web + background-runtime health gates.
 #
-# On a failed health gate the previous image is re-pinned and the services are
-# recreated on it. Migrations are NOT reverted automatically — new revisions must
-# be backward-compatible with the previous release.
+# A failed health gate may restore the previous image only if the candidate
+# proves the database has no payment-email installation floor. Migrations are
+# never reverted automatically.
 set -euo pipefail
 
 # Deploy dir == repo root (sub deploys in place). Override with DEPLOY_DIR.
@@ -78,6 +78,11 @@ run_repo_module() {
 HEALTH_URL="${HEALTH_URL:-$(env_value HEALTH_URL)}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8001/health}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-180}"
+# Cold starts can include image extraction, Python imports, and application
+# startup work that is materially slower than the steady-state health gate.
+# Keep the candidate gate independent so a slow warm-up is not mistaken for a
+# failed release, while retaining the shorter timeout for the live primary.
+CANDIDATE_HEALTH_TIMEOUT_SECONDS="${CANDIDATE_HEALTH_TIMEOUT_SECONDS:-600}"
 # Per-attempt cap on the health-check curl itself, distinct from the overall
 # HEALTH_TIMEOUT_SECONDS retry budget above — without it a hung health
 # endpoint stalls a single curl call indefinitely instead of failing fast
@@ -169,7 +174,12 @@ wait_for_health() {
   local url="$1"
   local label="$2"
   local watched_container="${3:-}"
-  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  local timeout_seconds="${4:-${HEALTH_TIMEOUT_SECONDS}}"
+  if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]]; then
+    echo "${label} health gate misconfigured: timeout must be a non-negative integer" >&2
+    return 1
+  fi
+  local deadline=$((SECONDS + timeout_seconds))
   local state
   while true; do
     if curl -fsS --connect-timeout "${HEALTH_CURL_TIMEOUT}" \
@@ -185,7 +195,7 @@ wait_for_health() {
       fi
     fi
     if ((SECONDS >= deadline)); then
-      echo "${label} health gate failed: ${url}" >&2
+      echo "${label} health gate failed: ${url} (timeout ${timeout_seconds}s)" >&2
       return 1
     fi
     sleep 5
@@ -207,11 +217,12 @@ report_candidate_failure() {
 
 require_candidate_health() {
   if wait_for_health \
-    "${CANDIDATE_HEALTH_URL}" "Warm candidate" "${CANDIDATE_CONTAINER}"; then
+    "${CANDIDATE_HEALTH_URL}" "Warm candidate" "${CANDIDATE_CONTAINER}" \
+    "${CANDIDATE_HEALTH_TIMEOUT_SECONDS}"; then
     return 0
   fi
-  # Capture bounded diagnostics before the ERR trap removes the failed
-  # candidate and restores the previous release. Application logging rules
+  # Capture bounded diagnostics before the ERR trap evaluates the rollback
+  # floor. Application logging rules
   # prohibit secret material, so this emits runtime logs rather than env/config.
   report_candidate_failure
   return 1
@@ -808,8 +819,8 @@ set_env_value() {
   local value="$2"
   local backup_suffix=".deploy-$$.bak"
   if grep -q "^${key}=" .env; then
-    sed -i"${backup_suffix}" "s|^${key}=.*|${key}=${value}|" .env
-    rm -f -- ".env${backup_suffix}"
+    sed -i"${backup_suffix}" "s|^${key}=.*|${key}=${value}|" .env || return 1
+    rm -f -- ".env${backup_suffix}" || return 1
   else
     printf '%s=%s\n' "${key}" "${value}" >> .env
   fi
@@ -823,8 +834,8 @@ restore_env_value() {
     set_env_value "${key}" "${value}"
   else
     local backup_suffix=".deploy-$$.bak"
-    sed -i"${backup_suffix}" "/^${key}=/d" .env
-    rm -f -- ".env${backup_suffix}"
+    sed -i"${backup_suffix}" "/^${key}=/d" .env || return 1
+    rm -f -- ".env${backup_suffix}" || return 1
   fi
 }
 
@@ -1107,31 +1118,59 @@ else
 fi
 
 repin_prev() {
-  restore_env_value APP_IMAGE "${PREV_IMAGE_PRESENT}" "${PREV_IMAGE}"
-  restore_env_value GIT_SHA "${PREV_GIT_SHA_PRESENT}" "${PREV_GIT_SHA}"
+  restore_env_value APP_IMAGE "${PREV_IMAGE_PRESENT}" "${PREV_IMAGE}" || return 1
+  restore_env_value GIT_SHA "${PREV_GIT_SHA_PRESENT}" "${PREV_GIT_SHA}" || return 1
+}
+previous_image_rollback_allowed() {
+  # Execute this check from the candidate image and its runtime DB connection,
+  # before changing either pin or recreating a container from the old image.
+  APP_IMAGE="${IMAGE}" GIT_SHA="${FULL_SHA}" \
+    "${COMPOSE[@]}" run --rm --no-deps app \
+    python -m scripts.verify_payment_email_rollback
 }
 # A failure on or after `up -d` (below) may already have replaced/stopped the
 # previous containers — repinning .env alone does not bring anything back up.
-# Recreate on the restored pin too, same as the health-gate rollback further
-# down. `|| true`: this trap must not itself fail partway and lose the
-# repin/log that already ran; `set -e`'s normal exit-code propagation still
-# reports the ORIGINAL failure once the trap returns.
+# Recreate on the restored pin too, then prove restored health. This function
+# runs inside `if`, so every failure must be checked explicitly: Bash disables
+# errexit for the entire function in that context.
+ROLLBACK_OUTCOME="unknown"
 restore_prev() {
-  repin_prev
+  if ! previous_image_rollback_allowed; then
+    ROLLBACK_OUTCOME="floor_refused"
+    echo "DEPLOY ROLLBACK REFUSED: payment email floor is installed or unproved; retain candidate and repair forward." >&2
+    return 1
+  fi
+  ROLLBACK_OUTCOME="restore_failed"
+  if ! repin_prev; then
+    echo "DEPLOY RESTORE FAILED: previous-image pin is incomplete; inspect APP_IMAGE/GIT_SHA and repair forward." >&2
+    return 1
+  fi
   if [[ "${PRIMARY_REPLACED}" == "1" && -n "${PREV_IMAGE}" ]]; then
-    "${COMPOSE[@]}" up -d "${APP_SERVICES[@]}" || true
-    if [[ "${CANDIDATE_STARTED}" == "1" ]]; then
-      wait_for_health "${HEALTH_URL}" "Rolled-back primary" || true
+    if ! "${COMPOSE[@]}" up -d "${APP_SERVICES[@]}"; then
+      echo "DEPLOY RESTORE FAILED: previous-image recreation failed; retain candidate and repair forward." >&2
+      return 1
+    fi
+    if ! wait_for_health "${HEALTH_URL}" "Rolled-back primary"; then
+      echo "DEPLOY RESTORE FAILED: previous image is not healthy; retain candidate and repair forward." >&2
+      return 1
     fi
   fi
   cleanup_candidate
+  ROLLBACK_OUTCOME="restored"
 }
-trap 'restore_prev; echo "Deploy FAILED — APP_IMAGE/GIT_SHA restored to the previous release; previous image brought back up where possible" >&2' ERR
+report_rollback_outcome() {
+  if [[ "${ROLLBACK_OUTCOME}" == "floor_refused" ]]; then
+    echo "Automatic image rollback refused; deployment pin left as-is and candidate retained where available. Repair forward." >&2
+  else
+    echo "Previous-image restore incomplete; inspect APP_IMAGE/GIT_SHA, candidate retained where available. Repair forward." >&2
+  fi
+}
+trap 'if restore_prev; then echo "Deploy FAILED — previous image restored and healthy" >&2; else report_rollback_outcome; fi' ERR
 
 # From here on APP_IMAGE may already be pinned, so an interrupt must restore it
-# too -- not just terminate the backup child. (Migrations are NOT reverted; new
-# revisions must stay backward-compatible with the previous release.)
-trap 'cleanup_children; restore_prev; echo "Deploy interrupted — previous release restored" >&2; exit 130' INT TERM HUP
+# too -- not just terminate the backup child. Migrations are NOT reverted;
+# installed payment-email floor forbids old-image restoration.
+trap 'cleanup_children; if restore_prev; then echo "Deploy interrupted — previous image restored and healthy" >&2; else report_rollback_outcome; fi; exit 130' INT TERM HUP
 
 log "Verifying mandatory OpenBao boot secrets"
 APP_IMAGE="${IMAGE}" GIT_SHA="${FULL_SHA}" \
@@ -1169,11 +1208,7 @@ log "Verifying enabled integration manifest pins"
 "${COMPOSE[@]}" run --rm --no-deps app \
   python -m scripts.integrations.verify_manifest_pins
 
-log "Verifying CRM ticket capability readiness"
-"${COMPOSE[@]}" run --rm --no-deps app \
-  python -m scripts.integrations.verify_crm_ticket_readiness
-
-log "Starting warm candidate on 127.0.0.1:${CANDIDATE_PORT}"
+log "Starting warm candidate on 127.0.0.1:${CANDIDATE_PORT} (health timeout ${CANDIDATE_HEALTH_TIMEOUT_SECONDS}s)"
 docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
 # Do not use `--rm`: an early process exit must leave its state and bounded log
 # stream available to `report_candidate_failure` before rollback cleanup.
@@ -1199,13 +1234,15 @@ fi
 log "Waiting for app health at ${HEALTH_URL} (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
 if ! wait_for_health "${HEALTH_URL}" "Primary app"; then
   trap - ERR
-  log "Health gate FAILED (${HEALTH_URL} never became healthy) — rolling back to ${PREV_IMAGE:-none}"
+  log "Health gate FAILED (${HEALTH_URL} never became healthy) — checking previous-image rollback floor"
   if [[ -n "${PREV_IMAGE}" ]]; then
-    restore_prev
-    log "Rolled back to ${PREV_IMAGE}. NOTE: migrations from ${TAG} were NOT reverted."
+    if restore_prev; then
+      log "Rolled back to ${PREV_IMAGE}. NOTE: migrations from ${TAG} were NOT reverted."
+    else
+      report_rollback_outcome
+    fi
   else
-    cleanup_candidate
-    log "No previous image recorded — cannot auto-roll-back. Investigate the app container."
+    log "No previous image recorded — candidate retained where available. Repair forward."
   fi
   exit 1
 fi
@@ -1213,13 +1250,15 @@ fi
 log "Verifying Celery workers and Beat (timeout ${BACKGROUND_RUNTIME_TIMEOUT_SECONDS}s)"
 if ! wait_for_background_runtime; then
   trap - ERR
-  log "Background runtime health gate FAILED — rolling back to ${PREV_IMAGE:-none}"
+  log "Background runtime health gate FAILED — checking previous-image rollback floor"
   if [[ -n "${PREV_IMAGE}" ]]; then
-    restore_prev
-    log "Rolled back to ${PREV_IMAGE}. NOTE: migrations from ${TAG} were NOT reverted."
+    if restore_prev; then
+      log "Rolled back to ${PREV_IMAGE}. NOTE: migrations from ${TAG} were NOT reverted."
+    else
+      report_rollback_outcome
+    fi
   else
-    cleanup_candidate
-    log "No previous image recorded — cannot auto-roll-back. Investigate the Celery containers."
+    log "No previous image recorded — healthy candidate retained. Investigate the Celery containers."
   fi
   exit 1
 fi

@@ -1,4 +1,4 @@
-"""Customer-only Inbox completion readiness and canonical profile command."""
+"""Inbox Customer completion and classified-Lead resolution readiness."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditActorType
@@ -24,6 +24,7 @@ from app.models.subscriber import (
 from app.models.team_inbox import (
     InboxConversation,
     InboxCustomerCompletionPolicyVersion,
+    InboxMessage,
 )
 from app.services import (
     conversation_lead_relationships,
@@ -321,6 +322,35 @@ def canonical_customer_values(
     return _canonical_values(db, subscriber, canonical_party)
 
 
+def _classified_sales_candidate_pending(
+    db: Session, conversation: InboxConversation
+) -> bool:
+    if conversation_lead_relationships.active_link(db, conversation.id) is not None:
+        return False
+    requires_follow_up = InboxMessage.metadata_[
+        "ai_intake_requires_follow_up"
+    ].as_boolean()
+    return (
+        db.scalar(
+            select(InboxMessage.id)
+            .where(
+                InboxMessage.conversation_id == conversation.id,
+                InboxMessage.direction == "inbound",
+                InboxMessage.metadata_["ai_intake_status"].as_string() == "classified",
+                InboxMessage.metadata_["ai_intent"]
+                .as_string()
+                .in_({"new_connection", "coverage_request"}),
+                InboxMessage.metadata_["ai_party_type"]
+                .as_string()
+                .in_({"individual", "organization"}),
+                or_(requires_follow_up.is_(None), requires_follow_up.is_(False)),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def resolution_readiness_for_conversation(
     db: Session, conversation_id: UUID
 ) -> InboxCustomerResolutionReadiness | None:
@@ -338,7 +368,7 @@ def resolution_readiness(
     *,
     evaluated_at: datetime | None = None,
 ) -> InboxCustomerResolutionReadiness:
-    """Return the authoritative Customer-only manual-resolution verdict."""
+    """Return the authoritative Customer/Lead manual-resolution verdict."""
 
     observed_at = evaluated_at or datetime.now(UTC)
     identity = classification(db, conversation)
@@ -363,7 +393,28 @@ def resolution_readiness(
     blockers: list[ActionableBlocker] = []
     field_states: list[CustomerFieldReadiness] = []
     policy_version: int | None = None
-    if identity is not InboxIdentityClassification.customer and identity_guard_enabled:
+    if (
+        identity is not InboxIdentityClassification.customer
+        and _classified_sales_candidate_pending(db, conversation)
+    ):
+        blockers.append(
+            ActionableBlocker(
+                code="inbox_lead_materialization_required",
+                owner="sales.lead_intake",
+                customer_message="This sales enquiry must be linked to a Lead.",
+                staff_detail=(
+                    "The final AI sales classification has not produced its "
+                    "Party-backed Lead relationship. Retry the durable consequence "
+                    "or create/link the Lead through the Inbox action."
+                ),
+                evidence=BlockerEvidence(
+                    summary="A qualifying classified sales message has no active Lead link."
+                ),
+            )
+        )
+    elif (
+        identity is not InboxIdentityClassification.customer and identity_guard_enabled
+    ):
         blockers.append(
             ActionableBlocker(
                 code="inbox_identity_required",
@@ -441,8 +492,20 @@ def resolution_readiness(
                         )
                     )
     state = ReadinessState.blocked if blockers else ReadinessState.ready
-    next_actions = (
-        (
+    next_actions: tuple[NextAction, ...]
+    if any(
+        blocker.code == "inbox_lead_materialization_required" for blocker in blockers
+    ):
+        next_actions = (
+            NextAction(
+                key="create_or_link_lead",
+                label="Create or link the Lead",
+                owner="communications.inbox_lead_actions",
+                url=f"/admin/inbox?c={conversation.id}",
+            ),
+        )
+    elif blockers:
+        next_actions = (
             NextAction(
                 key="complete_customer_profile",
                 label="Complete customer information",
@@ -450,9 +513,8 @@ def resolution_readiness(
                 url=f"/admin/inbox?c={conversation.id}",
             ),
         )
-        if blockers
-        else ()
-    )
+    else:
+        next_actions = ()
     return InboxCustomerResolutionReadiness(
         classification=identity,
         policy_version=policy_version,

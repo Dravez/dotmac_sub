@@ -1,9 +1,12 @@
 """Admin customer (person & business) management web routes."""
 
+import csv
+import io
 import json
 import logging
 import uuid
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal
 from urllib.parse import quote_plus
 from uuid import UUID, uuid4
@@ -42,6 +45,7 @@ from app.services import web_billing_ledger as web_billing_ledger_service
 from app.services import (
     web_catalog_subscription_workflows as web_catalog_subscription_workflows_service,
 )
+from app.services import web_custom_fields as web_custom_fields_service
 from app.services import web_customer_actions as web_customer_actions_service
 from app.services import (
     web_customer_availability as web_customer_availability_service,
@@ -61,6 +65,7 @@ from app.services.audit_helpers import (
 from app.services.auth_dependencies import (
     can,
     has_permission,
+    load_permission_keys,
     require_any_permission,
     require_permission,
 )
@@ -87,6 +92,9 @@ register_customer_portal_filters(templates)
 router = APIRouter(prefix="/customers", tags=["web-admin-customers"])
 
 _NOTIFICATION_QUEUE_TASK = "app.tasks.notifications.deliver_notification_queue"
+_BULK_MESSAGE_MATERIALIZE_TASK = (
+    "app.tasks.notifications.materialize_customer_bulk_message"
+)
 
 
 def _reseller_form_context(
@@ -150,7 +158,7 @@ def _kick_notification_delivery(result: dict[str, object]) -> dict[str, object]:
 
 
 contacts_router = APIRouter(prefix="/contacts", tags=["web-admin-contacts"])
-_ALLOWED_USAGE_PERIODS = {"current", "last"}
+_ALLOWED_USAGE_PERIODS = {"current", "last", "custom"}
 
 
 def _htmx_error_response(
@@ -236,11 +244,127 @@ def _subscription_action_permission_context(
         ),
         "can_activate_subscriptions": can_write_catalog
         or (bool(auth) and has_permission(auth, db, "subscription:activate")),
+        "can_test_connection": bool(auth)
+        and auth.get("principal_type") == "system_user"
+        and has_permission(auth, db, "subscription:test_connection"),
         "can_suspend_subscriptions": can_write_catalog
         or (bool(auth) and has_permission(auth, db, "subscription:suspend")),
         "can_reconcile_service_changes": bool(auth)
         and has_permission(auth, db, "provisioning:service_change_reconcile"),
     }
+
+
+@router.get(
+    "/{customer_type}/{customer_id}/subscriptions/{subscription_id}/test-connection",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("subscription:test_connection"))],
+)
+def customer_test_connection_form(
+    request: Request,
+    customer_type: Literal["person", "business"],
+    customer_id: UUID,
+    subscription_id: UUID,
+    duration_hours: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    from app.services.test_connection import (
+        TEST_CONNECTION_FORM,
+        TestConnectionPreviewQuery,
+        preview_test_connection,
+    )
+    from app.web.admin import get_current_user, get_sidebar_stats
+
+    try:
+        preview = preview_test_connection(
+            db,
+            query=TestConnectionPreviewQuery(
+                subscriber_id=customer_id,
+                subscription_id=subscription_id,
+                duration_hours=duration_hours,
+            ),
+        )
+    except DomainError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code.endswith("subscription_not_found") else 400,
+            detail=exc.message,
+        ) from exc
+    return templates.TemplateResponse(
+        "admin/customers/test_connection.html",
+        {
+            "request": request,
+            "current_user": get_current_user(request),
+            "sidebar_stats": get_sidebar_stats(db),
+            "active_page": "customers",
+            "active_menu": "customers",
+            "preview": preview,
+            "form_state": TEST_CONNECTION_FORM.state(list(preview.prerequisites)),
+            "command_id": str(uuid4()),
+            "customer_url": f"/admin/customers/{customer_type}/{customer_id}",
+        },
+    )
+
+
+@router.post(
+    "/{customer_type}/{customer_id}/subscriptions/{subscription_id}/test-connection",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("subscription:test_connection"))],
+)
+def customer_test_connection_activate(
+    request: Request,
+    customer_type: Literal["person", "business"],
+    customer_id: UUID,
+    subscription_id: UUID,
+    duration_hours: int = Form(...),
+    command_id: UUID = Form(...),
+):
+    from app.services.test_connection import (
+        PERMISSION,
+        ActivateTestConnectionCommand,
+        activate_test_connection,
+    )
+
+    auth = getattr(request.state, "auth", {})
+    if auth.get("principal_type") != "system_user" or not auth.get("principal_id"):
+        raise HTTPException(
+            status_code=403, detail="Test Connection requires an authorized staff user."
+        )
+    actor_id = UUID(str(auth["principal_id"]))
+    context = CommandContext(
+        command_id=command_id,
+        correlation_id=command_id,
+        actor=str(actor_id),
+        scope=PERMISSION,
+        reason="Customer subscription connectivity troubleshooting",
+        idempotency_key=f"test-connection:{command_id}",
+    )
+    redirect_url = f"/admin/customers/{customer_type}/{customer_id}"
+    try:
+        with db_session_adapter.owner_command_session() as db:
+            outcome = activate_test_connection(
+                db,
+                command=ActivateTestConnectionCommand(
+                    context=context,
+                    subscriber_id=customer_id,
+                    subscription_id=subscription_id,
+                    actor_id=actor_id,
+                    duration_hours=duration_hours,
+                ),
+            )
+    except DomainError as exc:
+        return _toast_response(
+            request=request,
+            redirect_url=redirect_url,
+            ok=False,
+            title="Test Connection not activated",
+            message=exc.message,
+        )
+    return _toast_response(
+        request=request,
+        redirect_url=redirect_url,
+        ok=True,
+        title="Test Connection requested",
+        message=f"{outcome.duration_seconds // 3600} hour(s) granted. Expires {outcome.expires_at.strftime('%d %b %Y %H:%M UTC')}. Check the subscription for delivery status.",
+    )
 
 
 def _workflow_changed_count(result: Mapping[str, Any]) -> int:
@@ -311,6 +435,43 @@ def _normalize_usage_view(value: object) -> Literal["chart", "table"]:
     if value == "table":
         return "table"
     return "chart"
+
+
+def _usage_page_query(
+    *,
+    customer_id: UUID,
+    period: str,
+    start_date: date | None,
+    end_date: date | None,
+    page: int,
+    per_page: int,
+) -> customer_portal.UsagePageQuery:
+    date_range = None
+    if start_date is not None or end_date is not None:
+        if start_date is None or end_date is None:
+            raise customer_portal.UsageQueryError(
+                code="usage_date_range_incomplete",
+                message="Select both a start date and an end date.",
+                retryable=False,
+            )
+        date_range = customer_portal.UsageDateRange(start_date, end_date)
+        period = customer_portal.UsagePeriod.custom.value
+    normalized_period = _normalize_usage_period(period)
+    return customer_portal.UsagePageQuery(
+        customer_id=customer_id,
+        period=customer_portal.UsagePeriod(normalized_period),
+        date_range=date_range,
+        page=page,
+        per_page=per_page,
+        allow_postgres_fallback=True,
+    )
+
+
+def _csv_safe_cell(value: object) -> str:
+    rendered = str(value or "")
+    if rendered.startswith(("=", "+", "-", "@")):
+        return f"'{rendered}"
+    return rendered
 
 
 def _format_bps(value: float | int | None) -> str:
@@ -655,6 +816,13 @@ def customer_new(
             "current_user": current_user,
             "sidebar_stats": sidebar_stats,
             **_reseller_form_context(db, None),
+            **web_custom_fields_service.build_creation_form_context(
+                db,
+                target_type="subscriber",
+                permission_keys=load_permission_keys(
+                    getattr(getattr(request, "state", None), "auth", None) or {}, db
+                ),
+            ),
         },
     )
 
@@ -664,7 +832,7 @@ def customer_new(
     response_class=HTMLResponse,
     dependencies=[Depends(require_permission("customer:write"))],
 )
-def customer_create(
+async def customer_create(
     request: Request,
     customer_type: str = Form(...),
     # Subscriber fields
@@ -716,6 +884,7 @@ def customer_create(
     db: Session = Depends(get_db),
 ):
     """Create a new customer (person or business)."""
+    raw_form = await request.form()
     try:
         contact_columns = {
             "first_name": contact_first_name,
@@ -771,6 +940,17 @@ def customer_create(
                 contact_columns=contact_columns,
             )
         )
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
+        web_custom_fields_service.apply_creation_values(
+            db,
+            target_type="subscriber",
+            target_id=UUID(created_id),
+            form=raw_form,
+            permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+            actor=(
+                getattr(getattr(request, "state", None), "actor_id", None) or created_id
+            ),
+        )
 
         return RedirectResponse(
             url=f"/admin/customers/{created_type}/{created_id}",
@@ -811,6 +991,7 @@ def customer_create(
             )
         except Exception:
             contact_rows = []
+        auth = getattr(getattr(request, "state", None), "auth", None) or {}
         return templates.TemplateResponse(
             "admin/customers/form.html",
             {
@@ -827,6 +1008,14 @@ def customer_create(
                 "managed_by_reseller": managed_by_reseller is not None,
                 "selected_reseller_id": reseller_id or "",
                 "selected_reseller_label": reseller_label or "",
+                **web_custom_fields_service.build_creation_form_context(
+                    db,
+                    target_type="subscriber",
+                    permission_keys=load_permission_keys(auth, db)
+                    if auth
+                    else frozenset(),
+                    form=raw_form,
+                ),
             },
             status_code=400,
         )
@@ -845,11 +1034,24 @@ def person_detail(
     usage_page: int = Query(1, ge=1),
     usage_per_page: int = Query(25, ge=10, le=100),
     usage_view: str = Query("chart", pattern="^(chart|table)$"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     """View customer details (unified — person and org members)."""
     usage_period = _normalize_usage_period(usage_period)
     usage_view = _normalize_usage_view(usage_view)
+    if usage_start_date is not None or usage_end_date is not None:
+        if usage_start_date is None or usage_end_date is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Select both a start date and an end date.",
+            )
+        try:
+            customer_portal.UsageDateRange(usage_start_date, usage_end_date)
+        except customer_portal.UsageQueryError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
+        usage_period = customer_portal.UsagePeriod.custom.value
     request_auth = getattr(getattr(request, "state", None), "auth", None) or {}
     # Same gate the inbox workspace uses, decided here and honoured by the
     # snapshot builder so unpermitted conversation data is never assembled.
@@ -889,6 +1091,14 @@ def person_detail(
     auth = getattr(getattr(request, "state", None), "auth", None) or {}
     from app.services import location_capture
 
+    custom_field_context = web_custom_fields_service.build_target_value_context(
+        db,
+        target_type="subscriber",
+        target_id=detail_data["customer"].id,
+        permission_keys=load_permission_keys(auth, db) if auth else frozenset(),
+        auth=auth,
+    )
+
     can_confirm_location = bool(auth) and has_permission(auth, db, "customer:write")
     can_unsuspend_account = bool(auth) and has_permission(auth, db, "customer:update")
     location_capture_enabled = can_confirm_location and location_capture.prompt_enabled(
@@ -923,6 +1133,11 @@ def person_detail(
     )
     if usage_view == "table":
         stats_url += "&usage_view=table"
+    if usage_start_date is not None and usage_end_date is not None:
+        stats_url += (
+            f"&usage_start_date={usage_start_date.isoformat()}"
+            f"&usage_end_date={usage_end_date.isoformat()}"
+        )
     detail_config = {
         "statsUrl": stats_url,
         "detailUrl": f"/admin/customers/person/{customer.id}",
@@ -943,6 +1158,8 @@ def person_detail(
             "usage_page": usage_page,
             "usage_per_page": usage_per_page,
             "usage_view": usage_view,
+            "usage_start_date": usage_start_date,
+            "usage_end_date": usage_end_date,
             "customer_type": customer_type,
             "detail_config": detail_config,
             "bulk_notification_channels": notification_channels,
@@ -954,6 +1171,7 @@ def person_detail(
             "can_read_service_extensions": show_service_extensions,
             "can_create_service_extension": can_create_service_extension,
             "party_binding_repair": party_binding_repair,
+            **custom_field_context,
             "sidebar_stats": sidebar_stats,
         },
     )
@@ -1368,6 +1586,8 @@ def person_detail_stats(
     usage_page: int = Query(1, ge=1),
     usage_per_page: int = Query(25, ge=10, le=100),
     usage_view: str = Query("chart", pattern="^(chart|table)$"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
     db: Session = Depends(get_db),
 ):
     usage_period = _normalize_usage_period(usage_period)
@@ -1375,14 +1595,19 @@ def person_detail_stats(
     subscriber = _get_subscriber(db=db, subscriber_id=customer_id)
 
     usage_customer = {"subscriber_id": str(subscriber.id)}
-    usage_portal = customer_portal.get_usage_page(
-        db,
-        usage_customer,
-        period=usage_period,
-        page=usage_page,
-        per_page=usage_per_page,
-        allow_postgres_fallback=True,
-    )
+    try:
+        usage_query = _usage_page_query(
+            customer_id=UUID(str(subscriber.id)),
+            period=usage_period,
+            start_date=usage_start_date,
+            end_date=usage_end_date,
+            page=usage_page,
+            per_page=usage_per_page,
+        )
+        usage_result = customer_portal.query_usage_page(db, usage_query)
+    except customer_portal.UsageQueryError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    usage_portal = usage_result.to_template_context()
     usage_subscription = resolve_customer_subscription(db, usage_customer)
     initial_bandwidth_stats = _load_initial_bandwidth_stats(
         db,
@@ -1401,6 +1626,73 @@ def person_detail_stats(
             ),
             "usage_view": usage_view,
         },
+    )
+
+
+@router.get(
+    "/person/{customer_id}/stats/export.csv",
+    dependencies=[Depends(require_permission("customer:read"))],
+)
+def person_detail_stats_export(
+    customer_id: str,
+    usage_period: str = Query("current"),
+    usage_start_date: date | None = None,
+    usage_end_date: date | None = None,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Export every customer usage record matching the selected date filter."""
+    usage_period = _normalize_usage_period(usage_period)
+    subscriber = _get_subscriber(db=db, subscriber_id=customer_id)
+    try:
+        usage_query = _usage_page_query(
+            customer_id=UUID(str(subscriber.id)),
+            period=usage_period,
+            start_date=usage_start_date,
+            end_date=usage_end_date,
+            page=1,
+            per_page=25,
+        )
+        usage_result = customer_portal.query_usage_export(db, usage_query)
+    except customer_portal.UsageQueryError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Date",
+            "Type",
+            "Total usage",
+            "Download",
+            "Upload",
+            "Unit",
+            "Notes",
+        ]
+    )
+    for record in usage_result.usage_records:
+        writer.writerow(
+            [
+                record.recorded_at.date().isoformat(),
+                _csv_safe_cell(record.usage_type),
+                f"{record.amount:.2f}",
+                f"{record.download_amount:.2f}",
+                f"{record.upload_amount:.2f}",
+                _csv_safe_cell(record.unit),
+                _csv_safe_cell(record.description),
+            ]
+        )
+
+    range_suffix = (
+        f"{usage_result.date_range.start_date.isoformat()}_to_"
+        f"{usage_result.date_range.end_date.isoformat()}"
+        if usage_result.date_range
+        else usage_result.period.value
+    )
+    filename = f"customer-{subscriber.id}-stats-{range_suffix}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -3120,12 +3412,44 @@ def bulk_send_customer_message(
 ):
     """Queue a bulk notification for selected or filtered customers."""
     try:
-        result = web_customer_actions_service.queue_bulk_message_from_payload(
-            db=db, payload=data
+        if bool(data.get("preview_only")):
+            return web_customer_actions_service.queue_bulk_message_from_payload(
+                db=db,
+                payload=data,
+            )
+
+        prepared = (
+            web_customer_actions_service.prepare_bulk_message_dispatch_from_payload(
+                db=db,
+                payload=data,
+            )
         )
-        if result.get("preview") is True:
-            return result
-        return _kick_notification_delivery(result)
+        dispatch = enqueue_task(
+            _BULK_MESSAGE_MATERIALIZE_TASK,
+            args=(prepared.payload_json,),
+            queue="celery",
+            correlation_id=str(data.get("expected_impact_token") or "") or None,
+            source="admin_customers_bulk_send",
+            actor_id=_get_actor_id(request),
+        )
+        if not dispatch.queued:
+            logger.error(
+                "Failed to enqueue customer bulk message materialization: %s",
+                dispatch.error,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The bulk message could not be queued for processing. "
+                    "Please try again."
+                ),
+            )
+        result = prepared.accepted_response()
+        result["materialization_dispatch"] = {
+            "queued": True,
+            "task_id": dispatch.task_id,
+        }
+        return JSONResponse(status_code=202, content=result)
     except HTTPException:
         raise
     except Exception as e:

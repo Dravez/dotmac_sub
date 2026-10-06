@@ -40,7 +40,7 @@
 #
 #
 #
-# --- app: 250 files ---
+# --- app: 242 files ---
 app/api/campaigns.py
 app/api/crm.py
 app/api/crm_referrals.py
@@ -127,7 +127,6 @@ app/services/billing/credit_notes.py
 app/services/carried_source_identity_adjudication.py
 app/services/chat_session.py
 app/services/comms_campaigns.py
-app/services/control_registry.py
 app/services/control_relationships.py
 app/services/crm_api.py
 app/services/crm_client.py
@@ -136,7 +135,6 @@ app/services/crm_customers.py
 app/services/crm_portal.py
 app/services/crm_reporting.py
 app/services/crm_subscriber_provisioning.py
-app/services/crm_ticket_pull.py
 app/services/cross_app_drift.py
 app/services/customer_identity_normalization.py
 app/services/customer_name_repairs.py
@@ -177,13 +175,11 @@ app/services/infrastructure_health.py
 app/services/integration_sync.py
 app/services/integrations/connectors/dotmac_crm.py
 app/services/integrations/crm_capability.py
-app/services/integrations/crm_ticket_readiness.py
 app/services/integrations/inbox.py
 app/services/integrations/registry.py
 app/services/integrations/runtime_execution.py
 app/services/lead_intake_ai.py
 app/services/migration_source_export.py
-app/services/module_manager.py
 app/services/ncc_categorisation.py
 app/services/ncc_complaints_report.py
 app/services/ncc_location.py
@@ -255,7 +251,6 @@ app/services/vendor_admin.py
 app/services/vendor_user_provisioning.py
 app/services/web_customer_details.py
 app/services/web_dispatch_work_orders.py
-app/services/web_integration_syncs.py
 app/services/web_integrations.py
 app/services/web_projects.py
 app/services/web_referrals.py
@@ -270,8 +265,6 @@ app/services/work_order_views.py
 app/services/workqueue/events.py
 app/services/workqueue/permissions.py
 app/services/workqueue/providers/work_orders.py
-app/tasks/__init__.py
-app/tasks/crm_ticket_pull.py
 app/tasks/quotes.py
 app/tasks/referrals.py
 app/web/admin/__init__.py
@@ -279,7 +272,6 @@ app/web/admin/crm_referrals.py
 app/web/admin/customer_retention.py
 app/web/admin/field_maps.py
 app/web/admin/inbox.py
-app/web/admin/integrations.py
 app/web/admin/lead_intake.py
 app/web/admin/meta_connection.py
 app/web/admin/projects.py
@@ -368,6 +360,7 @@ alembic/versions_archive/p0q1r2s3t4u5_add_integration_connector_model.py
 #
 # --- docs: 107 files ---
 docs/ACCOUNT_CREDIT_DEPOSITS.md
+docs/ARCHITECTURE.md
 docs/CHAT_LIVE_SETUP.md
 docs/CODING_STANDARD.md
 docs/CONTROL_RELATIONSHIPS_AND_BRANDING_SOT.md
@@ -467,7 +460,6 @@ docs/runbooks/MATERIAL_REQUEST_ERP_CUTOVER.md
 docs/runbooks/META_SOCIAL_INBOX_CUTOVER.md
 docs/runbooks/NCC_WEEKLY_REPORT_CUTOVER.md
 docs/runbooks/ONT_CONFIGURATION_HOTFIX_2026_08_21.md
-docs/runbooks/PRODUCTION_DEPLOYMENT.md
 docs/runbooks/SERVICE_TEAM_PARTY_CUTOVER.md
 docs/runbooks/SUPPORT_TICKET_PORTAL_VISIBILITY_RECONCILIATION.md
 docs/runbooks/TEAM_INBOX_SUBSCRIBER_LINK_REPAIR.md
@@ -475,13 +467,9 @@ docs/runbooks/TEMPORARY_CRM_CHAT_AUTHORITY.md
 docs/runbooks/TICKET_WORK_ORDER_PROVENANCE_CUTOVER.md
 docs/testing/EDGE_CASE_MATRIX.md
 #
-# --- scripts: 29 files ---
+# --- scripts: 23 files ---
 scripts/architecture/crm_web_retirement.py
 scripts/architecture/subscriber_metadata_census.py
-scripts/ci/classify_postgresql_changes.py
-scripts/deploy.sh
-scripts/integrations/reconcile_crm_ticket_capability.py
-scripts/integrations/verify_crm_ticket_readiness.py
 scripts/migration/backfill_crm_subscriber_links.py
 scripts/migration/backfill_party_status.py
 scripts/migration/build_crm_staff_map.py
@@ -499,14 +487,12 @@ scripts/migration/provision_staff_from_map.py
 scripts/migration/run_crm_tickets_phase1_incremental.sh
 scripts/network/crm_network_map_point_migration.py
 scripts/network/stage_crm_network_map.py
-scripts/one_off/backfill_crm_subscriber_ids.py
 scripts/one_off/crm_customer_name_repair.py
-scripts/one_off/import_crm_tickets.py
 scripts/one_off/restore_crm_placeholder_identity.py
 scripts/one_off/review_carried_source_identity.py
 scripts/seed/seed_rbac.py
 #
-# --- tests: 250 files ---
+# --- tests: 246 files ---
 tests/architecture/adapter_keyword_service_call_baseline.txt
 tests/architecture/adapter_transaction_baseline.txt
 tests/architecture/connector_manifest_pins.json
@@ -520,13 +506,12 @@ tests/architecture/openapi_contract_surface.json
 tests/architecture/service_http_exception_baseline.txt
 tests/architecture/sot_writer_baseline.txt
 tests/architecture/subscriber_metadata_writers_baseline.txt
-tests/architecture/test_ci_pipeline.py
-tests/architecture/test_communication_eligibility_ownership.py
 tests/architecture/test_crm_customer_boundary.py
 tests/architecture/test_crm_network_map_point_migration_boundary.py
-tests/architecture/test_crm_ticket_pull_resolution.py
+tests/architecture/test_crm_ticket_pull_retired.py
 tests/architecture/test_crm_vocabulary_freeze.py
 tests/architecture/test_crm_web_retirement.py
+tests/architecture/test_automation_capability_registry.py
 tests/architecture/test_customer_credential_enrollment_boundary.py
 tests/architecture/test_customer_experience_lifecycle_sot.py
 tests/architecture/test_erp_neutral_wire_contract.py
@@ -557,13 +542,11 @@ tests/integration/test_crm_leads_selfcare.py
 tests/integration/test_crm_network_map_command_sessions.py
 tests/integration/test_flow_quotes.py
 tests/integration/test_flow_referrals.py
-tests/integration/test_flow_tickets.py
 tests/integration/test_flow_work_orders.py
 tests/integration_platform_helpers.py
 tests/js/network_map_v2.test.js
 tests/playwright/e2e/test_reseller_portal.py
 tests/playwright/e2e/test_sales_leads.py
-tests/scripts/test_classify_postgresql_changes.py
 tests/services/topology/test_outage_tickets.py
 tests/services/topology/test_outage_webhook_events.py
 tests/test_admin_inbox_implemented_features.py
@@ -607,13 +590,11 @@ tests/test_crm_payment_idempotency.py
 tests/test_crm_payment_ingest.py
 tests/test_crm_portal_services.py
 tests/test_crm_portal_token_reuse.py
-tests/test_crm_pull_observability.py
 tests/test_crm_reporting.py
 tests/test_crm_service_auth.py
 tests/test_crm_subscriber_provisioning.py
 tests/test_crm_subscription_create.py
 tests/test_crm_ticket_capability_cutover.py
-tests/test_crm_ticket_pull.py
 tests/test_crm_webhook_dedup.py
 tests/test_crm_webhooks.py
 tests/test_cross_app_drift.py
@@ -621,7 +602,6 @@ tests/test_customer_experience_lifecycle_migration.py
 tests/test_customer_timeline_projection.py
 tests/test_customer_work_order_selfcare.py
 tests/test_db_scheduler_underfiring.py
-tests/test_deploy_release_metadata.py
 tests/test_dispatch_api.py
 tests/test_dispatch_models.py
 tests/test_dispatch_services.py
@@ -671,6 +651,7 @@ tests/test_infrastructure_health.py
 tests/test_integration_capability_sync.py
 tests/test_integration_installations.py
 tests/test_integration_manifest_registry.py
+tests/test_integration_retired_crm_job.py
 tests/test_integrations_external_services.py
 tests/test_main_domain_routing.py
 tests/test_maps_vendor_route_domain.py
@@ -727,6 +708,7 @@ tests/test_sot_relationships.py
 tests/test_subscriber_lga_capture.py
 tests/test_subscription_billing_cadence.py
 tests/test_support_services.py
+tests/test_system_integration_contracts.py
 tests/test_team_inbox_email_routes.py
 tests/test_team_inbox_metrics.py
 tests/test_team_inbox_readiness_gate.py
@@ -758,4 +740,4 @@ tests/test_work_order_views.py
 tests/test_workqueue_parity.py
 tests/test_workqueue_web.py
 #
-# TOTAL: 709 files
+# TOTAL: 690 files

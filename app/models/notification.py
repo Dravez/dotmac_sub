@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -36,10 +38,22 @@ class NotificationChannel(enum.Enum):
     webhook = "webhook"
 
 
+class NotificationTemplatePurpose(enum.StrEnum):
+    """Policy category used when an admin manually sends a template."""
+
+    general = "general"
+    billing = "billing"
+    service = "service"
+    account = "account"
+    credentials = "credentials"
+
+
 class NotificationStatus(enum.Enum):
     queued = "queued"
     sending = "sending"
+    submitted = "submitted"
     delivered = "delivered"
+    bounced = "bounced"
     failed = "failed"
     canceled = "canceled"
 
@@ -103,6 +117,129 @@ class CommunicationIntentRecord(Base):
     subscriber = relationship("Subscriber")
     template = relationship("NotificationTemplate")
     notifications = relationship("Notification", back_populates="communication_intent")
+    recipient_decisions = relationship(
+        "CommunicationIntentRecipient", back_populates="intent"
+    )
+
+
+class CommunicationIntentRecipient(Base):
+    """Durable per-recipient decision made before any physical delivery exists."""
+
+    __tablename__ = "communication_intent_recipients"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "id", name="uq_communication_intent_recipients_tenant_id"
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "intent_id",
+            "audience_type",
+            "audience_id",
+            "channel",
+            "normalized_recipient",
+            name="uq_communication_intent_recipient_identity",
+        ),
+        CheckConstraint(
+            "decision IN ('accepted', 'suppressed')",
+            name="ck_communication_intent_recipient_decision",
+        ),
+        Index(
+            "ix_communication_intent_recipients_tenant_intent", "tenant_id", "intent_id"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("communication_intents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    audience_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    audience_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    subscriber_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    channel: Mapped[NotificationChannel] = mapped_column(
+        Enum(NotificationChannel), nullable=False
+    )
+    recipient: Mapped[str | None] = mapped_column(String(255))
+    normalized_recipient: Mapped[str | None] = mapped_column(String(255))
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    suppression_reason: Mapped[str | None] = mapped_column(String(255))
+    requested_status: Mapped[NotificationStatus] = mapped_column(
+        Enum(NotificationStatus), nullable=False
+    )
+    requested_last_error: Mapped[str | None] = mapped_column(Text)
+    delivery_latency: Mapped[str] = mapped_column(String(20), nullable=False)
+    send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canonical_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    persist_suppression: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", MutableDict.as_mutable(JSON()), default=dict, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    intent = relationship(
+        "CommunicationIntentRecord", back_populates="recipient_decisions"
+    )
+    coverage = relationship(
+        "NotificationIntentCoverage", back_populates="recipient_decision", uselist=False
+    )
+
+
+class NotificationIntentCoverage(Base):
+    """One source recipient covered by one physical notification delivery."""
+
+    __tablename__ = "notification_intent_coverage"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "intent_recipient_id"],
+            [
+                "communication_intent_recipients.tenant_id",
+                "communication_intent_recipients.id",
+            ],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "intent_recipient_id",
+            name="uq_notification_intent_coverage_source",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'covered', 'suppressed')",
+            name="ck_notification_intent_coverage_status",
+        ),
+        Index(
+            "ix_notification_intent_coverage_tenant_delivery",
+            "tenant_id",
+            "notification_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    intent_recipient_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    notification_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("notifications.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    recipient_decision = relationship(
+        "CommunicationIntentRecipient", back_populates="coverage"
+    )
+    notification = relationship("Notification")
 
 
 class DeliveryStatus(enum.Enum):
@@ -115,9 +252,16 @@ class DeliveryStatus(enum.Enum):
 
 class NotificationTemplate(Base):
     __tablename__ = "notification_templates"
+    studio_content_sealed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     __table_args__ = (
         UniqueConstraint(
             "code", "channel", name="uq_notification_templates_code_channel"
+        ),
+        CheckConstraint(
+            "purpose IN ('general', 'billing', 'service', 'account', 'credentials')",
+            name="ck_notification_templates_purpose",
         ),
     )
 
@@ -127,6 +271,16 @@ class NotificationTemplate(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     code: Mapped[str] = mapped_column(String(120), nullable=False)
     channel: Mapped[NotificationChannel] = mapped_column(Enum(NotificationChannel))
+    purpose: Mapped[NotificationTemplatePurpose] = mapped_column(
+        Enum(
+            NotificationTemplatePurpose,
+            native_enum=False,
+            values_callable=lambda values: [value.value for value in values],
+        ),
+        default=NotificationTemplatePurpose.general,
+        server_default=NotificationTemplatePurpose.general.value,
+        nullable=False,
+    )
     subject: Mapped[str | None] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text, nullable=False)
     conditions: Mapped[dict] = mapped_column(

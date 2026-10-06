@@ -2028,8 +2028,8 @@ SERVICES: tuple[SOTService, ...] = (
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
                     source=(
                         "one active paid invoice, one base-subscription line, "
-                        "one succeeded allocated settlement, one sourced active "
-                        "entitlement, and either the exact legacy anchor or a "
+                        "an exact fully funding succeeded allocation and settlement "
+                        "set, one sourced active entitlement, and either the exact legacy anchor or a "
                         "strictly older stale anchor"
                     ),
                 ),
@@ -2082,7 +2082,7 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 locking=(
                     "Lock account first, then invoice, subscription, invoice "
-                    "line, entitlement, payment, allocation, settlement, and "
+                    "line, entitlement, every reviewed payment, allocation, settlement, and "
                     "active enforcement locks; "
                     "expire and re-read the full chain before re-running the "
                     "resolver and reject changed or overlapping evidence."
@@ -2116,7 +2116,7 @@ SERVICES: tuple[SOTService, ...] = (
                 retryable_codes=(),
                 fail_closed_on=(
                     "non-paid or multi-line invoice evidence",
-                    "missing or multiple succeeded settlement allocations",
+                    "missing, underfunded, overfunded, or inconsistent succeeded settlement allocations",
                     "refund, reversal, ambiguous extension, or overlap",
                     "an overlapping rated quota period",
                     "a period/anchor relationship that proves neither a retired "
@@ -2130,7 +2130,7 @@ SERVICES: tuple[SOTService, ...] = (
                 schema_version=1,
                 delivery_owner="events.dispatcher",
                 compatibility=(
-                    "Invoice, subscription, entitlement, payment, timezone, "
+                    "Invoice, subscription, entitlement, funding evidence, timezone, "
                     "before/after instants, correction kind, zero economic delta, "
                     "access outcome, and fingerprint retain their meaning; "
                     "additions are backward compatible."
@@ -2210,6 +2210,8 @@ SERVICES: tuple[SOTService, ...] = (
             "historical paid prepaid invoice identity and coverage repair",
             "reviewed paid prepaid invoice coverage correction",
             "reviewed missing prepaid paid-invoice repair",
+            "reviewed existing prepaid draft settlement",
+            "reviewed prepaid invoice sequence reconstruction",
             "reviewed pre-opening invoice settlement correction",
             "stranded prepaid draft classification",
             "stranded prepaid draft invoice reconciliation",
@@ -2224,6 +2226,7 @@ SERVICES: tuple[SOTService, ...] = (
             "financial.invoices",
             "financial.ledger",
             "financial.payments",
+            "financial.payment_proofs",
             "financial.prepaid_funding_reconstruction",
             "financial.prepaid_service_renewals",
             "financial.customer_subledger",
@@ -2297,6 +2300,32 @@ SERVICES: tuple[SOTService, ...] = (
             "reversals, retires the allocation projection, records the full "
             "invoice against approved opening funding, and settles the "
             "document with zero customer-position delta."
+            " A separate Finance-approved existing-draft command accepts one "
+            "operator-named periodless draft, prepaid subscription, verified "
+            "native payment, explicit service period, expected post-settlement "
+            "credit, approver, ticket, and evidence digest. It adopts the "
+            "document identity, issues and fully allocates the selected "
+            "payment, creates canonical entitlement, projects the reviewed "
+            "billing anchor, and records approval evidence atomically."
+            " A separate Finance-approved invoice-sequence command accepts an "
+            "explicit chronological set of invoices, lines, periods, payment "
+            "splits, settlement ledger selections, and legacy allocation "
+            "pairs. It proves the complete pre/post-opening conservation "
+            "equation, records only zero-position allocation structure, "
+            "settles every document atomically, projects the final expired "
+            "coverage anchor, and never restores access. A one-document "
+            "reconstruction may additionally consume the exact reviewed "
+            "opening remainder when an existing issued-invoice debit already "
+            "reduced the customer position. A late-recorded one-document "
+            "repair may retain an exactly previewed selected-payment residual; "
+            "provider-fee payments use their exact settlement-backed customer "
+            "credit instead of captured gross. The owner preserves any later "
+            "billing anchor and requires a zero position delta."
+            " When the reviewed command explicitly selects continuous-period "
+            "funding, the same owner retires the wrong paid invoice, settles "
+            "the historical draft from its selected Payment, and invokes the "
+            "canonical renewal participant to consume only the released "
+            "payment-proof Payment for the immediately following period."
         ),
         contract=ServiceContract(
             concerns=(
@@ -2352,6 +2381,37 @@ SERVICES: tuple[SOTService, ...] = (
                         "canonical prepaid subscription contract",
                         "canonical payment-backed account credit",
                         "canonical paid invoice allocation evidence",
+                        "invoice and payment participant protocols",
+                    ),
+                    canonical_writer="financial.prepaid_draft_reconciliation",
+                ),
+                ConcernContract(
+                    name="reviewed existing prepaid draft settlement",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "reviewed existing-draft settlement command",
+                        "canonical prepaid draft invoice",
+                        "canonical prepaid subscription contract",
+                        "canonical payment-backed account credit",
+                        "verified payment proof",
+                        "canonical superseded paid invoice allocation evidence",
+                        "canonical funded service entitlement",
+                        "invoice and payment participant protocols",
+                        "financial access restoration protocol",
+                    ),
+                    canonical_writer="financial.prepaid_draft_reconciliation",
+                ),
+                ConcernContract(
+                    name="reviewed prepaid invoice sequence reconstruction",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "reviewed invoice-sequence reconstruction command",
+                        "canonical prepaid draft invoice",
+                        "canonical prepaid subscription contract",
+                        "canonical payment-backed account credit",
+                        "reviewed opening funding",
+                        "canonical paid invoice allocation evidence",
+                        "canonical reviewed service calendar",
                         "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_draft_reconciliation",
@@ -2442,6 +2502,37 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
+                    name="reviewed existing-draft settlement command",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "billing:prepaid_reconciliation:repair permission checked "
+                        "against a named staff principal plus exact invoice, "
+                        "subscription, payment, service dates, total, expected "
+                        "remaining credit, payment reference, Finance approver, "
+                        "optional exact superseded invoice and payment, "
+                        "explicit continuous-period funding decision, "
+                        "approval timestamp, ticket, evidence digest, preview "
+                        "fingerprint, actor, reason, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
+                    name="reviewed invoice-sequence reconstruction command",
+                    owner="auth.permission_gate",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "billing:prepaid_reconciliation:repair permission checked "
+                        "against a named staff principal plus chronological "
+                        "invoice, line, period, payment split, settlement ledger, "
+                        "legacy allocation, opening-credit, post-repair-credit, "
+                        "optional exact opening-funding consumption, selected "
+                        "payment allocation and residual totals, "
+                        "authoritative-funding, Finance approval, ticket, digest, "
+                        "explicit calendar basis and expected documentary anchor, "
+                        "preview, actor, reason, and idempotency evidence"
+                    ),
+                ),
+                AuthorityInput(
                     name="canonical paid prepaid coverage document",
                     owner="financial.invoices",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
@@ -2456,9 +2547,9 @@ SERVICES: tuple[SOTService, ...] = (
                     owner="financial.invoices",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
                     source=(
-                        "locked active non-proforma draft, exact positive "
-                        "subscription line, period, currency, totals, and "
-                        "existing settlement evidence"
+                        "locked active non-proforma draft or reviewed issued "
+                        "historical document, exact positive selected line, "
+                        "period, currency, totals, and existing settlement evidence"
                     ),
                 ),
                 AuthorityInput(
@@ -2516,6 +2607,27 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                 ),
                 AuthorityInput(
+                    name="verified payment proof",
+                    owner="financial.payment_proofs",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "verified proof linked to the selected successful "
+                        "Payment, including its reviewed transfer reference "
+                        "when present"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical superseded paid invoice allocation evidence",
+                    owner="financial.payments",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "one operator-named paid future-period invoice, its sole "
+                        "full-value active allocation from a verified payment "
+                        "proof, exact invoice-backed active entitlement, and "
+                        "matching current subscription billing anchor"
+                    ),
+                ),
+                AuthorityInput(
                     name="reviewed opening funding",
                     owner="financial.prepaid_funding_reconstruction",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
@@ -2565,6 +2677,17 @@ SERVICES: tuple[SOTService, ...] = (
                         "customer-position service debit structurally linked to "
                         "one matching entitlement with exact account, subscription, "
                         "period overlap, currency, and funded amount"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical reviewed service calendar",
+                    owner="financial.prepaid_service_renewals",
+                    kind=AuthorityKind.DERIVED_PROJECTION,
+                    source=(
+                        "typed reviewed Lagos service dates resolved at business "
+                        "midnight by default or the exact first invoice anniversary "
+                        "clock under an explicit matching expected opening anchor; "
+                        "UTC instants are preserved, never rounded in an adapter"
                     ),
                 ),
                 AuthorityInput(
@@ -2625,6 +2748,22 @@ SERVICES: tuple[SOTService, ...] = (
                     "the named account, subscription, and payment, rechecks "
                     "the preview, and commits document construction, issue, "
                     "exact allocation, entitlement, reviewed anchor projection, "
+                    "audit, event, metadata, and idempotency evidence together. The "
+                    "reviewed existing-draft command locks the named account, "
+                    "draft, subscription, payment, settlement, returns, and "
+                    "approver plus any explicitly selected superseded invoice, "
+                    "payment, allocation, proof, and entitlement; then atomically "
+                    "voids that exact wrong document, releases its allocation, "
+                    "reverses its ledger effects, retires its entitlement, "
+                    "retracts the anchor to surviving prior coverage, and commits documentary adoption, "
+                    "issue, selected-payment allocation, entitlement, reviewed "
+                    "anchor projection, conditional access restoration, Finance "
+                    "approval metadata, audit, event, and idempotency evidence. The "
+                    "invoice-sequence command locks every named invoice, payment, "
+                    "settlement ledger row, legacy allocation pair, subscription, "
+                    "opening source, and approver; it then commits settlement "
+                    "structure, zero-position allocation links, document identity, "
+                    "paid finalization, entitlement, reviewed anchor projection, "
                     "audit, event, metadata, and idempotency evidence together. The "
                     "pre-opening correction locks the account, invoice, allocation, "
                     "opening baseline and posting group, then atomically appends "
@@ -2694,6 +2833,17 @@ SERVICES: tuple[SOTService, ...] = (
                     "caller-checked billing:prepaid_reconciliation:repair "
                     "permission evidence is missing or its declared scope does "
                     "not match it",
+                    "a reviewed existing-draft settlement whose permission, "
+                    "approver, ticket, evidence digest, payment reference, "
+                    "selected payment capacity, expected cutoff balance, "
+                    "contract charge, explicit cadence, or preview fingerprint "
+                    "is absent, stale, or ambiguous",
+                    "a reviewed invoice sequence whose periods are current, "
+                    "non-contiguous, contract-mismatched, overlapping, partially "
+                    "funded, whose selected payments are not fully conserved "
+                    "across the reviewed opening boundary, or whose expected "
+                    "post-repair credit, authoritative funding, or customer-position "
+                    "delta changes",
                     "any funding shortfall including NGN 0.50",
                     "unbacked account credit crossing the active reviewed "
                     "opening-position boundary, or any unbacked account "
@@ -2726,6 +2876,8 @@ SERVICES: tuple[SOTService, ...] = (
                     "prepaid_proforma.adopted",
                     "prepaid_paid_invoice.repaired",
                     "prepaid_paid_invoice.coverage_corrected",
+                    "prepaid_reviewed_draft.settled",
+                    "prepaid_invoice_sequence.reconstructed",
                     "prepaid_draft.reconciled",
                 ),
                 schema_version=1,
@@ -2735,7 +2887,14 @@ SERVICES: tuple[SOTService, ...] = (
                     "invoice, subscription, sole payment, period, currency, "
                     "amount, and preview identity; settlement retains invoice, "
                     "action, source disposition, final status, amount, "
-                    "currency, and preview fingerprint meaning."
+                    "currency, and preview fingerprint meaning. Reviewed draft "
+                    "settlement retains invoice, subscription, selected payment, "
+                    "allocation, entitlement, payment reference, ticket, "
+                    "evidence digest, period, anchor, and preview identity. "
+                    "Sequence reconstruction retains ordered invoice and payment "
+                    "identities, period bounds, cutover boundary, allocations, "
+                    "entitlements, final anchor, zero position delta, Finance "
+                    "approval, ticket, digest, and preview identity."
                 ),
                 replay=(
                     "The event records the committed reconciliation outcome. "
@@ -2838,6 +2997,7 @@ SERVICES: tuple[SOTService, ...] = (
                 "docs/SOT_RELATIONSHIP_MAP.md",
                 "docs/FINANCIAL_ACCESS_ENFORCEMENT.md",
                 "docs/designs/PREPAID_DRAFT_RECONCILIATION.md",
+                "docs/runbooks/REVIEWED_PREPAID_INVOICE_SEQUENCE_RECONSTRUCTION.md",
             ),
             test_refs=(
                 "tests/test_prepaid_draft_reconciliation.py",
@@ -3096,19 +3256,24 @@ SERVICES: tuple[SOTService, ...] = (
             "due prepaid service-cycle funding preview",
             "settled-payment evidence validation and evaluation outcome",
             "prepaid settlement service-period resolution",
+            "reviewed prepaid documentary service-period resolution",
             "locked and idempotent funded prepaid renewal invoice settlement",
             "exact paid-invoice-to-entitlement evidence",
             "prepaid subscription paid-through advancement",
             "billing-anchor projection from entitlement evidence",
             "billing-anchor retraction after funding reversal",
+            "reviewed billing-anchor retraction after invoice supersession",
             "missing or stale billing-anchor repair from exact funded coverage",
             "canonical prepaid renewed-through outcome",
             "post-credit-application due-service consequence",
             "bounded scheduled renewal catch-up",
             "fingerprint-approved missed renewal execution",
             "reviewed legacy prepaid renewal tax-invoice correction",
+            "reviewed unused prepaid renewal correction",
+            "suspension-aware prepaid renewal eligibility",
         ),
         depends_on=(
+            "access.subscription_lifecycle",
             "billing.contracts",
             "customer.accounts",
             "financial.account_adjustments",
@@ -3170,7 +3335,12 @@ SERVICES: tuple[SOTService, ...] = (
             "renewal-cycle allowance instead starts at the exact payment instant "
             "for its required validity_days. The typed cadence persists UTC "
             "boundaries; mutable anchors and canceled or reversed extensions do "
-            "not defer the period. A fully funded renewal creates and settles one exact "
+            "not defer the period. Reviewed historical sequences resolve dates "
+            "through the same calendar owner: business midnight is the default, "
+            "and explicit documentary continuation preserves the recorded Lagos "
+            "anniversary clock rather than silently shifting historical UTC instants. "
+            "This is not evidence to rewrite a paid historical period; that stays "
+            "with the calendar reconciler. A fully funded renewal creates and settles one exact "
             "prepaid invoice through invoice, payment-credit, and reviewed-opening "
             "participants; it never writes a parallel account adjustment. Payment "
             "participants consume that typed period; they do not derive a UTC "
@@ -3183,7 +3353,17 @@ SERVICES: tuple[SOTService, ...] = (
             "entitlement, creates and fully settles the canonical tax-inclusive "
             "invoice from payment-backed credit, and replaces the entitlement "
             "atomically. It is fingerprint-bound, account-scoped, audited, and "
-            "fails closed on any evidence or balance drift."
+            "fails closed on any evidence or balance drift. A reviewed unused "
+            "renewal correction accepts only one exact un-invoiced adjustment "
+            "and linked active entitlement: it reverses the historical ledger "
+            "debit and entitlement atomically, restoring verified prepaid funding "
+            "without creating money, service access, or a replacement period. "
+            "Routine and scheduled renewal exclude suspended subscriptions. A "
+            "settlement-triggered recovery may admit a suspended subscription only "
+            "when an active prepaid enforcement lock proves the financial cause; "
+            "the same transaction funds the new period and restores that lock. An "
+            "administrative suspension is never renewed by scheduled billing or an "
+            "unrelated account-credit event."
         ),
         contract=ServiceContract(
             concerns=(
@@ -3192,6 +3372,7 @@ SERVICES: tuple[SOTService, ...] = (
                     role=OwnerRole.COMMAND_WRITER,
                     input_names=(
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "effective compatibility tax treatment",
                         "settled payment evidence",
                         "verified customer funding position",
@@ -3205,6 +3386,7 @@ SERVICES: tuple[SOTService, ...] = (
                     role=OwnerRole.RESOLVER,
                     input_names=(
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "effective compatibility tax treatment",
                         "verified customer funding position",
                         "funded service entitlement evidence",
@@ -3216,6 +3398,7 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "settled payment evidence",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                     ),
                 ),
                 ConcernContract(
@@ -3227,6 +3410,14 @@ SERVICES: tuple[SOTService, ...] = (
                         "usage allowance reset policy",
                         "funded service entitlement evidence",
                         "applied service-extension coverage evidence",
+                    ),
+                ),
+                ConcernContract(
+                    name="reviewed prepaid documentary service-period resolution",
+                    role=OwnerRole.RESOLVER,
+                    input_names=(
+                        "reviewed service calendar query",
+                        "canonical documentary service period",
                     ),
                 ),
                 ConcernContract(
@@ -3275,6 +3466,19 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 ConcernContract(
                     name=(
+                        "reviewed billing-anchor retraction after invoice supersession"
+                    ),
+                    role=OwnerRole.PROJECTION_WRITER,
+                    input_names=(
+                        "prepaid subscription and renewal terms",
+                        "funded service entitlement evidence",
+                        "applied service-extension coverage evidence",
+                        "invoice and payment participant protocols",
+                    ),
+                    canonical_writer="financial.prepaid_service_renewals",
+                ),
+                ConcernContract(
+                    name=(
                         "missing or stale billing-anchor repair from exact funded "
                         "coverage"
                     ),
@@ -3301,6 +3505,7 @@ SERVICES: tuple[SOTService, ...] = (
                         "settled payment evidence",
                         "verified customer funding position",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
@@ -3311,9 +3516,18 @@ SERVICES: tuple[SOTService, ...] = (
                     input_names=(
                         "verified customer funding position",
                         "prepaid subscription and renewal terms",
+                        "canonical subscription lifecycle state",
                         "invoice and payment participant protocols",
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
+                ),
+                ConcernContract(
+                    name="suspension-aware prepaid renewal eligibility",
+                    role=OwnerRole.POLICY,
+                    input_names=(
+                        "canonical subscription lifecycle state",
+                        "settled payment evidence",
+                    ),
                 ),
                 ConcernContract(
                     name="fingerprint-approved missed renewal execution",
@@ -3338,8 +3552,49 @@ SERVICES: tuple[SOTService, ...] = (
                     ),
                     canonical_writer="financial.prepaid_service_renewals",
                 ),
+                ConcernContract(
+                    name="reviewed unused prepaid renewal correction",
+                    role=OwnerRole.RECONCILER,
+                    input_names=(
+                        "prepaid subscription and renewal terms",
+                        "verified customer funding position",
+                        "funded service entitlement evidence",
+                        "exact legacy account-adjustment evidence",
+                    ),
+                    canonical_writer="financial.prepaid_service_renewals",
+                ),
             ),
             authoritative_inputs=(
+                AuthorityInput(
+                    name="canonical subscription lifecycle state",
+                    owner="access.subscription_lifecycle",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "Subscription.status plus the exact active EnforcementLock "
+                        "reason: active and blocked admit routine renewal; suspended "
+                        "admits only settlement-triggered recovery when an active "
+                        "prepaid lock proves the financial cause"
+                    ),
+                ),
+                AuthorityInput(
+                    name="reviewed service calendar query",
+                    owner="financial.prepaid_service_renewals",
+                    kind=AuthorityKind.CONTROL_INPUT,
+                    source=(
+                        "typed business dates and explicit business-midnight or "
+                        "documented-anniversary basis with no arbitrary clock override"
+                    ),
+                ),
+                AuthorityInput(
+                    name="canonical documentary service period",
+                    owner="financial.invoices",
+                    kind=AuthorityKind.AUTHORITATIVE_RECORD,
+                    source=(
+                        "exact positive recorded UTC invoice interval, admitted "
+                        "only after the repair owner verifies document, line, "
+                        "account, subscription, reviewed local dates and anchor"
+                    ),
+                ),
                 AuthorityInput(
                     name="prepaid subscription and renewal terms",
                     owner="billing.contracts",
@@ -3429,7 +3684,7 @@ SERVICES: tuple[SOTService, ...] = (
                 mode=TransactionMode.OWNER_MANAGED,
                 boundary=(
                     "Settlement-triggered, scheduled, reviewed missed-period, "
-                    "and legacy tax-correction "
+                    "legacy tax-correction, and unused-renewal correction "
                     "public commands enter "
                     "execute_owner_command once on a transaction-free session. "
                     "Validation, adjustment reversal, paid invoice, entitlement, "
@@ -3438,7 +3693,8 @@ SERVICES: tuple[SOTService, ...] = (
                 ),
                 locking=(
                     "The account is locked before idempotency lookup and funding "
-                    "re-preview. Legacy correction additionally locks the exact "
+                    "re-preview. Legacy and unused-renewal corrections additionally "
+                    "lock the exact "
                     "subscription, adjustment, and entitlement before re-preview; "
                     "entitlement overlap and unique period-line identity prevent a "
                     "second funded result for the same period."
@@ -3451,7 +3707,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "exact paid invoice, entitlement, period, and application effects. "
                     "Legacy correction binds account, subscription, adjustment, "
                     "entitlement, canonical invoice total, retained credit, and "
-                    "preview fingerprint to one reservation."
+                    "preview fingerprint to one reservation. Unused-renewal "
+                    "correction binds the exact account, subscription, adjustment, "
+                    "entitlement, preview fingerprint, and idempotency key."
                 ),
                 retries=(
                     "The durable event redriver or scheduled adapter retries the "
@@ -3502,6 +3760,9 @@ SERVICES: tuple[SOTService, ...] = (
                     "financial.prepaid_service_renewals.subscription_not_eligible",
                     "financial.prepaid_service_renewals.subscription_not_found",
                     "financial.prepaid_service_renewals.trigger_execution_conflict",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_missing_idempotency_key",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_not_actionable",
+                    "financial.prepaid_service_renewals.unused_renewal_correction_not_found",
                     "financial.prepaid_service_renewals.unsupported_cadence",
                 ),
                 mapping_owner=("billing automation, durable event, and staff adapters"),
@@ -3514,6 +3775,7 @@ SERVICES: tuple[SOTService, ...] = (
                     "stale preview or entitlement overlap",
                     "invoice, allocation, entitlement, or posting-group failure",
                     "legacy adjustment, entitlement, tax, amount, or credit drift",
+                    "unused-renewal adjustment, entitlement, invoice-link, or fingerprint drift",
                 ),
             ),
             events=EventContract(
@@ -3590,6 +3852,7 @@ SERVICES: tuple[SOTService, ...] = (
                 "docs/designs/USAGE_ALLOWANCE_RESET_CYCLES.md",
                 "docs/runbooks/LEGACY_PREPAID_RENEWAL_TAX_INVOICE_CORRECTION.md",
                 "docs/runbooks/REVIEWED_MIGRATED_PREPAID_OPENING_REPAIR.md",
+                "docs/runbooks/UNUSED_PREPAID_RENEWAL_CORRECTION.md",
             ),
             test_refs=(
                 "tests/test_prepaid_service_renewals.py",

@@ -11,6 +11,7 @@ from collections import Counter
 
 from app.services.automation_contracts import (
     AutomationActionCapability,
+    AutomationCatalogState,
     AutomationConditionField,
     AutomationModuleManifest,
     AutomationTriggerCapability,
@@ -43,6 +44,8 @@ def all_module_manifests() -> tuple[AutomationModuleManifest, ...]:
                 triggers=declaration.triggers if declaration else (),
                 actions=declaration.actions if declaration else (),
                 legacy_surfaces=(declaration.legacy_surfaces if declaration else ()),
+                catalog_items=(declaration.catalog_items if declaration else ()),
+                script_targets=(declaration.script_targets if declaration else ()),
                 manifest_version=(
                     declaration.manifest_version if declaration else None
                 ),
@@ -97,6 +100,15 @@ def action_capability(key: str) -> AutomationActionCapability:
     return matches[0]
 
 
+def action_applies_to_entity(
+    action: AutomationActionCapability, entity_type: str
+) -> bool:
+    """Return whether an action can be attached to the trigger entity."""
+
+    target_types = action.target_types or (action.entity_type,)
+    return "*" in target_types or entity_type in target_types
+
+
 def _duplicates(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(key for key, count in Counter(values).items() if count > 1))
 
@@ -127,9 +139,14 @@ def capability_registry_errors() -> tuple[str, ...]:
     triggers = tuple(trigger for item in registered for trigger in item.triggers)
     actions = tuple(action for item in registered for action in item.actions)
     legacy = tuple(surface for item in registered for surface in item.legacy_surfaces)
+    catalog_items = tuple(item for module in manifests for item in module.catalog_items)
     errors.extend(
         f"duplicate automation trigger key {key!r}"
         for key in _duplicates(tuple(item.key for item in triggers))
+    )
+    errors.extend(
+        f"duplicate automation catalogue item key {key!r}"
+        for key in _duplicates(tuple(item.key for item in catalog_items))
     )
     errors.extend(
         f"duplicate automation action key {key!r}"
@@ -149,6 +166,36 @@ def capability_registry_errors() -> tuple[str, ...]:
             f"automation module {manifest.module_key!r} repeats target {key!r}"
             for key in _duplicates(manifest.target_types)
         )
+        errors.extend(
+            f"automation module {manifest.module_key!r} repeats script target {key!r}"
+            for key in _duplicates(
+                tuple(target.key for target in manifest.script_targets)
+            )
+        )
+        for target in manifest.script_targets:
+            if not all(
+                value.strip()
+                for value in (target.key, target.label, target.entity_type)
+            ):
+                errors.append(
+                    f"automation module {manifest.module_key!r} has an incomplete script target"
+                )
+            if not target.client_events and not target.server_events:
+                errors.append(
+                    f"automation script target {target.key!r} has no executable events"
+                )
+            if not target.read_permission.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no read permission"
+                )
+            if not target.tenant_id_field.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no tenant identity field"
+                )
+            if not target.entity_id_field.strip():
+                errors.append(
+                    f"automation script target {target.key!r} has no entity identity field"
+                )
         for trigger in manifest.triggers:
             if trigger.entity_type not in manifest.target_types:
                 errors.append(
@@ -157,6 +204,13 @@ def capability_registry_errors() -> tuple[str, ...]:
                 )
             if trigger.event_schema_version < 1:
                 errors.append(f"trigger {trigger.key!r} has invalid schema version")
+            if any(
+                version < 1 or version >= trigger.event_schema_version
+                for version in trigger.compatible_event_schema_versions
+            ):
+                errors.append(
+                    f"trigger {trigger.key!r} has invalid compatible event schemas"
+                )
             if not trigger.tenant_id_field.strip():
                 errors.append(f"trigger {trigger.key!r} has no tenant identity field")
             if not trigger.entity_id_field.strip():
@@ -170,10 +224,14 @@ def capability_registry_errors() -> tuple[str, ...]:
             for field in trigger.fields:
                 errors.extend(_field_errors(trigger=trigger, field=field))
         for action in manifest.actions:
-            if action.entity_type not in manifest.target_types:
+            declared_targets = action.target_types or (action.entity_type,)
+            if any(
+                target != "*" and target not in manifest.target_types
+                for target in declared_targets
+            ):
                 errors.append(
-                    f"action {action.key!r} uses undeclared target "
-                    f"{action.entity_type!r}"
+                    f"action {action.key!r} uses undeclared target types "
+                    f"{declared_targets!r}"
                 )
             if action.input_schema_version < 1:
                 errors.append(f"action {action.key!r} has invalid schema version")
@@ -192,6 +250,73 @@ def capability_registry_errors() -> tuple[str, ...]:
                 f"action {action.key!r} repeats input {key!r}"
                 for key in _duplicates(tuple(item.key for item in action.inputs))
             )
+            for action_input in action.inputs:
+                if not action_input.key.strip() or not action_input.label.strip():
+                    errors.append(
+                        f"action {action.key!r} has a blank input key or label"
+                    )
+                if (
+                    action_input.value_type is AutomationValueType.enum
+                    and not action_input.enum_values
+                ):
+                    errors.append(
+                        f"action {action.key!r} enum input "
+                        f"{action_input.key!r} has no values"
+                    )
+                if (
+                    action_input.value_type is not AutomationValueType.enum
+                    and action_input.enum_values
+                ):
+                    errors.append(
+                        f"action {action.key!r} non-enum input "
+                        f"{action_input.key!r} declares enum values"
+                    )
+        for item in manifest.catalog_items:
+            if not all(
+                (
+                    item.key.strip(),
+                    item.label.strip(),
+                    item.group.strip(),
+                    item.explanation.strip(),
+                )
+            ):
+                errors.append(
+                    f"automation catalogue item {item.key!r} has a blank required field"
+                )
+            if (
+                item.state is AutomationCatalogState.managed_elsewhere
+                and not item.management_path
+            ):
+                errors.append(
+                    f"automation catalogue item {item.key!r} has no management path"
+                )
+            if item.state is AutomationCatalogState.available:
+                trigger_keys = {trigger.key for trigger in manifest.triggers}
+                action_keys = {action.key for action in manifest.actions}
+                if not item.trigger_keys or not item.action_keys:
+                    errors.append(
+                        f"available automation catalogue item {item.key!r} must name triggers and actions"
+                    )
+                if set(item.trigger_keys) - trigger_keys:
+                    errors.append(
+                        f"automation catalogue item {item.key!r} names an undeclared trigger"
+                    )
+                if set(item.action_keys) - action_keys:
+                    errors.append(
+                        f"automation catalogue item {item.key!r} names an undeclared action"
+                    )
+                if any(
+                    not trigger.runtime_enabled
+                    for trigger in manifest.triggers
+                    if trigger.key in item.trigger_keys
+                ) or any(
+                    not action.runtime_enabled
+                    for action in manifest.actions
+                    if action.key in item.action_keys
+                ):
+                    errors.append(
+                        f"available automation catalogue item {item.key!r} uses an unavailable runtime"
+                    )
     return tuple(sorted(errors))
 
 
@@ -203,6 +328,7 @@ def require_valid_capability_registry() -> None:
 
 __all__ = [
     "AutomationCapabilityError",
+    "action_applies_to_entity",
     "action_capability",
     "all_module_manifests",
     "capability_registry_errors",

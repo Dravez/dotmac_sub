@@ -80,17 +80,27 @@ class TestInvoicesList:
         page.goto()
         page.expect_loaded()
         status_filter = admin_page.locator("select[name='status']")
+        invoice_page = admin_page.locator("#invoices-table [data-invoice-page]")
 
         page.filter_by_status("unpaid")
-        admin_page.wait_for_url(re.compile(r"status=unpaid"))
+        expect(invoice_page).to_have_attribute(
+            "data-list-url", re.compile(r"status=unpaid")
+        )
+        expect(admin_page).to_have_url(re.compile(r"[?&]status=unpaid"))
         expect(status_filter).to_have_value("unpaid")
 
         page.filter_by_status("")
-        admin_page.wait_for_url(re.compile(r"/admin/billing/invoices(?:\?.*)?$"))
+        expect(invoice_page).to_have_attribute(
+            "data-list-url", re.compile(r"^(?!.*[?&]status=unpaid).*$")
+        )
+        expect(admin_page).to_have_url(re.compile(r"^(?!.*[?&]status=unpaid).*$"))
         expect(status_filter).to_have_value("")
 
         page.filter_by_status("paid")
-        admin_page.wait_for_url(re.compile(r"status=paid"))
+        expect(invoice_page).to_have_attribute(
+            "data-list-url", re.compile(r"[?&]status=paid(?:&|$)")
+        )
+        expect(admin_page).to_have_url(re.compile(r"[?&]status=paid(?:&|$)"))
         expect(status_filter).to_have_value("paid")
 
     def test_proforma_filter_can_be_applied_and_reset(self, admin_page: Page, settings):

@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.status_presentation import StatusPresentation
+from app.services.sales.service_request_types import ServiceRequestOption
 
 
 class PortalSessionResponse(BaseModel):
@@ -248,9 +249,12 @@ class MyWorkOrdersResponse(BaseModel):
 
 
 class QuoteRequestCreate(BaseModel):
-    """Request a map-pinned installation quote (the pin drives feasibility +
-    estimate + deposit, computed by the CRM)."""
+    """Request a map-pinned service quote (the pin drives feasibility +
+    staff review)."""
 
+    service_option: ServiceRequestOption = ServiceRequestOption.fiber_installation
+    subscription_id: UUID | None = None
+    destination_offer_id: UUID | None = None
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
     address: str | None = None
@@ -259,7 +263,9 @@ class QuoteRequestCreate(BaseModel):
 
 
 class QuoteFeasibility(BaseModel):
-    coverage: str | None = None  # covered | survey_required | out_of_area
+    coverage: str | None = (
+        None  # covered | survey_required | out_of_area | manual_review | technical_error
+    )
     feasible: bool | None = None
     distance_meters: float | None = None
     nearest_fap_name: str | None = None
@@ -280,6 +286,10 @@ class QuoteItem(BaseModel):
     tax_total: str | None = None
     total: str | None = None
     project_type: str | None = None
+    service_option: ServiceRequestOption | None = None
+    subscription_id: UUID | None = None
+    destination_offer_id: UUID | None = None
+    pricing_visible: bool = False
     latitude: float | None = None
     longitude: float | None = None
     address: str | None = None
@@ -299,6 +309,7 @@ class QuoteItem(BaseModel):
     line_items: list[QuoteLineItem] = Field(default_factory=list)
     sales_order_id: str | None = None
     project_id: str | None = None
+    relocation_work_order_id: UUID | None = None
     created_at: str | None = None
     expires_at: str | None = None
 
@@ -312,6 +323,14 @@ class MyQuotesResponse(BaseModel):
     source_state: Literal["native", "retired"]
     actions_available: bool
     actions_unavailable_message: str | None = None
+
+
+class RelocationQuotePrepareResponse(BaseModel):
+    request_id: UUID
+    invoice_id: UUID
+    amount: str
+    currency: str
+    replayed: bool
 
 
 class QuoteDepositInitiateRequest(BaseModel):

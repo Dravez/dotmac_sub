@@ -29,12 +29,26 @@ from app.models.catalog import (
     PriceBasis,
     PriceType,
     ServiceType,
+    Subscription,
+    SubscriptionStatus,
 )
 from app.models.party import Party
 from app.models.project import ProjectTemplate
-from app.models.sales import Lead, SalesOrder
+from app.models.qualification import QualificationStatus
+from app.models.sales import Lead, QuoteLineItem, SalesOrder
 from app.models.subscriber import Subscriber
-from app.services.sales import selfserve
+from app.models.system_user import SystemUser
+from app.schemas.sales import QuoteLineItemCreate, QuoteUpdate
+from app.services.owner_commands import CommandContext
+from app.services.qualification import ServiceQualificationPreview
+from app.services.sales import quote_payment_review, selfserve
+from app.services.sales.service import quote_line_items
+from app.services.sales.service import quotes as sales_quotes
+from app.services.sales.service_request_types import ServiceRequestOption
+from app.services.subscription_change_execution import (
+    PrepareRelocationQuoteCommand,
+    prepare_approved_relocation_quote,
+)
 
 _FAP = SimpleNamespace(id=uuid.uuid4(), name="NAP-041")
 
@@ -92,11 +106,17 @@ def _subscriber(db) -> Subscriber:
     return sub
 
 
-def _offer(db, name="Install bundle", price="120000.00", price_type=PriceType.one_time):
+def _offer(
+    db,
+    name="Install bundle",
+    price="120000.00",
+    price_type=PriceType.one_time,
+    access_type=AccessType.fiber,
+):
     offer = CatalogOffer(
         name=name,
         service_type=ServiceType.residential,
-        access_type=AccessType.fiber,
+        access_type=access_type,
         price_basis=PriceBasis.flat,
     )
     db.add(offer)
@@ -273,8 +293,8 @@ def test_request_quote_captures_map_pin_on_lead_and_quote(db_session):
     assert meta["feasibility"]["coverage"] == "covered"
     assert meta["feasibility"]["nearest_fap_name"] == "NAP-041"
     assert meta["deposit_percent"] == 50
-    assert meta["estimate_provisional"] is False
-    assert meta["pricing_mode"] == "derived"
+    assert meta["estimate_provisional"] is True
+    assert meta["pricing_mode"] == "staff"
     # §1.4: never write the legacy subscriber_external_id key for new quotes.
     assert "subscriber_external_id" not in meta
 
@@ -288,10 +308,10 @@ def test_request_quote_captures_map_pin_on_lead_and_quote(db_session):
     assert lead.address == "12 Mississippi St, Maitama"
     assert lead.notes == "Front gate faces the street"
 
-    # Estimate lines + totals landed on the draft quote.
+    # The draft has no system-created commercial terms.
     assert quote.status == "draft"
-    assert quote.total == Decimal("75000.00")
-    assert len(quote.line_items) == 2
+    assert quote.total == Decimal("0.00")
+    assert quote.line_items == []
 
 
 def test_request_quote_payload_serializes_pin_and_money_strings(db_session):
@@ -303,9 +323,9 @@ def test_request_quote_payload_serializes_pin_and_money_strings(db_session):
     assert payload["latitude"] == 9.0765
     assert payload["longitude"] == 7.3986
     assert payload["address"] == "12 Mississippi St, Maitama"
-    # §2.5 mobile contract: money and quantities are strings.
-    assert payload["total"] == "75000.00"
-    assert payload["deposit_amount"] == "37500.00"
+    # §2.5 mobile contract: an unpriced request carries zero internal totals.
+    assert payload["total"] == "0.00"
+    assert payload["deposit_amount"] == "0.00"
     assert payload["deposit_percent"] == 50
     assert payload["deposit_paid"] is False
     assert payload["payment_review_status"] == "pending"
@@ -318,6 +338,230 @@ def test_request_quote_payload_serializes_pin_and_money_strings(db_session):
     assert payload["subscriber_id"] == str(sub.id)
     assert payload["sales_order_id"] is None
     assert payload["project_id"] is None  # PR 6 seam
+
+
+def test_customer_quote_hides_prices_until_sales_authors_terms(db_session):
+    sub = _subscriber(db_session)
+    quote = _request(db_session, sub)
+
+    pending = selfserve.build_portal_quote_payload(
+        db_session, quote, customer_view=True
+    )
+    assert pending["pricing_visible"] is False
+    assert pending["total"] is None
+    assert pending["deposit_amount"] is None
+    assert pending["deposit_percent"] is None
+    assert pending["line_items"] == []
+    assert pending["feasibility"]["coverage"] == "covered"
+
+
+def test_airfiber_request_waits_for_staff_pricing_and_site_check(db_session):
+    sub = _subscriber(db_session)
+    quote = _request(
+        db_session,
+        sub,
+        service_option=ServiceRequestOption.airfiber_installation,
+    )
+    assert quote.project_type == "air_fiber_installation"
+    assert quote.metadata_["service_option"] == "airfiber_installation"
+    assert quote.metadata_["feasibility"]["coverage"] == "survey_required"
+    assert quote.line_items == []
+    customer = selfserve.build_portal_quote_payload(
+        db_session, quote, customer_view=True
+    )
+    assert customer["service_option"] == "airfiber_installation"
+    assert customer["total"] is None
+
+
+def test_relocation_request_keeps_existing_subscription_identity(db_session):
+    sub = _subscriber(db_session)
+    offer = _offer(db_session, price_type=PriceType.recurring)
+    source = Subscription(
+        subscriber_id=sub.id,
+        offer_id=offer.id,
+        status=SubscriptionStatus.active,
+    )
+    db_session.add(source)
+    db_session.commit()
+    db_session.refresh(source)
+
+    quote = _request(
+        db_session,
+        sub,
+        service_option=ServiceRequestOption.fiber_to_fiber_relocation,
+        subscription_id=source.id,
+    )
+    assert quote.project_type == "fiber_optics_relocation"
+    assert quote.metadata_["source_subscription_id"] == str(source.id)
+    assert quote.metadata_["service_option"] == "fiber_to_fiber_relocation"
+    assert quote.metadata_["destination_offer_id"] == str(offer.id)
+    assert quote.metadata_["deposit_percent"] == 100
+    assert quote.line_items == []
+
+    with pytest.raises(HTTPException) as exc:
+        _request(
+            db_session,
+            sub,
+            service_option=ServiceRequestOption.airfiber_to_fiber_relocation,
+            subscription_id=source.id,
+        )
+    assert exc.value.status_code == 422
+
+
+def test_cross_technology_relocation_requires_customer_destination_plan(db_session):
+    sub = _subscriber(db_session)
+    source_offer = _offer(
+        db_session,
+        name="Current fiber plan",
+        price_type=PriceType.recurring,
+    )
+    destination_offer = _offer(
+        db_session,
+        name="Destination Airfiber plan",
+        price_type=PriceType.recurring,
+        access_type=AccessType.fixed_wireless,
+    )
+    source = Subscription(
+        subscriber_id=sub.id,
+        offer_id=source_offer.id,
+        status=SubscriptionStatus.active,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        _request(
+            db_session,
+            sub,
+            service_option=ServiceRequestOption.fiber_to_airfiber_relocation,
+            subscription_id=source.id,
+        )
+    assert exc.value.status_code == 422
+
+    quote = _request(
+        db_session,
+        sub,
+        service_option=ServiceRequestOption.fiber_to_airfiber_relocation,
+        subscription_id=source.id,
+        destination_offer_id=destination_offer.id,
+    )
+    assert quote.metadata_["destination_offer_id"] == str(destination_offer.id)
+
+    with pytest.raises(HTTPException) as exc:
+        _request(
+            db_session,
+            sub,
+            service_option=ServiceRequestOption.fiber_to_airfiber_relocation,
+            subscription_id=source.id,
+            destination_offer_id=source_offer.id,
+        )
+    assert exc.value.status_code == 422
+
+
+def test_approved_relocation_quote_prepares_one_full_charge_invoice(
+    db_session, monkeypatch
+):
+    sub = _subscriber(db_session)
+    offer = _offer(
+        db_session, name="Relocation source fiber", price_type=PriceType.recurring
+    )
+    source = Subscription(
+        subscriber_id=sub.id,
+        offer_id=offer.id,
+        status=SubscriptionStatus.active,
+    )
+    db_session.add(source)
+    db_session.commit()
+    quote = _request(
+        db_session,
+        sub,
+        service_option=ServiceRequestOption.fiber_to_fiber_relocation,
+        subscription_id=source.id,
+    )
+    reviewer = SystemUser(
+        first_name="Relocation",
+        last_name="Reviewer",
+        email=f"relocation-{uuid.uuid4().hex}@example.com",
+        is_active=True,
+    )
+    db_session.add(reviewer)
+    db_session.add(
+        QuoteLineItem(
+            quote_id=quote.id,
+            description="Approved move",
+            quantity=Decimal("1.000"),
+            unit_price=Decimal("120000.00"),
+            amount=Decimal("120000.00"),
+        )
+    )
+    quote.subtotal = Decimal("120000.00")
+    quote.total = Decimal("120000.00")
+    quote.metadata_ = {**quote.metadata_, "deposit": {"amount": "1.00"}}
+    db_session.flush()
+    db_session.refresh(quote)
+    quote.payment_review_status = "approved"
+    quote.payment_review_revision = 1
+    quote.payment_reviewed_by_system_user_id = reviewer.id
+    quote.payment_reviewed_at = datetime.now(UTC)
+    quote.payment_review_fingerprint = quote_payment_review.quote_fingerprint(quote)
+    db_session.commit()
+    visible = selfserve.build_portal_quote_payload(
+        db_session, quote, customer_view=True
+    )
+    assert visible["deposit_amount"] == "120000.00"
+
+    def eligible_preview(_db, payload):
+        return ServiceQualificationPreview(
+            address_id=payload.address_id,
+            latitude=9.0765,
+            longitude=7.3986,
+            requested_tech=payload.requested_tech,
+            coverage_area_id=None,
+            status=QualificationStatus.eligible,
+            buildout_status=None,
+            estimated_install_window=None,
+            reasons=(),
+            metadata=payload.metadata_,
+        )
+
+    monkeypatch.setattr(
+        "app.services.qualification.preview_service_qualification", eligible_preview
+    )
+    context = CommandContext.system(
+        actor=f"subscriber:{sub.id}",
+        scope="service-intent:approved-relocation-quote",
+        reason="Customer booking",
+        command_id=quote.id,
+        idempotency_key=f"customer-relocation-quote:{quote.id}",
+    )
+    command = PrepareRelocationQuoteCommand(
+        context=context, quote_id=quote.id, subscriber_id=sub.id
+    )
+    db_session.rollback()
+    first = prepare_approved_relocation_quote(db_session, command)
+    second = prepare_approved_relocation_quote(db_session, command)
+
+    assert first.replayed is False
+    assert second.replayed is True
+    assert first.invoice_id == second.invoice_id
+    assert first.amount == Decimal("120000.00")
+    from app.models.billing import Invoice
+    from app.models.subscription_change import SubscriptionChangeRequest
+
+    invoice = db_session.get(Invoice, first.invoice_id)
+    request = db_session.get(SubscriptionChangeRequest, first.request_id)
+    assert invoice.total == Decimal("120000.00")
+    assert invoice.metadata_["payment_flow"] == "subscription_relocation"
+    assert request.subscription_id == source.id
+    assert request.requested_offer_id == offer.id
+
+    with pytest.raises(HTTPException) as exc:
+        sales_quotes.update(
+            db_session,
+            str(quote.id),
+            QuoteUpdate(notes="Changed after booking"),
+        )
+    assert exc.value.status_code == 409
 
 
 def test_request_quote_403_when_disabled(db_session):
@@ -347,9 +591,22 @@ def test_request_quote_404_for_unknown_subscriber(db_session):
 # ---------------------------------------------------------------------------
 
 
+def _staff_price_quote(db, quote) -> None:
+    quote_line_items.create(
+        db,
+        QuoteLineItemCreate(
+            quote_id=quote.id,
+            description="Staff-authored installation charge",
+            quantity=Decimal("1"),
+            unit_price=Decimal("75000.00"),
+        ),
+    )
+
+
 def test_accept_with_deposit_accepts_and_marks_sales_order(db_session):
     sub = _subscriber(db_session)
     quote = _request(db_session, sub, distance=1300.0)
+    _staff_price_quote(db_session, quote)
 
     payload = selfserve.selfserve_quotes.accept_with_deposit(
         db_session,
@@ -382,6 +639,7 @@ def test_accept_with_deposit_accepts_and_marks_sales_order(db_session):
 def test_accept_with_deposit_is_idempotent(db_session):
     sub = _subscriber(db_session)
     quote = _request(db_session, sub, distance=1300.0)
+    _staff_price_quote(db_session, quote)
 
     first = selfserve.selfserve_quotes.accept_with_deposit(
         db_session,
@@ -411,6 +669,7 @@ def test_accept_with_deposit_is_idempotent(db_session):
 def test_accept_full_deposit_marks_order_paid(db_session):
     sub = _subscriber(db_session)
     quote = _request(db_session, sub, distance=1300.0)
+    _staff_price_quote(db_session, quote)
     selfserve.selfserve_quotes.accept_with_deposit(
         db_session,
         str(sub.id),

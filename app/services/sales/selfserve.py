@@ -54,6 +54,7 @@ changes.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID
 
@@ -62,10 +63,16 @@ from geoalchemy2.functions import ST_MakePoint, ST_SetSRID
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.catalog import CatalogOffer, OfferPrice, PriceType
+from app.models.catalog import (
+    CatalogOffer,
+    OfferPrice,
+    PriceType,
+    Subscription,
+    SubscriptionStatus,
+)
 from app.models.domain_settings import SettingDomain
 from app.models.network import FiberAccessPoint
-from app.models.project import Project, ProjectType
+from app.models.project import Project
 from app.models.sales import (
     Quote,
     QuoteStatus,
@@ -75,23 +82,22 @@ from app.models.sales import (
 )
 from app.models.subscriber import Subscriber
 from app.schemas.portal import MyQuotesResponse, QuoteItem
-from app.schemas.sales import (
-    LeadCreate,
-    QuoteCreate,
-    QuoteLineItemCreate,
-)
+from app.schemas.sales import LeadCreate, QuoteCreate
 from app.services import control_registry, settings_spec
 from app.services.common import coerce_uuid
 from app.services.db_session_adapter import db_session_adapter
 from app.services.owner_commands import CommandContext
 from app.services.sales import quote_acceptance
-from app.services.sales.service import leads, quote_line_items, quotes
+from app.services.sales.service import leads, quotes
+from app.services.sales.service_request_types import (
+    ServiceRequestKind,
+    ServiceRequestOption,
+)
 
 logger = logging.getLogger(__name__)
 
 _TWOPLACES = Decimal("0.01")
 # The self-serve installation product stores this as a typed Quote field.
-_PROJECT_TYPE = "fiber_optics_installation"
 
 
 def _money(value) -> Decimal:
@@ -477,12 +483,32 @@ class SelfServeQuotes:
         Customer read surfaces use this owner behind
         ``quotes_native_read_enabled``."""
         rows = SelfServeQuotes.list_for_subscribers(db, subscriber_id)
+        paid_deposit_quote_ids: frozenset[UUID] = frozenset()
+        subscriber_uuid = coerce_uuid(str(subscriber_id))
+        if rows and subscriber_uuid is not None:
+            from app.services import quote_deposits
+
+            settlements = quote_deposits.resolve_quote_deposit_settlements(
+                db,
+                quote_deposits.QuoteDepositSettlementQuery(
+                    subscriber_id=subscriber_uuid,
+                    quote_ids=tuple(quote.id for quote in rows),
+                    observed_at=datetime.now(UTC),
+                ),
+            )
+            paid_deposit_quote_ids = settlements.paid_quote_ids
         # H1: resolve every quote's install-project id in ONE query, then pass
         # each in — no per-quote metadata->>'quote_id' scan.
         project_ids = _find_project_ids_for_quotes(db, [q.id for q in rows])
         items = [
             QuoteItem.model_validate(
-                build_portal_quote_payload(db, q, project_id=project_ids.get(str(q.id)))
+                build_portal_quote_payload(
+                    db,
+                    q,
+                    project_id=project_ids.get(str(q.id)),
+                    customer_view=True,
+                    paid_deposit_quote_ids=paid_deposit_quote_ids,
+                )
             )
             for q in rows
         ]
@@ -511,6 +537,9 @@ class SelfServeQuotes:
         address: str | None = None,
         region: str | None = None,
         note: str | None = None,
+        service_option: ServiceRequestOption = ServiceRequestOption.fiber_installation,
+        subscription_id: UUID | None = None,
+        destination_offer_id: UUID | None = None,
     ) -> Quote:
         """Map-pinned quote request → draft Lead + Quote + estimate lines.
 
@@ -529,10 +558,91 @@ class SelfServeQuotes:
         if subscriber is None:
             raise HTTPException(status_code=404, detail="Subscriber not found")
 
-        feasibility = compute_feasibility(db, latitude, longitude)
-        currency = _resolve_currency(db)
-        estimate = compute_estimate(db, feasibility, currency)
+        if service_option.kind is ServiceRequestKind.relocation:
+            if subscription_id is None:
+                raise HTTPException(
+                    status_code=422, detail="Select the service to relocate"
+                )
+            source = db.get(Subscription, subscription_id)
+            if (
+                source is None
+                or source.subscriber_id != subscriber.id
+                or source.status is not SubscriptionStatus.active
+                or source.offer is None
+                or source.offer.access_type.value != service_option.source_access_type
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected service is not eligible for this relocation",
+                )
+            from app.services.customer_portal_context import get_available_portal_offers
 
+            if destination_offer_id is None:
+                if (
+                    service_option.source_access_type
+                    != service_option.destination_access_type
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Select a plan for the connection at your new address",
+                    )
+                destination_offer_id = source.offer_id
+            from app.models.catalog import OfferStatus
+            from app.services.customer_portal_context import (
+                offer_has_positive_recurring_price,
+            )
+
+            if destination_offer_id == source.offer_id:
+                destination_offer = source.offer
+                if (
+                    destination_offer is None
+                    or not destination_offer.is_active
+                    or destination_offer.status is not OfferStatus.active
+                    or not destination_offer.show_on_customer_portal
+                    or not offer_has_positive_recurring_price(destination_offer)
+                ):
+                    destination_offer = None
+            else:
+                destination_offer = next(
+                    (
+                        offer
+                        for offer in get_available_portal_offers(
+                            db,
+                            source,
+                            apply_reseller_availability=False,
+                            require_same_plan_family=False,
+                        )
+                        if offer.id == destination_offer_id
+                    ),
+                    None,
+                )
+            if (
+                destination_offer is None
+                or destination_offer.access_type.value
+                != service_option.destination_access_type
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="The destination plan is not available for this service",
+                )
+        elif subscription_id is not None or destination_offer_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="An installation request cannot select an existing service",
+            )
+
+        feasibility = (
+            compute_feasibility(db, latitude, longitude)
+            if service_option.destination_access_type == "fiber"
+            else {
+                "feasible": None,
+                "coverage": "survey_required",
+                "nearest_fap_id": None,
+                "nearest_fap_name": None,
+                "distance_meters": None,
+            }
+        )
+        currency = _resolve_currency(db)
         # The map-pin contract: reused downstream for estimate/survey/billing.
         install = {
             "latitude": latitude,
@@ -544,12 +654,26 @@ class SelfServeQuotes:
             db,
             LeadCreate(
                 subscriber_id=subscriber.id,
-                title="Self-serve installation request",
+                title=(
+                    "Self-serve relocation request"
+                    if service_option.kind is ServiceRequestKind.relocation
+                    else "Self-serve installation request"
+                ),
                 address=address,
                 region=region,
                 notes=note,
                 lead_source="Portal",
-                metadata_={"source": "portal_self_serve", "install": install},
+                metadata_={
+                    "source": "portal_self_serve",
+                    "install": install,
+                    "service_option": service_option.value,
+                    "source_subscription_id": (
+                        str(subscription_id) if subscription_id else None
+                    ),
+                    "destination_offer_id": (
+                        str(destination_offer_id) if destination_offer_id else None
+                    ),
+                },
             ),
         )
         quote = quotes.create(
@@ -558,34 +682,31 @@ class SelfServeQuotes:
                 subscriber_id=subscriber.id,
                 lead_id=lead.id,
                 status=QuoteStatus.draft,
-                project_type=ProjectType(_PROJECT_TYPE),
+                project_type=service_option.project_type,
                 currency=currency,
                 metadata_={
                     "source": "portal_self_serve",
                     "install": install,
+                    "service_option": service_option.value,
+                    "source_subscription_id": (
+                        str(subscription_id) if subscription_id else None
+                    ),
+                    "destination_offer_id": (
+                        str(destination_offer_id) if destination_offer_id else None
+                    ),
                     "feasibility": feasibility,
-                    "deposit_percent": estimate["deposit_percent"],
-                    "estimate_provisional": estimate["provisional"],
-                    "pricing_mode": estimate["pricing_mode"],
+                    "deposit_percent": (
+                        100
+                        if service_option.kind is ServiceRequestKind.relocation
+                        else cfg["deposit_percent"]
+                    ),
+                    # The customer submits location and feasibility evidence,
+                    # not a commercial estimate. Sales authors every price.
+                    "estimate_provisional": True,
+                    "pricing_mode": "staff",
                 },
             ),
         )
-        for item in estimate["line_items"]:
-            metadata = (
-                {"sub_offer_id": item["sub_offer_id"]}
-                if item.get("sub_offer_id")
-                else None
-            )
-            quote_line_items.create(
-                db,
-                QuoteLineItemCreate(
-                    quote_id=quote.id,
-                    description=item["description"],
-                    quantity=Decimal("1.000"),
-                    unit_price=item["unit_price"],
-                    metadata_=metadata,
-                ),
-            )
         from app.services.sales import quote_payment_review
 
         quote_uuid = quote.id
@@ -597,7 +718,7 @@ class SelfServeQuotes:
                 context=CommandContext.system(
                     actor=f"subscriber:{subscriber_uuid}",
                     scope="sales:quote-payment-review-request",
-                    reason="Customer requested an installation estimate",
+                    reason="Customer requested a service quote review",
                     command_id=quote_uuid,
                     idempotency_key=f"quote-payment-review-request:{quote_uuid}",
                 ),
@@ -715,6 +836,8 @@ def build_portal_quote_payload(
     *,
     already_accepted: bool = False,
     project_id: str | None = _UNSET_PROJECT_ID,
+    customer_view: bool = False,
+    paid_deposit_quote_ids: frozenset[UUID] | None = None,
 ) -> dict:
     """Serialize a quote for the portal surface — the exact shape
     ``QuoteMirror.payload`` cached and mobile parses (§2.2 step 5, §2.5):
@@ -728,14 +851,77 @@ def build_portal_quote_payload(
 
     total = _money(quote.total)
     deposit_percent = int(meta.get("deposit_percent") or 0)
+    is_relocation = str(quote.project_type or "").endswith("_relocation")
     deposit_amount = (
-        _money(deposit_meta["amount"])
-        if deposit_meta.get("amount")
-        else _money(total * Decimal(deposit_percent) / 100)
+        total
+        if is_relocation
+        else (
+            _money(deposit_meta["amount"])
+            if deposit_meta.get("amount")
+            else _money(total * Decimal(deposit_percent) / 100)
+        )
     )
     from app.services.sales import quote_payment_review
 
     payment_review = quote_payment_review.resolve_payment_review(quote)
+    if not is_relocation and paid_deposit_quote_ids is None:
+        paid_deposit_quote_ids = frozenset()
+        if quote.subscriber_id is not None:
+            from app.services import quote_deposits
+
+            settlements = quote_deposits.resolve_quote_deposit_settlements(
+                db,
+                quote_deposits.QuoteDepositSettlementQuery(
+                    subscriber_id=quote.subscriber_id,
+                    quote_ids=(quote.id,),
+                    observed_at=datetime.now(UTC),
+                ),
+            )
+            paid_deposit_quote_ids = settlements.paid_quote_ids
+    relocation_request = None
+    relocation_paid = False
+    if is_relocation:
+        from app.models.billing import Invoice, InvoiceStatus
+        from app.models.subscription_change import SubscriptionChangeRequest
+
+        relocation_request = (
+            db.query(SubscriptionChangeRequest)
+            .filter(
+                SubscriptionChangeRequest.confirmation_idempotency_key
+                == f"customer-relocation-quote:{quote.id}"
+            )
+            .one_or_none()
+        )
+        if relocation_request and relocation_request.field_fee_invoice_id:
+            relocation_invoice = db.get(
+                Invoice, relocation_request.field_fee_invoice_id
+            )
+            relocation_paid = bool(
+                relocation_invoice and relocation_invoice.status is InvoiceStatus.paid
+            )
+    deposit_paid = (
+        relocation_paid
+        if is_relocation
+        else quote.id in (paid_deposit_quote_ids or frozenset())
+        or bool(deposit_meta.get("paid"))
+    )
+    payment_review_message = (
+        "Paid"
+        if deposit_paid
+        else (
+            (
+                "Full charge received. Your relocation is being scheduled."
+                if relocation_paid
+                else "Approved. Pay the full relocation charge to book your move."
+            )
+            if is_relocation and payment_review.approval_current
+            else payment_review.message
+        )
+    )
+    pricing_visible = bool(
+        payment_review.approval_current or _quote_status(quote) == "accepted"
+    )
+    show_prices = pricing_visible or not customer_view
 
     sales_order = db.query(SalesOrder).filter(SalesOrder.quote_id == quote.id).first()
     # ``project_id`` may be pre-resolved by a batch caller (H1: the list read
@@ -760,12 +946,22 @@ def build_portal_quote_payload(
 
     return {
         "id": str(quote.id),
-        "status": _quote_status(quote),
+        "status": (
+            "accepted"
+            if relocation_paid
+            and relocation_request is not None
+            and relocation_request.work_order_id is not None
+            else _quote_status(quote)
+        ),
         "currency": quote.currency,
-        "subtotal": str(_money(quote.subtotal)),
-        "tax_total": str(_money(quote.tax_total)),
-        "total": str(total),
+        "subtotal": str(_money(quote.subtotal)) if show_prices else None,
+        "tax_total": str(_money(quote.tax_total)) if show_prices else None,
+        "total": str(total) if show_prices else None,
         "project_type": quote.project_type,
+        "service_option": meta.get("service_option"),
+        "subscription_id": meta.get("source_subscription_id"),
+        "destination_offer_id": meta.get("destination_offer_id"),
+        "pricing_visible": pricing_visible,
         # Post-import this is the row's own column (§1.4); the legacy
         # metadata key remains only on imported rows as provenance.
         "subscriber_id": str(quote.subscriber_id),
@@ -781,12 +977,12 @@ def build_portal_quote_payload(
             "nearest_fap_name": feasibility.get("nearest_fap_name"),
         },
         "estimate_provisional": bool(meta.get("estimate_provisional")),
-        "deposit_percent": deposit_percent,
-        "deposit_amount": str(deposit_amount),
-        "deposit_paid": bool(deposit_meta.get("paid")),
+        "deposit_percent": deposit_percent if show_prices else None,
+        "deposit_amount": str(deposit_amount) if show_prices else None,
+        "deposit_paid": deposit_paid,
         "deposit_reference": deposit_meta.get("reference"),
         "payment_review_status": payment_review.status.value,
-        "payment_review_message": payment_review.message,
+        "payment_review_message": payment_review_message,
         "payment_reviewed_at": (
             payment_review.reviewed_at.isoformat()
             if payment_review.reviewed_at is not None
@@ -794,10 +990,15 @@ def build_portal_quote_payload(
         ),
         "can_pay_deposit": bool(
             payment_review.can_pay_deposit
-            and not deposit_meta.get("paid")
+            and not deposit_paid
             and deposit_amount > Decimal("0.00")
         ),
-        "line_items": line_items,
+        "relocation_work_order_id": (
+            str(relocation_request.work_order_id)
+            if relocation_request and relocation_request.work_order_id
+            else None
+        ),
+        "line_items": line_items if show_prices else [],
         "sales_order_id": str(sales_order.id) if sales_order else None,
         "project_id": project_id,
         "already_accepted": already_accepted,

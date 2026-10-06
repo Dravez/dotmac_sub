@@ -43,6 +43,7 @@ _AR_STATUSES = (
 _RELEVANT_SUBSCRIPTION_STATUSES = (
     SubscriptionStatus.active,
     SubscriptionStatus.pending,
+    SubscriptionStatus.paused,
     SubscriptionStatus.suspended,
     SubscriptionStatus.blocked,
 )

@@ -399,6 +399,25 @@ def check_sla_breaches(db: Session, ticket_id) -> list[SlaClock]:
                 clock_id=clock.id, status=SlaBreachStatus.open.value, breached_at=due_at
             )
         )
+        from app.services.events import EventType, emit_event
+        from app.services.operator_tenant import OPERATOR_TENANT_ID
+
+        emit_event(
+            db,
+            EventType.support_ticket_sla_breached,
+            {
+                "tenant_id": str(OPERATOR_TENANT_ID),
+                "ticket_id": str(ticket.id),
+                "sla_clock_id": str(clock.id),
+                "breached_at": due_at.isoformat(),
+                "status": str(ticket.status or "").strip().lower(),
+                "priority": str(ticket.priority or "").strip().lower(),
+                "ticket_type": str(ticket.ticket_type or "").strip(),
+            },
+            actor="support.ticket_sla_clock",
+            subscriber_id=ticket.subscriber_id,
+            account_id=ticket.customer_account_id or ticket.subscriber_id,
+        )
         from app.models.operational_escalation import OperationalEntityType
         from app.services import operational_escalation
 

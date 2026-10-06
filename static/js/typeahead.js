@@ -99,6 +99,14 @@
             syncClearButton();
         }
 
+        function syncSelectionValidity() {
+            if (input.value.trim() && !hidden.value.trim()) {
+                input.setCustomValidity("Select a customer from the search results or clear the search field.");
+                return;
+            }
+            input.setCustomValidity("");
+        }
+
         function renderResults(items, emptyMessage) {
             if (!items || !items.length) {
                 renderMessage(emptyMessage || ("No " + pluralLabel() + " found."));
@@ -255,6 +263,7 @@
         input.addEventListener("input", function () {
             var query = input.value.trim();
             updateHiddenValue("");
+            syncSelectionValidity();
             syncClearButton();
             if (timer) {
                 window.clearTimeout(timer);
@@ -344,7 +353,7 @@
                 var hasDisplayValue = Boolean(input.value.trim());
                 var hasSelectedValue = Boolean(hidden.value.trim());
                 if (hasDisplayValue && !hasSelectedValue) {
-                    input.setCustomValidity("Select a customer from the search results or clear the search field.");
+                    syncSelectionValidity();
                     input.reportValidity();
                     event.preventDefault();
                     return;

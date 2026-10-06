@@ -179,9 +179,13 @@ _IPV4_PROJECTION_BLOCKERS: dict[IPv4ServedProjectionDecision, str] = {
 
 
 def prepaid_bill_now_preview_context(
-    db: Session, *, subscription_id: str
+    db: Session, *, subscription_id: str, effective_at: datetime | None = None
 ) -> dict[str, object]:
-    preview = preview_prepaid_recovery_draft(db, subscription_id=UUID(subscription_id))
+    preview = preview_prepaid_recovery_draft(
+        db,
+        subscription_id=UUID(subscription_id),
+        effective_at=effective_at,
+    )
     return {"prepaid_bill_now_preview": preview}
 
 
@@ -720,8 +724,21 @@ def subscription_detail_page_context(
                 subscription=subscription,
             )
         ),
+        "ticket_pause_resume_preview": None,
     }
     context.update(core.subscription_detail_context(db, subscription))
+    if subscription.status == SubscriptionStatus.paused:
+        from app.services.ticket_sla_service_automation import (
+            TicketServicePauseResumePreviewQuery,
+            preview_ticket_service_resume_for_subscription,
+        )
+
+        context["ticket_pause_resume_preview"] = (
+            preview_ticket_service_resume_for_subscription(
+                db,
+                TicketServicePauseResumePreviewQuery(subscription_id=subscription.id),
+            )
+        )
     if (
         subscription.status == SubscriptionStatus.suspended
         and subscription.billing_mode.value == "prepaid"
@@ -1464,7 +1481,7 @@ def admin_resume_vacation_hold_redirect(
 ) -> str:
     """Admin action to resume a customer vacation hold and return redirect URL."""
     from app.models.audit import AuditActorType
-    from app.models.enforcement_lock import EnforcementLock
+    from app.models.subscription_pause import SubscriptionPauseCause
     from app.services.subscription_lifecycle import (
         SubscriptionCommandKind,
         SubscriptionEffectiveTiming,
@@ -1486,10 +1503,10 @@ def admin_resume_vacation_hold_redirect(
             subscription,
             command_kind=SubscriptionCommandKind.vacation_resume,
         )
-        if not decision.eligible or decision.active_lock_id is None:
+        if not decision.eligible or decision.active_cause_id is None:
             raise ValueError("No active vacation hold exists")
-        lock = db.get(EnforcementLock, coerce_uuid(decision.active_lock_id))
-        if lock is None:
+        cause = db.get(SubscriptionPauseCause, coerce_uuid(decision.active_cause_id))
+        if cause is None:
             raise ValueError("Vacation-hold evidence is missing")
         snapshot = resolve_subscription_lifecycle(db, subscription_id)
         outcome = execute_subscription_command(
@@ -1501,7 +1518,7 @@ def admin_resume_vacation_hold_redirect(
                 effective_timing=SubscriptionEffectiveTiming.immediate,
                 reason="Administrator resumed customer vacation hold",
                 expected_head=snapshot.head,
-                idempotency_key=f"admin-vacation-resume:{lock.id}",
+                idempotency_key=f"admin-vacation-resume:{cause.id}",
             ),
             actor_id=actor_id,
             actor_type=AuditActorType.user,

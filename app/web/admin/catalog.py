@@ -1,7 +1,7 @@
 """Admin catalog management web routes."""
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import quote_plus
 from uuid import UUID, uuid4
@@ -32,6 +32,7 @@ from app.services.auth_dependencies import (
     require_any_permission,
     require_permission,
 )
+from app.services.db_session_adapter import db_session_adapter
 from app.services.domain_errors import DomainError
 from app.services.owner_commands import CommandContext
 from app.services.prepaid_funding_reconstruction import (
@@ -112,7 +113,9 @@ def _assert_lifecycle_command_permission(
     action_permission = {
         SubscriptionCommandKind.activate: "subscription:activate",
         SubscriptionCommandKind.restore: "subscription:activate",
+        SubscriptionCommandKind.resume_pause: "subscription:activate",
         SubscriptionCommandKind.suspend: "subscription:suspend",
+        SubscriptionCommandKind.pause: "subscription:suspend",
     }.get(kind)
     if action_permission and auth and has_permission(auth, db, action_permission):
         return
@@ -933,6 +936,14 @@ def catalog_subscription_detail(
     context["can_change_ont"] = bool(
         auth and has_permission(auth, db, "network:ont:write")
     )
+    context["can_resume_ticket_pause"] = bool(
+        auth
+        and (
+            has_permission(auth, db, "catalog:write")
+            or has_permission(auth, db, "support:ticket_service_pause:resume")
+        )
+    )
+    context["pause_resume_idempotency_key"] = str(uuid4())
     context["notice"] = notice
     context["warning"] = warning
     context["error"] = error
@@ -955,6 +966,77 @@ def catalog_subscription_detail(
         else []
     )
     return templates.TemplateResponse("admin/catalog/subscription_detail.html", context)
+
+
+@router.post(
+    "/subscriptions/{subscription_id}/ticket-pause/resume",
+    dependencies=[
+        Depends(
+            require_any_permission(
+                "catalog:write", "support:ticket_service_pause:resume"
+            )
+        )
+    ],
+)
+def catalog_subscription_resume_ticket_pause(
+    request: Request,
+    subscription_id: str,
+    cause_id: UUID = Form(...),
+    preview_fingerprint: str = Form(...),
+    idempotency_key: str = Form(...),
+    reason: str = Form(...),
+    confirmed: str | None = Form(None),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    """Resume one reviewed ticket-linked pause through its coordinator owner."""
+
+    base_url = f"/admin/catalog/subscriptions/{subscription_id}"
+    if confirmed != "yes":
+        return RedirectResponse(
+            f"{base_url}?error={quote_plus('Confirm the reviewed service resume.')}",
+            status_code=303,
+        )
+    actor = str(_get_actor_id(request) or "admin")
+    resumed_at = datetime.now(UTC)
+    from app.services.ticket_sla_service_automation import (
+        ResumeTicketPausedServiceCommand,
+        resume_ticket_paused_service,
+    )
+
+    try:
+        with db_session_adapter.owner_command_session() as command_db:
+            outcome = resume_ticket_paused_service(
+                command_db,
+                ResumeTicketPausedServiceCommand(
+                    subscription_id=UUID(subscription_id),
+                    cause_id=cause_id,
+                    preview_fingerprint=preview_fingerprint,
+                    resumed_at=resumed_at,
+                    actor=actor,
+                    reason=reason.strip(),
+                    context=CommandContext.system(
+                        actor=actor,
+                        scope=f"subscription:{subscription_id}",
+                        reason=reason.strip(),
+                        idempotency_key=idempotency_key,
+                    ),
+                ),
+            )
+    except (DomainError, ValueError) as exc:
+        message = str(getattr(exc, "message", None) or str(exc))
+        return RedirectResponse(
+            f"{base_url}?error={quote_plus(message)}#ticket-service-pause",
+            status_code=303,
+        )
+    duration = outcome.paused_seconds
+    message = (
+        f"Service resume completed after {duration} paused seconds. "
+        f"Resulting status: {outcome.resulting_status.value}."
+    )
+    return RedirectResponse(
+        f"{base_url}?notice={quote_plus(message)}#ticket-service-pause",
+        status_code=303,
+    )
 
 
 @router.get(
@@ -1019,12 +1101,17 @@ def catalog_subscription_change_ont_submit(
     dependencies=[Depends(require_permission("billing:invoice:update"))],
 )
 def catalog_subscription_bill_now_preview(
-    request: Request, subscription_id: str, db: Session = Depends(get_db)
+    request: Request,
+    subscription_id: str,
+    effective_at: datetime | None = Form(None),
+    db: Session = Depends(get_db),
 ) -> Response:
     try:
         preview_context = (
             web_catalog_subscription_workflows_service.prepaid_bill_now_preview_context(
-                db, subscription_id=subscription_id
+                db,
+                subscription_id=subscription_id,
+                effective_at=effective_at,
             )
         )
     except DomainError as exc:

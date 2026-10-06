@@ -274,6 +274,36 @@ python scripts/network/stage_fiber_topology_kmz.py \
   --all-checked-in --stage --actor "operator identity"
 ```
 
+### Network Map browser admission
+
+Authorized staff can stage normalized KML or KMZ evidence from
+`/admin/network/map` through `network.map_kmz_transfer`. The browser adapter
+requires `network:fiber:import`, the typed mixed profile, reason, actor, and
+idempotency key. In addition to the one-type OSP profiles, **Mixed network
+map** stages fiber segments, access points, cabinets, splice closures, service
+buildings, and support structures in one immutable batch. It reads placemark
+names, IDs, descriptions, styles, ExtendedData, and point, line, and polygon
+geometry. Type and known source-ID fields help match supported assets. Missing
+types remain unclassified; ambiguous points and polygons are never guessed.
+Unsupported rows retain their name and geometry for operator review while
+customer/device identifiers and private ExtendedData are removed. HTTPS icon
+URLs are stored as references but never fetched by the server or preview;
+unsafe references are reported and replaced with default symbols. KML
+NetworkLinks are never expanded; local placemarks retain a warning, while a
+link-only document must be downloaded separately. A mixed batch with
+blockers is still staged evidence, not a canonical write.
+Operators may record feature classification choices as append-only reviewed
+revisions. These revisions do not edit the checksum-bound source observations.
+The explicit browser handoff submits only eligible new point assets to the
+existing independently reviewed asset proposal workflow. Matched assets,
+buildings, unsupported features, and routes remain staged; route connectivity
+requires its own reviewed endpoint workflow.
+The transfer delegates persistence to `network.fiber_source_staging` inside
+the transfer owner's transaction. The returned overlay is preview evidence
+only; it never joins `ui.network_map_projection` and never bypasses identity,
+connectivity, or asset-change review. See
+`docs/designs/NETWORK_MAP_KMZ_IMPORT_EXPORT.md`.
+
 The checked-in six-source preview resolves all expected 4,681 rows with stable
 IDs and zero structural/coordinate blockers. Duplicate names and geometries are
 retained as review candidates rather than silently merged.
@@ -771,6 +801,21 @@ configuration caches.
 - The legacy generic CRUD adapter delegates exact creates to the command owner,
   permits non-identity configuration updates only, and returns `410 Gone` for
   direct identity updates, historical creates, and deletes.
+
+### Legacy assignment mode field normalization
+
+`OntAssignment.wan_mode` and `ip_mode` are retired compatibility fields; current
+provisioning and service-intent paths do not depend on them. ORM assignments
+normalize `bridge`, `bridged`, and `setup_via_onu` to `OnuMode.bridging` in
+`wan_mode`, and to the valid `dhcp` value if bridge aliases reach the legacy
+`ip_mode` field. Other
+unknown strings fail validation. Database check constraints enforce the enum
+sets even for direct SQL writers. Migration
+`621_ont_assignment_mode_normalization` backfills bridge aliases, maps legacy
+`static`/`dynamic` aliases, clears unknown retired values to `NULL`, and installs
+the constraints. Keeping the fields loadable matters because customer list
+queries eager-load active ONT assignments; SQLAlchemy otherwise raises while
+decoding an invalid enum and the whole customer search fails.
 
 ## ONT assignment constraint cutover readiness
 

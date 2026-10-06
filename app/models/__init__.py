@@ -42,9 +42,21 @@ from app.models.automation import (  # noqa: F401
     AutomationRuleStatus,
     AutomationRuleVersion,
     AutomationRun,
+    AutomationRunRetry,
+    AutomationRunRetryStatus,
     AutomationRunStatus,
+    AutomationScheduledRun,
     AutomationStepRun,
     AutomationStepStatus,
+)
+from app.models.automation_scripts import (  # noqa: F401
+    AutomationScript,
+    AutomationScriptKind,
+    AutomationScriptLanguage,
+    AutomationScriptRun,
+    AutomationScriptRunStatus,
+    AutomationScriptStatus,
+    AutomationScriptVersion,
 )
 from app.models.bandwidth import BandwidthSample, QueueMapping  # noqa: F401
 from app.models.billing import (  # noqa: F401
@@ -86,6 +98,7 @@ from app.models.billing import (  # noqa: F401
     LedgerEntryType,
     LedgerSource,
     Payment,
+    PaymentAllocation,
     PaymentAllocationReconciliationException,
     PaymentMethod,
     PaymentMethodType,
@@ -254,6 +267,12 @@ from app.models.csat import (  # noqa: F401
     CsatSourceType,
     SupportCsatRequest,
 )
+from app.models.custom_fields import (  # noqa: F401
+    CustomFieldDefinition,
+    CustomFieldDefinitionStatus,
+    CustomFieldType,
+    CustomFieldValue,
+)
 from app.models.customer_experience import (  # noqa: F401
     CustomerExperienceHandoff,
     CustomerExperienceHandoffEvent,
@@ -266,6 +285,7 @@ from app.models.customer_subledger import (  # noqa: F401
     CustomerSubledgerAuthorityCutover,
     CustomerSubledgerOpeningCorrection,
     CustomerSubledgerOpeningPosition,
+    NativePrepaidOpeningRepair,
     PositionEffectKind,
     PostingCommandKind,
 )
@@ -293,6 +313,13 @@ from app.models.domain_settings import (  # noqa: F401
 from app.models.durable_timer import (  # noqa: F401
     DurableTimer,
     TimerStatus,
+)
+from app.models.enforcement_application import (  # noqa: F401
+    EnforcementApplication,
+    EnforcementEffect,
+    EnforcementFailureClass,
+    EnforcementOutcomeValue,
+    EnforcementPath,
 )
 from app.models.enforcement_lock import (  # noqa: F401
     AccessRestrictionMode,
@@ -371,6 +398,7 @@ from app.models.fiber_topology_identity import (  # noqa: F401
     FiberTopologyIdentityProposalBatch,
 )
 from app.models.fiber_topology_staging import (  # noqa: F401
+    FiberTopologyFeatureClassificationReview,
     FiberTopologySourceBatch,
     FiberTopologyStagedFeature,
 )
@@ -746,6 +774,11 @@ from app.models.payment_arrangement import (  # noqa: F401
     PaymentArrangementInstallment,
     PaymentFrequency,
 )
+from app.models.payment_email import (  # noqa: F401
+    PaymentEmailCutover,
+    PaymentEmailEpisode,
+    PaymentEmailPart,
+)
 from app.models.payment_proof import (  # noqa: F401
     PaymentProof,
     PaymentProofCorrection,
@@ -998,6 +1031,16 @@ from app.models.subscription_lifecycle_schedule import (  # noqa: F401
     SubscriptionLifecycleSchedule,
     SubscriptionLifecycleScheduleStatus,
 )
+from app.models.subscription_pause import (  # noqa: F401
+    SubscriptionPauseBillingPolicy,
+    SubscriptionPauseCause,
+    SubscriptionPauseCauseStatus,
+    SubscriptionPauseEpisode,
+    SubscriptionPauseEpisodeStatus,
+    SubscriptionPauseReason,
+    SubscriptionPauseResumePolicy,
+    SubscriptionPauseSource,
+)
 from app.models.support import (  # noqa: F401
     Ticket,
     TicketAccessToken,
@@ -1045,7 +1088,6 @@ from app.models.team_inbox import (  # noqa: F401
     InboxMessageTemplate,
     InboxQueueNotification,
     InboxReplyMacro,
-    InboxReplyReminder,
     InboxSavedFilter,
     InboxTeamRole,
     InboxTeamRoundRobinCursor,
@@ -1054,6 +1096,8 @@ from app.models.team_inbox import (  # noqa: F401
     TeamInboxChannelRoute,
     TeamInboxEmailRoute,
 )
+from app.models.test_connection import TestConnectionGrant  # noqa: F401
+from app.models.test_connection_review import TestConnectionFinanceReview  # noqa: F401
 from app.models.ticket_workflow import (  # noqa: F401
     SlaBreach,
     SlaBreachStatus,
