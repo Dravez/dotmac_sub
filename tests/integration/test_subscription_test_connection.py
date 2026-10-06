@@ -3,19 +3,52 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 import pytest
+from psycopg import sql
 from sqlalchemy import insert, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
 
 from app.models.test_connection import TestConnectionGrant as ConnectionGrant
 from app.services import test_connection as owner
+from scripts.ci import template_database
 from tests import test_subscription_test_connection as grant_tests
 
 test_service = grant_tests.test_service
+
+
+@pytest.fixture
+def fresh_migration_database(template_base_url: URL, monkeypatch) -> Iterator[URL]:
+    """Replay the migration path on a new disposable database, without cloning."""
+    from app import config as app_config
+
+    name = "dotmac_test_connection_migration_" + uuid4().hex
+    maintenance = template_base_url.set(drivername="postgresql", database="postgres")
+    with psycopg.connect(
+        maintenance.render_as_string(hide_password=False), autocommit=True
+    ) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    target = template_base_url.set(database=name)
+    monkeypatch.setattr(
+        app_config,
+        "settings",
+        replace(
+            app_config.settings,
+            database_url=target.render_as_string(hide_password=False),
+        ),
+    )
+    try:
+        template_database.bootstrap_database_local_prerequisites(target)
+        yield target
+    finally:
+        template_database.drop_database(template_base_url, name)
 
 
 def test_migrated_grant_timer_and_audit_are_committed_together(
@@ -74,7 +107,8 @@ def test_actual_radius_queries_expire_without_worker_cleanup(engine):
         # RADIUS is an external projection, owned by this exact checked-in
         # PostgreSQL schema rather than app Base.metadata.
         conn.exec_driver_sql(
-            Path("config/freeradius/schema.sql").read_text(encoding="utf-8")
+            Path("config/freeradius/schema.sql").read_text(encoding="utf-8"),
+            execution_options={"no_parameters": True},
         )
         until = int((datetime.now(UTC) + timedelta(minutes=5)).timestamp())
         conn.execute(
@@ -158,14 +192,15 @@ def test_actual_radius_queries_expire_without_worker_cleanup(engine):
 
 
 def test_predecessor_upgrade_adds_permission_without_replacing_role_grants(
-    cloned_database,
+    fresh_migration_database,
 ):
     from alembic.config import Config
     from sqlalchemy import create_engine
 
     from alembic import command
 
-    target = cloned_database("644_automation_scheduled_rules")
+    target = fresh_migration_database
+    template_database.upgrade_to(target, "644_automation_scheduled_rules")
     migrated = create_engine(target)
     try:
         with migrated.begin() as conn:
@@ -183,7 +218,7 @@ def test_predecessor_upgrade_adds_permission_without_replacing_role_grants(
             permission_id = uuid4()
             conn.execute(
                 text(
-                    "INSERT INTO permissions (id, key, is_active, is_ui_assignable) VALUES (:id, 'test:existing_custom', true, true)"
+                    "INSERT INTO permissions (id, key, is_active, is_ui_assignable, created_at, updated_at) VALUES (:id, 'test:existing_custom', true, true, now(), now())"
                 ),
                 {"id": permission_id},
             )
@@ -243,6 +278,7 @@ def test_concurrent_activations_serialize_to_one_grant(cloned_database, monkeypa
     from app.models.system_user import SystemUser
     from app.services.events import dispatcher
     from app.services.owner_commands import CommandContext
+    from app.services.subscriber import _default_reseller_id
 
     target = cloned_database("645_subscription_test_connection")
     migrated = create_engine(target)
@@ -254,6 +290,7 @@ def test_concurrent_activations_serialize_to_one_grant(cloned_database, monkeypa
                 email=f"{uuid4()}@example.com",
                 status=SubscriberStatus.suspended,
                 is_active=False,
+                reseller_id=_default_reseller_id(db),
             )
             offer = CatalogOffer(
                 name="Test plan",

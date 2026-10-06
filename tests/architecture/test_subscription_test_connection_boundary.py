@@ -40,7 +40,8 @@ def test_radius_sql_deadline_applies_to_check_reply_and_group_selection():
         query = source.split(f'{key} = "', 1)[1].split('"', 1)[0]
         assert "Dotmac-Test-Until" in query
         assert "CURRENT_TIMESTAMP" in query
-        assert "NOT LIKE 'Dotmac-Test-%'" in query
+        assert "<> 'Dotmac-Test-'" in query
+        assert "LIKE 'Dotmac-Test-%'" not in query
     assert "'Session-Timeout'" in source
 
 

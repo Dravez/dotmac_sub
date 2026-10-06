@@ -23,10 +23,10 @@ from app.services.sot_manifest import (
     TransactionMode,
     owner_command_boundary_error_codes,
 )
-from app.services.sot_registry.domains.test_connection import (
+from app.services.sot_registry.model import DomainSOT
+from app.services.sot_registry.test_connection_contracts import (
     SERVICE as TEST_CONNECTION_SERVICE,
 )
-from app.services.sot_registry.model import DomainSOT
 
 DOMAIN = DomainSOT(
     domain="network_access_control_plane",
