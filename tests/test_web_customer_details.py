@@ -623,8 +623,10 @@ def test_customer_360_view_more_is_available_for_paused_subscriptions(
     )
     rendered = response.body.decode("utf-8")
 
-    assert f'/admin/catalog/subscriptions/{subscription.id}' in rendered
-    assert 'x-text="showAllSubscriptions ? \'Show active only\' : \'View more\'"' in rendered
+    assert f"/admin/catalog/subscriptions/{subscription.id}" in rendered
+    assert (
+        "x-text=\"showAllSubscriptions ? 'Show active only' : 'View more'\"" in rendered
+    )
 
 
 def test_customer_360_unsuspend_action_is_permission_gated_and_reviewed() -> None:

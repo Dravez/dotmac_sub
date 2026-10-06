@@ -2799,18 +2799,16 @@ def reports_ncc_complaints(
         query=ncc_complaints_service.NccComplaintsReportQuery(start=start, end=end),
     )
     report = snapshot.as_legacy_dict()
-    requested_list_query = (
-        ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.build_query(
-            search=None,
-            filters={"date_from": effective_date_from, "date_to": effective_date_to},
-            page=page,
-            per_page=(
-                per_page
-                if per_page
-                in ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.per_page_options
-                else ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.default_per_page
-            ),
-        )
+    requested_list_query = ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.build_query(
+        search=None,
+        filters={"date_from": effective_date_from, "date_to": effective_date_to},
+        page=page,
+        per_page=(
+            per_page
+            if per_page
+            in ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.per_page_options
+            else ncc_complaints_service.NCC_COMPLAINTS_LIST_DEFINITION.default_per_page
+        ),
     )
     table_page = ncc_complaints_service.paginate_report(
         snapshot,

@@ -137,9 +137,7 @@ def test_ncc_complaints_page_renders_twenty_rows_and_pagination(
     assert "Page 2" in body
 
 
-def test_ncc_complaints_page_tolerates_stale_per_page_values(
-    db_session, monkeypatch
-):
+def test_ncc_complaints_page_tolerates_stale_per_page_values(db_session, monkeypatch):
     _stub_admin(monkeypatch)
     monkeypatch.setattr(reports_web, "can", lambda request, permission: False)
     for index in range(21):
