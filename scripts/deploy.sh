@@ -117,6 +117,11 @@ CELERY_INSPECT_TIMEOUT_SECONDS="${CELERY_INSPECT_TIMEOUT_SECONDS:-5}"
 # listeners afterwards. See docs/runbooks/PUBLISHED_PORT_RECONCILE.md and
 # ADR-0014. Everything else about these services still needs a deliberate,
 # separately scheduled recreate.
+#
+# Their release-shipped CONFIG FILES are different: a deploy restarts (never
+# recreates) freeradius, vmagent and promtail when a checkout file they mount
+# changed after they started. See apply_service_config_changes below and
+# docs/runbooks/SERVICE_CONFIG_MOUNTS.md.
 APP_SERVICES=(app celery-worker celery-worker-bandwidth celery-worker-ingestion \
   celery-worker-monitoring celery-worker-notifications-immediate \
   celery-worker-notifications celery-worker-billing \
@@ -730,6 +735,244 @@ assert_no_source_mount() {
   fi
 }
 
+# --- Release-shipped service configuration ---------------------------------
+#
+# freeradius, vmagent and promtail read configuration bind-mounted from
+# config/ in the deployment directory, and none of them re-reads it while
+# running. A deploy never recreates them (see APP_SERVICES above), so a pulled
+# config change used to reach the running process only when someone happened
+# to restart the container by hand. On dotmac_erp that left vmagent on a
+# two-week-old config after a `git pull`, merging production and staging
+# metrics under one label (dotmac_erp PR #695).
+#
+# So after a release the deploy asks, per running service: did any checkout
+# file this container bind-mounts change after the container started?
+# (scripts/deploy_config_freshness.py explains why that, rather than a diff
+# between two release revisions, is the right question on both hosts.) A
+# changed service is restarted -- `docker compose restart` re-resolves every
+# bind-mount source path, so it also picks up a file that `git` replaced with
+# a new inode. A restart is NOT a recreate: the service definition (image,
+# ports, volumes) is unchanged, and ADR-0014's published-port path still owns
+# those.
+#
+# FreeRADIUS is subscriber authentication, so it gets more than a restart:
+#   - A SIGHUP/`radmin hup` is not enough: FreeRADIUS 3 re-reads only HUP-safe
+#     module configuration on HUP, not radiusd.conf, virtual servers
+#     (sites-enabled), clients or dictionaries -- the files shipped here.
+#   - The new configuration is validated with `freeradius -XC` in a throwaway
+#     container from the same image and mounts, both before any database work
+#     (fail the deploy early) and again immediately before the restart. A
+#     rejected config is never restarted into: the running server keeps the
+#     configuration it loaded.
+#   - After the restart the container must stay up, and the synthetic RADIUS
+#     probe (app/services/radius_probe.py) must answer at least as well as it
+#     did before the restart.
+# vmagent and promtail are observability agents: a failed restart is reported
+# but never fails an otherwise healthy application deploy.
+#
+# See docs/runbooks/SERVICE_CONFIG_MOUNTS.md.
+CONFIG_RESTART_SERVICES=(vmagent promtail freeradius)
+FREERADIUS_SERVICE="freeradius"
+# The service whose environment carries RADIUS_PROBE_SECRET/PASSWORD. It is a
+# required service, so it is always present on a deploy host.
+RADIUS_PROBE_SERVICE="${RADIUS_PROBE_SERVICE:-celery-worker}"
+FREERADIUS_RESTART_TIMEOUT_SECONDS="${FREERADIUS_RESTART_TIMEOUT_SECONDS:-60}"
+FREERADIUS_STABILITY_SECONDS="${FREERADIUS_STABILITY_SECONDS:-5}"
+CONFIG_APPLY_FAILED=0
+
+# Print the checkout bind-mount sources of a running container that changed
+# after it started (one "changed|missing <path>" line each, nothing when it is
+# current). Returns non-zero when that cannot be determined.
+service_config_stale_sources() {
+  local container="$1"
+  local started_at
+  local mounts
+  local -a sources=()
+  started_at="$(docker inspect "${container}" \
+    --format '{{.State.StartedAt}}' 2>/dev/null)" || return 1
+  [[ -n "${started_at}" ]] || return 1
+  mounts="$(docker inspect "${container}" \
+    --format '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' \
+    2>/dev/null)" || return 1
+  mapfile -t sources <<<"${mounts}"
+  run_repo_module scripts.deploy_config_freshness \
+    --started-at "${started_at}" --within "${DEPLOY_DIR}" -- "${sources[@]}"
+}
+
+print_stale_sources() {
+  local service="$1"
+  local line
+  while IFS= read -r line; do
+    printf '  %s: %s\n' "${service}" "${line}"
+  done <<<"$2"
+}
+
+validate_freeradius_config() {
+  local output
+  log "Validating FreeRADIUS configuration in a throwaway container (freeradius -XC)"
+  # `compose run` creates a new container from the same image, environment and
+  # bind mounts as the service, without publishing its ports, so it reads the
+  # checkout's current files while the running server keeps serving.
+  # -X masks secret-typed values (client secrets, SQL password) in its output.
+  if output="$("${COMPOSE[@]}" run --rm --no-deps -T "${FREERADIUS_SERVICE}" \
+    freeradius -XC 2>&1)"; then
+    echo "  FreeRADIUS accepted the checkout configuration."
+    return 0
+  fi
+  echo "FREERADIUS CONFIG REJECTED: freeradius -XC failed against the checkout configuration." >&2
+  echo "The running server was not restarted and keeps the configuration it loaded." >&2
+  echo "Last lines of the validation output:" >&2
+  tail -n 40 <<<"${output}" >&2
+  return 1
+}
+
+# Outcome of one synthetic Access-Request: accept | reject | timeout | error |
+# unconfigured | unavailable.
+radius_probe_outcome() {
+  local outcome
+  outcome="$("${COMPOSE[@]}" exec -T "${RADIUS_PROBE_SERVICE}" python -c \
+    'from app.services.radius_probe import run_configured_probe
+_fields, result = run_configured_probe()
+print(result.outcome if result is not None else "unconfigured")' \
+    2>/dev/null | tail -n 1)" || outcome=""
+  case "${outcome}" in
+    accept | reject | timeout | error | unconfigured) printf '%s\n' "${outcome}" ;;
+    *) printf 'unavailable\n' ;;
+  esac
+}
+
+# Prove the restarted server stays up and answers at least as well as it did
+# before the restart. A probe that was not answering beforehand (unconfigured,
+# or no response) cannot prove more than liveness, and must not turn a config
+# apply into a failure on its own.
+wait_for_freeradius_after_restart() {
+  local baseline="$1"
+  local deadline=$((SECONDS + FREERADIUS_RESTART_TIMEOUT_SECONDS))
+  local container state restart_count outcome="" stable_since="" stable_count=""
+  while true; do
+    container="$(service_container_id "${FREERADIUS_SERVICE}")" || container=""
+    state=""
+    restart_count=""
+    if [[ -n "${container}" ]]; then
+      state="$(docker inspect "${container}" --format '{{.State.Status}}' 2>/dev/null || true)"
+      restart_count="$(docker inspect "${container}" --format '{{.RestartCount}}' 2>/dev/null || true)"
+    fi
+    # A server that refuses its config exits, and the unless-stopped policy
+    # restarts it: RestartCount moves. Require it to hold still for the
+    # stability window rather than assuming any absolute value, because the
+    # count can carry history from before this restart.
+    if [[ "${state}" == "running" && -n "${stable_since}" \
+      && "${restart_count}" != "${stable_count}" ]]; then
+      stable_since=""
+    fi
+    if [[ "${state}" == "running" ]]; then
+      if [[ -z "${stable_since}" ]]; then
+        stable_since="${SECONDS}"
+        stable_count="${restart_count}"
+      fi
+      if ((SECONDS - stable_since >= FREERADIUS_STABILITY_SECONDS)); then
+        case "${baseline}" in
+          accept)
+            outcome="$(radius_probe_outcome)"
+            [[ "${outcome}" == "accept" ]] && break
+            ;;
+          reject)
+            outcome="$(radius_probe_outcome)"
+            [[ "${outcome}" == "accept" || "${outcome}" == "reject" ]] && break
+            ;;
+          *)
+            echo "  WARNING: the RADIUS probe was '${baseline}' before the restart, so only liveness is proven." >&2
+            break
+            ;;
+        esac
+      fi
+    else
+      stable_since=""
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "FREERADIUS RESTART HEALTH FAILED: state=${state:-absent} restart_count=${restart_count:-unknown} probe=${outcome:-not run} (before restart: ${baseline})." >&2
+      echo "Subscriber authentication may be down. The validated config is already loaded; inspect now:" >&2
+      echo "  ${COMPOSE[*]} logs --tail 200 ${FREERADIUS_SERVICE}" >&2
+      echo "  ${COMPOSE[*]} run --rm --no-deps ${FREERADIUS_SERVICE} freeradius -X" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "  freeradius is running${outcome:+; probe ${outcome}}."
+}
+
+restart_freeradius_with_validation() {
+  local baseline
+  if ! validate_freeradius_config; then
+    return 1
+  fi
+  baseline="$(radius_probe_outcome)"
+  log "Restarting freeradius to load the validated configuration (probe before restart: ${baseline})"
+  # Authentication and accounting pause for the stop/start, normally a few
+  # seconds. NAS clients retransmit across it.
+  if ! "${COMPOSE[@]}" restart "${FREERADIUS_SERVICE}"; then
+    echo "FREERADIUS RESTART FAILED: docker compose restart ${FREERADIUS_SERVICE} returned non-zero." >&2
+    wait_for_freeradius_after_restart "${baseline}" || true
+    return 1
+  fi
+  wait_for_freeradius_after_restart "${baseline}"
+}
+
+# Before any database work: a FreeRADIUS config change that the server would
+# refuse fails the deploy here, while nothing has been touched.
+preflight_service_config() {
+  local container stale
+  service_is_declared "${FREERADIUS_SERVICE}" || return 0
+  container="$(service_container_id "${FREERADIUS_SERVICE}")" || container=""
+  [[ -n "${container}" ]] || return 0
+  if ! stale="$(service_config_stale_sources "${container}")"; then
+    echo "  WARNING: cannot determine whether freeradius config changed; it is re-checked after the release." >&2
+    return 0
+  fi
+  if [[ -z "${stale}" ]]; then
+    echo "  freeradius config unchanged since the container started."
+    return 0
+  fi
+  print_stale_sources "${FREERADIUS_SERVICE}" "${stale}"
+  validate_freeradius_config
+}
+
+# After a healthy release: restart only the services whose mounted checkout
+# config changed after they started. Sets CONFIG_APPLY_FAILED=1 when a
+# FreeRADIUS change could not be applied safely.
+apply_service_config_changes() {
+  local service container stale
+  for service in "${CONFIG_RESTART_SERVICES[@]}"; do
+    if ! service_is_declared "${service}"; then
+      continue
+    fi
+    container="$(service_container_id "${service}")" || container=""
+    if [[ -z "${container}" ]]; then
+      echo "  ${service}: not running; nothing to apply."
+      continue
+    fi
+    if ! stale="$(service_config_stale_sources "${container}")"; then
+      echo "  WARNING: ${service}: cannot determine whether its config changed; not restarted." >&2
+      continue
+    fi
+    if [[ -z "${stale}" ]]; then
+      echo "  ${service}: config unchanged since the container started."
+      continue
+    fi
+    print_stale_sources "${service}" "${stale}"
+    if [[ "${service}" == "${FREERADIUS_SERVICE}" ]]; then
+      if ! restart_freeradius_with_validation; then
+        CONFIG_APPLY_FAILED=1
+      fi
+      continue
+    fi
+    echo "  Restarting ${service} to load its changed config..."
+    if ! "${COMPOSE[@]}" restart "${service}"; then
+      echo "  WARNING: restarting ${service} failed; it may still run the previous config." >&2
+    fi
+  done
+}
+
 # Compose file set.
 #
 # The base Compose contract belongs to the authorized release checkout, not the
@@ -1042,6 +1285,12 @@ fi
   --revision "${GITHUB_RELEASE_REVISION}" \
   --branch "${GITHUB_RELEASE_BRANCH}"
 
+log "Checking release-shipped FreeRADIUS configuration"
+if ! preflight_service_config; then
+  echo "DEPLOY REFUSED before any database work: fix the FreeRADIUS configuration and redeploy." >&2
+  exit 1
+fi
+
 run_database_prerequisite_bootstrap
 verify_database_prerequisites
 
@@ -1272,6 +1521,11 @@ log "Deployed ${TAG} successfully (was ${PREV_IMAGE:-none})"
 # of the three prerequisite outcomes this release actually took.
 log "DEPLOY RECEIPT: tag=${TAG} revision=${FULL_SHA} prerequisites=${PREREQUISITE_OUTCOME}"
 
+# After the application is accepted, so a config problem in these services can
+# never roll back a healthy application release.
+log "Applying changed service configuration (vmagent, promtail, freeradius)"
+apply_service_config_changes
+
 log "Pruning old ${IMAGE_REPO} images (keeping ${IMAGE_RETAIN_COUNT} rollback images)"
 if ! IMAGE_REPO="${IMAGE_REPO}" RETAIN_IMAGES="${IMAGE_RETAIN_COUNT}" \
   bash "${REPO_DIR}/scripts/docker_image_retention.sh"; then
@@ -1279,3 +1533,8 @@ if ! IMAGE_REPO="${IMAGE_REPO}" RETAIN_IMAGES="${IMAGE_RETAIN_COUNT}" \
   exit 1
 fi
 log "Image retention completed and verified"
+
+if [[ "${CONFIG_APPLY_FAILED}" == "1" ]]; then
+  log "Application release is healthy, but a FreeRADIUS configuration change was NOT applied (see above)."
+  exit 1
+fi
