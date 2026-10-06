@@ -15,6 +15,9 @@
 #   HEALTH_CURL_TIMEOUT=N ...    cap each health-check curl attempt at N seconds
 #                                (default 5) so a hung health endpoint can't stall
 #                                a retry indefinitely
+#   READY_URL=URL                primary readiness document (default derived
+#                                from HEALTH_URL: <base>/api/v1/health/ready);
+#                                the candidate uses CANDIDATE_READY_URL
 #   BACKGROUND_STABILITY_SECONDS=N
 #                              require workers and Beat to remain restart-free
 #                              for N seconds before accepting the release
@@ -94,6 +97,16 @@ MIGRATION_RETRY_SECONDS="${MIGRATION_RETRY_SECONDS:-10}"
 CANDIDATE_CONTAINER="${CANDIDATE_CONTAINER:-dotmac_sub_app_candidate}"
 CANDIDATE_PORT="${CANDIDATE_PORT:-18002}"
 CANDIDATE_HEALTH_URL="${CANDIDATE_HEALTH_URL:-http://127.0.0.1:${CANDIDATE_PORT}/health}"
+# Readiness, not just liveness. `/health` proves one worker's event loop is
+# serving; `/api/v1/health/ready` reports `"status":"ready"` only once that
+# worker's lifespan has loaded every router (`routes_ready`, logged as
+# `startup_complete`) and it can reach the database. Both web gates poll the
+# readiness document inside the same timeout budget and fail closed when it
+# never reports ready. The previous-image restore gate keeps liveness only,
+# because an older image may predate the readiness contract.
+READY_URL="${READY_URL:-$(env_value READY_URL)}"
+READY_URL="${READY_URL:-${HEALTH_URL%/health}/api/v1/health/ready}"
+CANDIDATE_READY_URL="${CANDIDATE_READY_URL:-http://127.0.0.1:${CANDIDATE_PORT}/api/v1/health/ready}"
 CANDIDATE_DRAIN_SECONDS="${CANDIDATE_DRAIN_SECONDS:-2}"
 BACKGROUND_RUNTIME_TIMEOUT_SECONDS="${BACKGROUND_RUNTIME_TIMEOUT_SECONDS:-90}"
 BACKGROUND_STABILITY_SECONDS="${BACKGROUND_STABILITY_SECONDS:-15}"
@@ -180,16 +193,29 @@ wait_for_health() {
   local label="$2"
   local watched_container="${3:-}"
   local timeout_seconds="${4:-${HEALTH_TIMEOUT_SECONDS}}"
+  local ready_url="${5:-}"
   if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]]; then
     echo "${label} health gate misconfigured: timeout must be a non-negative integer" >&2
     return 1
   fi
   local deadline=$((SECONDS + timeout_seconds))
   local state
+  local ready_body=""
+  local last_readiness="not polled (liveness never answered)"
   while true; do
     if curl -fsS --connect-timeout "${HEALTH_CURL_TIMEOUT}" \
       --max-time "${HEALTH_CURL_TIMEOUT}" -o /dev/null "${url}" 2>/dev/null; then
-      return 0
+      if [[ -z "${ready_url}" ]]; then
+        return 0
+      fi
+      # A non-2xx answer (still starting, throttled, DB unreachable) is "not
+      # ready yet", never success.
+      ready_body="$(curl -fsS --connect-timeout "${HEALTH_CURL_TIMEOUT}" \
+        --max-time "${HEALTH_CURL_TIMEOUT}" "${ready_url}" 2>/dev/null || true)"
+      if grep -Eq '"status"[[:space:]]*:[[:space:]]*"ready"' <<<"${ready_body}"; then
+        return 0
+      fi
+      last_readiness="$(head -c 300 <<<"${ready_body:-no 2xx response}")"
     fi
     if [[ -n "${watched_container}" ]]; then
       state="$(docker inspect "${watched_container}" \
@@ -201,6 +227,9 @@ wait_for_health() {
     fi
     if ((SECONDS >= deadline)); then
       echo "${label} health gate failed: ${url} (timeout ${timeout_seconds}s)" >&2
+      if [[ -n "${ready_url}" ]]; then
+        echo "${label} readiness never reported ready at ${ready_url}; last answer: ${last_readiness}" >&2
+      fi
       return 1
     fi
     sleep 5
@@ -223,7 +252,7 @@ report_candidate_failure() {
 require_candidate_health() {
   if wait_for_health \
     "${CANDIDATE_HEALTH_URL}" "Warm candidate" "${CANDIDATE_CONTAINER}" \
-    "${CANDIDATE_HEALTH_TIMEOUT_SECONDS}"; then
+    "${CANDIDATE_HEALTH_TIMEOUT_SECONDS}" "${CANDIDATE_READY_URL}"; then
     return 0
   fi
   # Capture bounded diagnostics before the ERR trap evaluates the rollback
@@ -1480,8 +1509,9 @@ if ! assert_no_source_mount; then
 fi
 
 # Nginx serves the healthy candidate while Compose replaces the primary.
-log "Waiting for app health at ${HEALTH_URL} (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
-if ! wait_for_health "${HEALTH_URL}" "Primary app"; then
+log "Waiting for app health at ${HEALTH_URL} and readiness at ${READY_URL} (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
+if ! wait_for_health "${HEALTH_URL}" "Primary app" "" \
+  "${HEALTH_TIMEOUT_SECONDS}" "${READY_URL}"; then
   trap - ERR
   log "Health gate FAILED (${HEALTH_URL} never became healthy) — checking previous-image rollback floor"
   if [[ -n "${PREV_IMAGE}" ]]; then

@@ -8,6 +8,9 @@ from pathlib import Path
 REVISION = "32eebc1a6ac05a21275ed4db6f3d1dd28514a045"
 IMAGE_DIGEST = "sha256:" + "a" * 64
 IMAGE_REFERENCE = f"ghcr.io/michaelayoade/dotmac_sub@{IMAGE_DIGEST}"
+# The exact compact JSON FastAPI renders for `/api/v1/health/ready`.
+READY_BODY = '{"status":"ready","checks":{"database":{"status":"up"}}}'
+STARTING_BODY = '{"status":"not_ready","checks":{"routes":{"status":"starting"}}}'
 
 # Everything the deploy recreates when a host declares the full stack.
 FULL_SERVICES = (
@@ -54,6 +57,8 @@ def _run_deploy(
     extra_env: dict[str, str] | None = None,
     deployment_target: str = "staging",
     docker_prelude: str = "",
+    candidate_ready_body: str = READY_BODY,
+    primary_ready_body: str = READY_BODY,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     deploy_dir = tmp_path / "deploy"
     bin_dir = tmp_path / "bin"
@@ -175,9 +180,23 @@ set -eu
 printf '%s\\n' "{nginx_config}"
 """,
     )
+    curl_log = tmp_path / "curl.log"
+    curl_log.write_text("")
     _write_executable(
         bin_dir / "curl",
         f"""#!/usr/bin/env bash
+url="${{@: -1}}"
+printf '%s\\n' "$url" >> "$CURL_LOG"
+# Readiness documents answer per web process; liveness keeps its attempt order
+# (candidate, primary, then any restored previous image).
+if [[ "$url" == *"/api/v1/health/ready" ]]; then
+  if [[ "$url" == *":18002/"* ]]; then
+    printf '%s' '{candidate_ready_body}'
+  else
+    printf '%s' '{primary_ready_body}'
+  fi
+  exit 0
+fi
 attempts="$(cat "$CURL_ATTEMPTS")"
 printf '%s\\n' "$((attempts + 1))" > "$CURL_ATTEMPTS"
 if [[ "$attempts" == "0" ]]; then exit {0 if health_success else 1}; fi
@@ -267,6 +286,7 @@ exit 0
         "MIGRATION_ATTEMPTS": str(migration_attempts),
         "UP_ATTEMPTS": str(up_attempts),
         "CURL_ATTEMPTS": str(curl_attempts),
+        "CURL_LOG": str(curl_log),
         "SED_ATTEMPTS": str(sed_attempts),
         **production_evidence,
         **(extra_env or {}),
@@ -823,3 +843,78 @@ def test_deploy_requires_the_proxy_contract_unless_explicitly_opted_out(
 
     assert result.returncode == 0, result.stderr
     assert "DEPLOY AVAILABILITY FAILURE" not in result.stderr
+
+
+def test_web_gates_wait_for_readiness_not_just_liveness(tmp_path: Path) -> None:
+    result, _env_file, docker_log = _run_deploy(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    urls = (tmp_path / "curl.log").read_text().splitlines()
+    candidate_ready = urls.index("http://127.0.0.1:18002/api/v1/health/ready")
+    primary_ready = urls.index("http://127.0.0.1:8001/api/v1/health/ready")
+    # Liveness answers first, then the readiness document decides.
+    assert urls.index("http://127.0.0.1:18002/health") < candidate_ready
+    assert candidate_ready < urls.index("http://127.0.0.1:8001/health")
+    assert urls.index("http://127.0.0.1:8001/health") < primary_ready
+    assert "readiness at http://127.0.0.1:8001/api/v1/health/ready" in result.stdout
+    assert " up -d app" in docker_log.read_text()
+
+
+def test_live_but_unready_candidate_fails_closed_before_replacement(
+    tmp_path: Path,
+) -> None:
+    """`/health` answering is not enough: a candidate still loading routes (or
+    unable to reach its database) must never be handed the primary's traffic."""
+
+    result, env_file, docker_log = _run_deploy(
+        tmp_path,
+        candidate_ready_body=STARTING_BODY,
+        extra_env={"CANDIDATE_HEALTH_TIMEOUT_SECONDS": "0"},
+    )
+
+    assert result.returncode != 0
+    assert "Warm candidate health gate failed" in result.stderr
+    assert (
+        "Warm candidate readiness never reported ready at "
+        "http://127.0.0.1:18002/api/v1/health/ready; last answer: "
+        f"{STARTING_BODY}"
+    ) in result.stderr
+    assert "Warm candidate logs (last 200 lines):" in result.stderr
+    commands = docker_log.read_text().splitlines()
+    assert not any(" up -d " in command for command in commands)
+    assert "APP_IMAGE=ghcr.io/michaelayoade/dotmac_sub:sha-old0000" in (
+        env_file.read_text()
+    )
+
+
+def test_unready_primary_takes_the_existing_rollback_floor_path(
+    tmp_path: Path,
+) -> None:
+    result, env_file, docker_log = _run_deploy(
+        tmp_path,
+        primary_ready_body=STARTING_BODY,
+        extra_env={"HEALTH_TIMEOUT_SECONDS": "0"},
+    )
+
+    assert result.returncode != 0
+    assert "Primary app readiness never reported ready" in result.stderr
+    commands = docker_log.read_text().splitlines()
+    assert any("scripts.verify_payment_email_rollback" in c for c in commands)
+    # The restored previous image is judged by liveness alone: it may predate
+    # the readiness contract.
+    urls = (tmp_path / "curl.log").read_text().splitlines()
+    assert urls[-1] == "http://127.0.0.1:8001/health"
+    assert "APP_IMAGE=ghcr.io/michaelayoade/dotmac_sub:sha-old0000" in (
+        env_file.read_text()
+    )
+
+
+def test_readiness_url_follows_the_host_health_url(tmp_path: Path) -> None:
+    result, _env_file, _docker_log = _run_deploy(
+        tmp_path,
+        extra_env={"HEALTH_URL": "http://10.120.121.20:8001/health"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    urls = (tmp_path / "curl.log").read_text().splitlines()
+    assert "http://10.120.121.20:8001/api/v1/health/ready" in urls

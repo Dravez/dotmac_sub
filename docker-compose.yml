@@ -51,6 +51,13 @@ services:
       GLITCHTIP_DSN: ${GLITCHTIP_DSN:-}
       GLITCHTIP_ENABLED: ${GLITCHTIP_ENABLED:-false}
       LOKI_URL: ${LOKI_URL:-}
+      # With more than one worker, Uvicorn's supervisor pings every worker and
+      # kills any that misses a single ping. Its built-in 5 s deadline killed
+      # CPU-starved workers mid-startup (a cold worker needs 43-70 s at full
+      # CPU) in a restart storm on 2026-10-06. Uvicorn >= 0.37 reads this as
+      # `--timeout-worker-healthcheck`; older images ignore it, so a rollback
+      # or a host-override `command:` can never be broken by it.
+      UVICORN_TIMEOUT_WORKER_HEALTHCHECK: ${UVICORN_TIMEOUT_WORKER_HEALTHCHECK:-60}
     env_file:
     - .env
     cap_add:
@@ -66,6 +73,8 @@ services:
     # Migrations are NOT run on boot: a half-applied / multi-head migration
     # state must never crash-loop the live app. Apply them as a controlled,
     # pre-deploy step instead: `make docker-migrate` (or `make prod-migrate`).
+    # Size the app with WEB_CONCURRENCY in .env rather than a host-override
+    # `command:`, so this command stays the single source of truth.
     command:
     - /bin/sh
     - -c
