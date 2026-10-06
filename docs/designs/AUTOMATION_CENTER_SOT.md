@@ -320,6 +320,15 @@ writers for the same decision.
 
 ## Deployment
 
+Network Access Control Plane exposes the `billing.test_connection.created`
+trigger and `count_7d` condition from native subscription Test Connection grants.
+The `billing.test_connection.notify_finance` action accepts a configured team,
+delegates to the typed Finance consequence owner, and queues personal in-app
+and email notices with customer context and replay-safe recipient snapshots.
+The generic notification action retains its existing fixed-input semantics.
+See `docs/designs/TEST_CONNECTION_FINANCE_ALERT.md`; native migration 645, Finance migration 646, and explicit
+operator workflow publication are required. No workflow is auto-activated.
+
 Schema changes are additive. Permissions are seeded as assignable and are not
 granted broadly. Migration 626 adds tenant-isolated script identities,
 immutable versions, and redacted run evidence. Publication and execution remain

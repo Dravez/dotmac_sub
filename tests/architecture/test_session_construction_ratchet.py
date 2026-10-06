@@ -103,10 +103,14 @@ BASELINE = Path("tests/architecture/session_construction_baseline.txt")
 #: +3 from tests/integration/test_notification_template_seed_concurrency.py:
 #: one migrated PostgreSQL engine plus two independently committing sessions
 #: prove concurrent startup seeders safely converge on one template per key.
+#: +2 from tests/integration/test_test_connection_finance.py: independently
+#: committing sessions prove same-customer creation serialization and rollback
+#: of a request and its outbox event. They use the shared, migrated PostgreSQL
+#: engine fixture; no production engine/session construction is introduced.
 #: +5 from tests/integration/test_subscription_test_connection.py: two
 #: disposable migrated engines and three real sessions prove additive RBAC
 #: migration and serialized subscription activation. Production remains unchanged.
-TEST_FIXTURE_BASELINE_TOTAL = 168
+TEST_FIXTURE_BASELINE_TOTAL = 170
 
 
 def _baseline() -> dict[str, int]:

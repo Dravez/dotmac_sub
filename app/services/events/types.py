@@ -198,6 +198,10 @@ class EventType(enum.Enum):
 
     # Billing - Outage compensation
     service_extension_created = "billing.service_extension_created"
+    test_connection_created = "billing.test_connection.created"
+    test_connection_finance_review_queued = (
+        "billing.test_connection.finance_review_queued"
+    )
     service_extension_applied = "billing.service_extension_applied"
     service_extension_canceled = "billing.service_extension_canceled"
     service_extension_reversed = "billing.service_extension_reversed"

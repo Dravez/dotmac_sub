@@ -207,6 +207,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "If you have retry permission, continue a failed run; successful steps are skipped, and the retry result is recorded.",
         notes=(
             "Workflow and rule refer to the same central event-to-action mechanism; the technical /rules routes remain for compatibility.",
+            "To review repeated temporary access, choose Network Access Control Plane → Test Connection created, set the preceding 7-day count greater than 5, and select Notify Finance with the intended team. Expired grants remain in the creation count; queued email still requires delivery confirmation.",
             "The hub is a directory. Module ownership diagnostics are not part of the operator workspace.",
             "Run history is read-only, while continuing a failed run requires the separate retry permission.",
             "A target may be scriptable before it is workflow-executable; each mechanism has its own declared capability list.",
