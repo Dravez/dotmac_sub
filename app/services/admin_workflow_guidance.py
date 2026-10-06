@@ -196,6 +196,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Choose Workflows, Client scripts, Server scripts, or Execution history for the task you need to complete.",
         "In Workflows, choose the module and one or more owner-produced events shown by the form; workflow is the user-facing name for a central rule.",
         "Use AND, OR, and NOT condition groups to express broad matches and exceptions, such as excluding a particular ticket status.",
+        "For system-backed condition values, type into the lookup field and choose a returned option; the list is loaded on demand from current system records and configuration.",
         "For recurring work, choose a scheduled event, set an interval or cron cadence and time zone, and keep scheduled triggers together; add a notification action when an operator or customer needs an update.",
         "Add only declared conditions and typed actions, then save the workflow as a draft before activation.",
         "In Client scripts, bind browser JavaScript to one registered module target and form event; use the restricted form API.",
