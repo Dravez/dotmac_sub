@@ -170,10 +170,11 @@ def test_ncc_complaints_page_tolerates_stale_per_page_values(db_session, monkeyp
 
 def test_ncc_complaints_page_canonicalises_date_filter_values(db_session, monkeypatch):
     _stub_admin(monkeypatch)
-    monkeypatch.setattr(reports_web, "can", lambda request, permission: True)
+    request = _request()
+    request.state.auth = {"permission_keys": {"reports:ncc:export"}}
 
     response = reports_web.reports_ncc_complaints(
-        _request(),
+        request,
         date_from="01/08/2026",
         date_to="31-08-2026",
         page=1,
