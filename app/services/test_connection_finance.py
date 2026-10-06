@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.audit import AuditActorType
 from app.models.automation import AutomationRuleVersion
 from app.models.event_store import EventStore
 from app.models.service_extension import ServiceExtension, ServiceExtensionPurpose
@@ -21,7 +20,7 @@ from app.schemas.test_connection import (
     TestConnectionCreated,
     TestConnectionFinanceReviewQueued,
 )
-from app.services.audit_adapter import stage_audit_event
+from app.services.audit_adapter import AuditActor, stage_audit_event
 from app.services.domain_errors import DomainError
 from app.services.events import emit_event
 from app.services.events.types import EventType
@@ -243,8 +242,7 @@ def notify_test_connection_finance(
             action="billing.test_connection_finance_review_queued",
             entity_type="test_connection_finance_review",
             entity_id=str(review_id),
-            actor_type=AuditActorType.system,
-            actor_id=command.context.actor,
+            actor=AuditActor.system(command.context.actor),
             request_id=str(command.context.correlation_id),
             metadata={
                 "source_event_id": str(command.event_id),

@@ -80,6 +80,14 @@ file end to end.
 
 ## Local engine/session construction inventory
 
+The Test Connection Finance slice adds two test-only `sessionmaker` sites in
+`tests/integration/test_test_connection_finance.py`: one for independently
+committing concurrent creations and one for observing complete request/outbox
+rollback. Both bind the shared migrated PostgreSQL test engine. The reviewed
+aggregate test-fixture ratchet is now 165; production construction sites and
+the production per-file baseline are unchanged. This is test-fixture authorship,
+not an application runtime change.
+
 Every place that builds a `sqlalchemy.Engine` or an ORM `Session` outside
 `app.db`'s canonical `SessionLocal` factory (`app/db.py:69`), swept by AST
 (not text search — see the ratchet's sensitivity proofs) across the whole
