@@ -7,7 +7,7 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db import Base
@@ -23,6 +23,7 @@ from app.services import customer_search, support_ticket_settings
 from app.services.automation_contracts import AutomationLookupKey
 
 MAX_LOOKUP_LIMIT = 20
+_SqlExpression = ColumnElement[Any] | InstrumentedAttribute[Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +58,12 @@ def _uuid(value: str) -> UUID | None:
 def _rows(
     db: Session,
     model: type[Base],
-    id_column: ColumnElement[Any],
-    label_columns: tuple[ColumnElement[Any], ...],
+    id_column: _SqlExpression,
+    label_columns: tuple[_SqlExpression, ...],
     q: str,
     limit: int,
     *,
-    active_column: ColumnElement[Any] | None = None,
+    active_column: _SqlExpression | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(model)
     if active_column is not None:
@@ -86,7 +87,7 @@ def _rows(
     )
 
 
-def _label(row: _LookupRow, columns: tuple[ColumnElement[Any], ...]) -> str:
+def _label(row: _LookupRow, columns: tuple[_SqlExpression, ...]) -> str:
     values = [
         str(row.__dict__.get(column.key or "", "") or "").strip() for column in columns
     ]
@@ -96,11 +97,11 @@ def _label(row: _LookupRow, columns: tuple[ColumnElement[Any], ...]) -> str:
 def _distinct_values(
     db: Session,
     model: type[Base],
-    column: ColumnElement[Any],
+    column: _SqlExpression,
     q: str,
     limit: int,
     *,
-    active_column: ColumnElement[Any] | None = None,
+    active_column: _SqlExpression | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(column).where(column.is_not(None)).distinct().order_by(column)
     if active_column is not None:
