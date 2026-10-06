@@ -64,6 +64,7 @@ def test_specific_workflow_routes_override_or_reject_broad_sections() -> None:
         "/admin/customers": "find-customer",
         "/admin/customers/wizard": "create-customer",
         "/admin/customers/person/customer-id": "customer-detail",
+        "/admin/customers/person/customer-id/subscriptions/subscription-id/test-connection": "subscription-test-connection",
         "/admin/catalog/subscriptions/new": "new-subscription",
         "/admin/catalog/subscriptions/subscription-id": "subscription-lifecycle",
         "/admin/catalog/subscriptions/subscription-id/access/move": "service-access",
@@ -335,7 +336,7 @@ def test_admin_guidance_uses_one_accessible_centered_modal() -> None:
 
 def test_every_help_guide_has_complete_action_sections() -> None:
     guides = (*WORKFLOW_GUIDANCE, *HELP_ONLY_GUIDANCE)
-    assert len(guides) == 54
+    assert len(guides) == 55
     for guide in guides:
         actions = help_actions_for(guide)
         assert actions, guide.id

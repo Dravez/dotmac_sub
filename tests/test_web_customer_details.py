@@ -1038,6 +1038,7 @@ def test_customer_subscription_action_context_hides_unauthorized_actions(
         "can_activate_subscriptions": True,
         "can_suspend_subscriptions": False,
         "can_reconcile_service_changes": False,
+        "can_test_connection": False,
     }
 
 

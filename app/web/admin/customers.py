@@ -244,11 +244,127 @@ def _subscription_action_permission_context(
         ),
         "can_activate_subscriptions": can_write_catalog
         or (bool(auth) and has_permission(auth, db, "subscription:activate")),
+        "can_test_connection": bool(auth)
+        and auth.get("principal_type") == "system_user"
+        and has_permission(auth, db, "subscription:test_connection"),
         "can_suspend_subscriptions": can_write_catalog
         or (bool(auth) and has_permission(auth, db, "subscription:suspend")),
         "can_reconcile_service_changes": bool(auth)
         and has_permission(auth, db, "provisioning:service_change_reconcile"),
     }
+
+
+@router.get(
+    "/{customer_type}/{customer_id}/subscriptions/{subscription_id}/test-connection",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("subscription:test_connection"))],
+)
+def customer_test_connection_form(
+    request: Request,
+    customer_type: Literal["person", "business"],
+    customer_id: UUID,
+    subscription_id: UUID,
+    duration_hours: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    from app.services.test_connection import (
+        TEST_CONNECTION_FORM,
+        TestConnectionPreviewQuery,
+        preview_test_connection,
+    )
+    from app.web.admin import get_current_user, get_sidebar_stats
+
+    try:
+        preview = preview_test_connection(
+            db,
+            query=TestConnectionPreviewQuery(
+                subscriber_id=customer_id,
+                subscription_id=subscription_id,
+                duration_hours=duration_hours,
+            ),
+        )
+    except DomainError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code.endswith("subscription_not_found") else 400,
+            detail=exc.message,
+        ) from exc
+    return templates.TemplateResponse(
+        "admin/customers/test_connection.html",
+        {
+            "request": request,
+            "current_user": get_current_user(request),
+            "sidebar_stats": get_sidebar_stats(db),
+            "active_page": "customers",
+            "active_menu": "customers",
+            "preview": preview,
+            "form_state": TEST_CONNECTION_FORM.state(list(preview.prerequisites)),
+            "command_id": str(uuid4()),
+            "customer_url": f"/admin/customers/{customer_type}/{customer_id}",
+        },
+    )
+
+
+@router.post(
+    "/{customer_type}/{customer_id}/subscriptions/{subscription_id}/test-connection",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_permission("subscription:test_connection"))],
+)
+def customer_test_connection_activate(
+    request: Request,
+    customer_type: Literal["person", "business"],
+    customer_id: UUID,
+    subscription_id: UUID,
+    duration_hours: int = Form(...),
+    command_id: UUID = Form(...),
+):
+    from app.services.test_connection import (
+        PERMISSION,
+        ActivateTestConnectionCommand,
+        activate_test_connection,
+    )
+
+    auth = getattr(request.state, "auth", {})
+    if auth.get("principal_type") != "system_user" or not auth.get("principal_id"):
+        raise HTTPException(
+            status_code=403, detail="Test Connection requires an authorized staff user."
+        )
+    actor_id = UUID(str(auth["principal_id"]))
+    context = CommandContext(
+        command_id=command_id,
+        correlation_id=command_id,
+        actor=str(actor_id),
+        scope=PERMISSION,
+        reason="Customer subscription connectivity troubleshooting",
+        idempotency_key=f"test-connection:{command_id}",
+    )
+    redirect_url = f"/admin/customers/{customer_type}/{customer_id}"
+    try:
+        with db_session_adapter.owner_command_session() as db:
+            outcome = activate_test_connection(
+                db,
+                command=ActivateTestConnectionCommand(
+                    context=context,
+                    subscriber_id=customer_id,
+                    subscription_id=subscription_id,
+                    actor_id=actor_id,
+                    duration_hours=duration_hours,
+                ),
+            )
+    except DomainError as exc:
+        return _toast_response(
+            request=request,
+            redirect_url=redirect_url,
+            ok=False,
+            title="Test Connection not activated",
+            message=exc.message,
+        )
+    return _toast_response(
+        request=request,
+        redirect_url=redirect_url,
+        ok=True,
+        title="Test Connection requested",
+        message=f"{outcome.duration_seconds // 3600} hour(s) granted. Expires {outcome.expires_at.strftime('%d %b %Y %H:%M UTC')}. Check the subscription for delivery status.",
+    )
 
 
 def _workflow_changed_count(result: Mapping[str, Any]) -> int:
