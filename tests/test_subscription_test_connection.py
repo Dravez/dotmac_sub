@@ -27,7 +27,9 @@ from app.services.test_connection_policy import (
     effective_radius_observation,
 )
 from app.services.test_connection_policy import TestConnectionAccess as ConnectionAccess
-from tests.subscription_test_connection_fixtures import test_service as test_service
+from tests import subscription_test_connection_fixtures
+
+test_service = subscription_test_connection_fixtures.test_service
 
 
 def test_activation_stages_grant_audit_and_required_timer_atomically(
