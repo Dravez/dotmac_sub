@@ -1519,6 +1519,18 @@
                                 {% endif %}
                                 {% if show_service_assignments %}
                                 {% set sub_conn = (connection_by_subscription or {}).get(subscription.id|string, {}) %}
+                                {% endif %}
+                                {% if can_test_connection %}
+                                <a href="/admin/customers/{{ customer_type }}/{{ subscription.subscriber_id }}/subscriptions/{{ subscription.id }}/test-connection" class="w-24 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1.5 text-center text-xs font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300">Test Connection</a>
+                                {% set test_grant = (test_connection_by_subscription or {}).get(subscription.id|string) %}
+                                {% if test_grant %}
+                                <div class="w-24 text-center text-xs text-blue-700 dark:text-blue-300" role="status">
+                                    {% if test_grant.delivery_state == 'applied' %}Test access active{% elif test_grant.delivery_state == 'failed' %}Delivery failed{% else %}Applying test access{% endif %}
+                                    <br>Until {{ test_grant.expires_at.strftime('%d %b %H:%M UTC') }}
+                                </div>
+                                {% endif %}
+                                {% endif %}
+                                {% if show_service_assignments %}
                                 {% if sub_conn %}
                                 <div class="w-24 text-center">
                                     {{ status_presentation_badge(sub_conn.status_presentation, size="sm") }}
