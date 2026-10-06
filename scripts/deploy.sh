@@ -78,6 +78,11 @@ run_repo_module() {
 HEALTH_URL="${HEALTH_URL:-$(env_value HEALTH_URL)}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8001/health}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-180}"
+# Cold starts can include image extraction, Python imports, and application
+# startup work that is materially slower than the steady-state health gate.
+# Keep the candidate gate independent so a slow warm-up is not mistaken for a
+# failed release, while retaining the shorter timeout for the live primary.
+CANDIDATE_HEALTH_TIMEOUT_SECONDS="${CANDIDATE_HEALTH_TIMEOUT_SECONDS:-600}"
 # Per-attempt cap on the health-check curl itself, distinct from the overall
 # HEALTH_TIMEOUT_SECONDS retry budget above — without it a hung health
 # endpoint stalls a single curl call indefinitely instead of failing fast
@@ -174,7 +179,12 @@ wait_for_health() {
   local url="$1"
   local label="$2"
   local watched_container="${3:-}"
-  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  local timeout_seconds="${4:-${HEALTH_TIMEOUT_SECONDS}}"
+  if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]]; then
+    echo "${label} health gate misconfigured: timeout must be a non-negative integer" >&2
+    return 1
+  fi
+  local deadline=$((SECONDS + timeout_seconds))
   local state
   while true; do
     if curl -fsS --connect-timeout "${HEALTH_CURL_TIMEOUT}" \
@@ -190,7 +200,7 @@ wait_for_health() {
       fi
     fi
     if ((SECONDS >= deadline)); then
-      echo "${label} health gate failed: ${url}" >&2
+      echo "${label} health gate failed: ${url} (timeout ${timeout_seconds}s)" >&2
       return 1
     fi
     sleep 5
@@ -212,7 +222,8 @@ report_candidate_failure() {
 
 require_candidate_health() {
   if wait_for_health \
-    "${CANDIDATE_HEALTH_URL}" "Warm candidate" "${CANDIDATE_CONTAINER}"; then
+    "${CANDIDATE_HEALTH_URL}" "Warm candidate" "${CANDIDATE_CONTAINER}" \
+    "${CANDIDATE_HEALTH_TIMEOUT_SECONDS}"; then
     return 0
   fi
   # Capture bounded diagnostics before the ERR trap evaluates the rollback
@@ -1446,7 +1457,7 @@ log "Verifying enabled integration manifest pins"
 "${COMPOSE[@]}" run --rm --no-deps app \
   python -m scripts.integrations.verify_manifest_pins
 
-log "Starting warm candidate on 127.0.0.1:${CANDIDATE_PORT}"
+log "Starting warm candidate on 127.0.0.1:${CANDIDATE_PORT} (health timeout ${CANDIDATE_HEALTH_TIMEOUT_SECONDS}s)"
 docker rm -f "${CANDIDATE_CONTAINER}" >/dev/null 2>&1 || true
 # Do not use `--rm`: an early process exit must leave its state and bounded log
 # stream available to `report_candidate_failure` before rollback cleanup.
