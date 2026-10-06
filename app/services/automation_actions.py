@@ -552,9 +552,9 @@ def _notify_test_connection_finance(
         notify_test_connection_finance,
     )
 
-    if command.target.entity_type != "billing.service_extension":
+    if command.target.entity_type != "access.test_connection":
         raise AutomationActionExecutorError(
-            "The Finance action requires a Test Connection extension target."
+            "The Finance action requires a native Test Connection grant target."
         )
     notify_test_connection_finance(
         db,
@@ -562,7 +562,7 @@ def _notify_test_connection_finance(
             context=command.context,
             tenant_id=command.tenant_id,
             event_id=command.event_id,
-            extension_id=command.target.entity_id,
+            grant_id=command.target.entity_id,
             rule_version_id=command.rule_version_id,
             step_index=command.step_index,
             service_team_id=_uuid_input(command.inputs, key="service_team_id"),

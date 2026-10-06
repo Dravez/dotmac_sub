@@ -3,9 +3,6 @@
 from app.services.automation_contracts import (
     AutomationActionCapability,
     AutomationActionInput,
-    AutomationConditionField,
-    AutomationOperator,
-    AutomationTriggerCapability,
     AutomationValueType,
 )
 from app.services.sot_manifest import (
@@ -24,44 +21,11 @@ from app.services.sot_manifest import (
     owner_command_boundary_error_codes,
 )
 
-TRIGGERS = (
-    AutomationTriggerCapability(
-        key="billing.test_connection.created",
-        label="Test Connection created",
-        event_type="billing.test_connection.created",
-        event_schema_version=1,
-        entity_type="billing.service_extension",
-        tenant_id_field="tenant_id",
-        entity_id_field="extension_id",
-        fields=(
-            AutomationConditionField(
-                key="customer_id",
-                label="Customer",
-                value_type=AutomationValueType.uuid,
-                operators=(AutomationOperator.in_values,),
-            ),
-            AutomationConditionField(
-                key="count_7d",
-                label="Test Connections created in the preceding 7 days",
-                value_type=AutomationValueType.integer,
-                operators=(
-                    AutomationOperator.greater_than,
-                    AutomationOperator.greater_than_or_equal,
-                    AutomationOperator.equals,
-                    AutomationOperator.less_than_or_equal,
-                ),
-            ),
-        ),
-        author_permission="billing:extension:read",
-        runtime_enabled=True,
-    ),
-)
-
 ACTIONS = (
     AutomationActionCapability(
         key="billing.test_connection.notify_finance",
         label="Notify Finance of repeated Test Connections",
-        entity_type="billing.service_extension",
+        entity_type="access.test_connection",
         command_owner="financial.test_connection_finance_review",
         command_name="notify_test_connection_finance",
         input_schema_version=1,
@@ -87,7 +51,7 @@ SERVICES = (
         module="app.services.test_connection_finance",
         owns=(_CONCERN, "Test Connection Finance recipient snapshots"),
         depends_on=(
-            "financial.service_extensions",
+            "access.test_connection",
             "automation.rule_definitions",
             "events.store",
             "customer.accounts",
@@ -108,7 +72,7 @@ SERVICES = (
                     name=_CONCERN,
                     role=OwnerRole.APPLICATION_COORDINATOR,
                     input_names=(
-                        "classified creation evidence",
+                        "native creation evidence",
                         "frozen Test Connection event",
                         "canonical customer identity",
                         "configured team and active staff",
@@ -134,10 +98,10 @@ SERVICES = (
                     source="immutable published version, exact action position and configured Finance team UUID",
                 ),
                 AuthorityInput(
-                    name="classified creation evidence",
-                    owner="financial.service_extensions",
+                    name="native creation evidence",
+                    owner="access.test_connection",
                     kind=AuthorityKind.AUTHORITATIVE_RECORD,
-                    source="immutable Test Connection purpose and explicit customer scope",
+                    source="native test_connection_grants subscriber and subscription identity and creation interval",
                 ),
                 AuthorityInput(
                     name="frozen Test Connection event",
@@ -186,7 +150,7 @@ SERVICES = (
                 mapping_owner="automation.execution",
                 fail_closed_on=(
                     "wrong tenant or target",
-                    "unclassified source",
+                    "missing native source grant",
                     "missing recipients or email",
                     "changed replay evidence",
                 ),
@@ -195,7 +159,7 @@ SERVICES = (
                 state=AuthorityMigrationState.NATIVE,
                 new_owner=_OWNER,
                 verification="threshold, time window, customer isolation, notification replay, and migrated PostgreSQL tests",
-                cutover_gate="Migration 645 and trigger/action registration are deployed together; operators explicitly publish the workflow.",
+                cutover_gate="Native Test Connection migration 645 precedes Finance receipt migration 646; operators explicitly publish the workflow after trigger/action deployment.",
                 fallback_retirement="No keyword matching, scheduler workaround, direct delivery, or automatic workflow publication.",
             ),
             steward="billing and Finance operations",

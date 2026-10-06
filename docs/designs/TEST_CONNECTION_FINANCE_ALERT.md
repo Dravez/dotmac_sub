@@ -1,109 +1,82 @@
-# Test Connection Finance review workflow
+# Native Test Connection Finance review
 
-Status: implementation contract; activation requires deployment and explicit workflow publication.
+The source is the first-class `test_connection_grants` record owned by
+`access.test_connection`, introduced by PR #3429/migration 645. Service Extensions,
+free-text reasons, generic subscription resumes, and speed tests are not inputs.
+This replaces the draft's pre-native Service Extension classification design.
 
-## Authority and meaning
+## Atomic creation evidence
 
-`financial.service_extensions` owns creation of temporary service requests.
-New requests explicitly select `outage_compensation` or `test_connection`.
-Historical rows retain NULL purpose; free-text reasons are never classifiers.
-This classification does not change eligibility, maker/checker approval,
-application, reversal, billing-anchor, or network-access behavior.
+Activation retains all network-readiness, staff, fraud-hold, duration, expiry,
+and commercial-state safeguards. After locking the subscription, the owner
+takes a transaction advisory lock for the customer before selecting activation
+time. This serializes counts across different subscriptions of one account.
+The existing subscription lock and command ID still govern exact replays.
 
-A customer is the canonical Subscriber account UUID selected by the creation
-owner, consistent with Automation Center customer scope. All subscriptions of
-that account share one count. Different accounts remain isolated. A request
-targeting several explicitly selected accounts counts once for each account.
-Test Connections cannot use mutable POP/NAS topology as historical membership.
+Each new native grant stages a deterministic `billing.test_connection.created`
+event with tenant, customer, subscription and grant UUIDs, command provenance,
+UTC boundaries, count, and up to ten immutable reference snapshots. Both record
+and event commit or roll back together. The event remains for durable periodic
+dispatch so creation never waits for Finance. The existing network-consequence
+event and required expiry timer retain their original contract.
 
-The requirement counts records **created**, not services successfully enabled.
-Therefore pending, applied, canceled, and reversed requests all count. A
-cancellation or reversal cannot erase creation evidence. Outage compensation,
-unclassified historical rows, future timestamps, and other accounts do not count.
-An applied-only rule would require a separate approved contract.
+The creation timestamp is the native owner's `activated_at`: activation starts
+immediately at write time, not a user-supplied historical schedule. Count
+distinct grants over `(activated_at - 7 days, activated_at]`, including the
+new grant. Expired, ended, and failed-delivery grants remain creations. Existing
+native grant history in that period counts, without historical alert backfill.
+Other customers and future/out-of-window records do not count. All subscriptions
+of one canonical Subscriber account share the count. The native account/time
+index bounds the query. No mutable counter or alternate grant ledger is added.
 
-## Transaction, time, and replay
+Counts and references are frozen in the event; asynchronous delay, expiry,
+later creations, or retry cannot change the original decision. Same-command
+replay emits no creation event and does not count twice.
 
-Creation retains its existing UUID idempotency lock. Test Connection creation
-additionally takes transaction advisory locks for distinct customer UUIDs in
-stable order before selecting its UTC creation time. The window is
-`(created_at - 7 days, created_at]`: exactly seven-day-old records are excluded,
-and the new record is included. Both count and up to ten recent references are
-captured before commit, after insertion. A `(purpose, created_at)` index bounds
-the date cohort; explicit JSON customer membership restricts the count.
+## Workflow and delivery owners
 
-One deterministic `billing.test_connection.created` event is staged per
-extension/customer in the same owner transaction. Schema 1 includes operator
-tenant, extension/customer UUIDs, creation time, UTC boundaries, integer
-`count_7d`, and bounded references with creation actor and requested days.
-It contains no contact details or arbitrary free-text reason. The durable
-dispatcher handles it after commit; request creation never waits for Finance
-delivery. A rollback writes neither the request nor its event. Exact creation
-replay changes neither the count nor event identity.
+Network Access Control Plane declares the creation trigger, `access.test_connection`
+target and customer scope. Its authoring permission is the native
+`subscription:test_connection` permission. Financial Access declares the
+`billing.test_connection.notify_finance` action, requiring `notification:write`.
+Configure `count_7d greater_than 5` and an explicitly selected Finance team.
 
-Counts are frozen in the event. Delayed delivery/redrive does not recalculate
-against today's window, and different event processing order cannot change
-the original decisions. Account-key locking prevents two concurrent creations
-from both missing the other's record.
+`financial.test_connection_finance_review` validates the durable source event,
+operator tenant, native grant/customer/subscription identity, published rule
+version and exact configured action/team. It never activates access or calls a
+network driver. Active Party-bound team members resolve through the existing
+staff audience owner. Empty/unavailable recipients or missing email fail
+visibly instead of reporting delivery success.
 
-## Workflow and consequence
+The command stages a recipient snapshot, in-app and email notices, typed-actor
+audit, and contact-free queue evidence in one coordinator transaction. Messages
+contain customer/account identity, count, dated UTC period, grant references,
+duration and creator, and the exact subscription link. They request investigation
+without asserting wrongdoing. Existing workers own provider delivery and retries;
+queued is not delivered.
 
-Financial Access declares a `billing.service_extension` target, the versioned
-creation trigger, customer scope, and integer count comparison operators.
-Use condition `count_7d greater_than 5` and action
-`billing.test_connection.notify_finance` with an explicitly chosen
-`service_team_id`. Authoring requires the existing `billing:extension:read`,
-`notification:write`, and Automation Center lifecycle permissions.
+Receipt identity is event/rule-version/step and pins the selected team, evidence
+digest and audience. Retry after action commit returns the original audience,
+does not add newly joined staff or duplicate notices, and rejects changed
+evidence. Each new qualifying sixth/seventh/etc. creation can alert; no unrequested
+cross-occurrence cooldown is introduced.
 
-`financial.test_connection_finance_review` owns the typed notification command.
-It locks and validates the durable source event, operator tenant, exact
-classified extension, and customer scope. It resolves the selected active team
-to active Party-bound SystemUsers through `communications.staff_notifications`.
-An empty team or a member without an email fails closed with a visible
-automation-step failure rather than claiming delivery.
+## Schema and activation
 
-The owner snapshots recipients in `test_connection_finance_reviews`, keyed by
-event/rule-version/step, together with the configured team and evidence digest.
-Typed staff participants stage personal in-app and email notices, plus audit,
-atomically with that receipt. The message identifies the customer/account,
-UTC period, count, recent request references, requested duration, creator,
-and exact extension link. It requests review without asserting wrongdoing.
+Migration 646 follows `645_subscription_test_connection` and adds only Finance
+receipt storage and constraints. It does not classify Service Extensions, change
+the native grant schema, seed a workflow, or emit historical alerts. After review
+receipts exist, downgrade refuses to erase them; correct forward.
 
-Replay returns the original recipient snapshot. A crash after action commit
-but before step completion does not duplicate notices or add newly joined
-team members. Changed team or event evidence under the same identity fails.
-Existing delivery workers retain email retries and delivery-status authority.
-Queued is not delivered. No SMTP client is called by the action.
+The existing native staff Test Connection form is unchanged. Automation Center
+uses its existing typed count condition and active-team selector. No client or
+server script is needed. Deploy through the standard immutable staging gate,
+then explicitly save/publish the approved workflow. Operator acceptance is in
+`docs/runbooks/TEST_CONNECTION_FINANCE_ALERT.md`.
 
-Each new creation matching `> 5` can alert (sixth, seventh, etc.); event retries
-cannot repeat one occurrence. Cross-occurrence cooldown is not silently added.
-Deployment seeds or publishes no workflow and sends no historical alerts.
-
-## UI contract
-
-Staff choose Purpose in the existing Service Extension form; the field explains
-explicit customer scope, creation-based counting, and separate approval.
-Validation errors preserve the selected purpose. Detail shows the owner's
-purpose label; NULL is visibly unclassified. Existing form layouts, action
-permissions, and dark/mobile styles are retained. Automation Center's existing
-team selector configures the Finance action; no special page or script is needed.
-
-## Schema rollout and verification
-
-Migration 645 expands the schema with nullable purpose, its closed-value check,
-date index, and review receipt table. It performs no keyword backfill or data
-rewrite. Old images may insert NULL while rolling deployment completes.
-Keep old creation fingerprints for ordinary compensation so an outstanding
-pre-upgrade form can replay. Test Connection purpose is part of its fingerprint.
-Use a forward fix after classified requests or review receipts exist; downgrade
-refuses to erase that evidence.
-
-Verify fast unit behavior and migrated PostgreSQL separately. PostgreSQL tests
-must use the real migration chain, including predecessor-to-645 rehearsal,
-closed-purpose constraints, rollback, deterministic event uniqueness, and
-concurrent same-customer creation. Test 5/6 thresholds, exact boundary, customer
-and purpose isolation, duplicate subscription/selected-ID handling, canceled
-history, delayed/repeated delivery, wrong tenant/target, empty/inactive team,
-missing email, recipient preservation, and notification failure rollback.
-
-See `docs/runbooks/TEST_CONNECTION_FINANCE_ALERT.md` for operator acceptance.
+Validate native activation/expiry alongside 5/6 thresholds, exact time boundary,
+customer isolation across multiple subscriptions, existing expired history,
+creation replay, asynchronous/redrive behavior, receipt replay, authorization,
+rollback, and migrated PostgreSQL concurrency/constraints. Keep the production
+session-construction baseline unchanged; only the two reviewed PostgreSQL
+test-factory sites enter the test-only inventory.

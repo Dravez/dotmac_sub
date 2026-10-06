@@ -9,10 +9,10 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 class TestConnectionReference(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    extension_id: UUID
+    grant_id: UUID
     created_at: AwareDatetime
     created_by: str | None
-    days: int = Field(ge=1)
+    duration_seconds: int = Field(ge=1)
 
 
 class TestConnectionCreated(BaseModel):
@@ -20,7 +20,8 @@ class TestConnectionCreated(BaseModel):
 
     schema_version: Literal[1] = 1
     tenant_id: UUID
-    extension_id: UUID
+    grant_id: UUID
+    subscription_id: UUID
     customer_id: UUID
     command_id: UUID
     correlation_id: UUID
@@ -44,13 +45,11 @@ class TestConnectionCreated(BaseModel):
             raise ValueError("The count must describe the preceding seven days.")
         if len(self.recent_connections) > self.count_7d:
             raise ValueError("References cannot exceed the count.")
-        if len({item.extension_id for item in self.recent_connections}) != len(
+        if len({item.grant_id for item in self.recent_connections}) != len(
             self.recent_connections
         ):
             raise ValueError("References must be distinct requests.")
-        if self.extension_id not in {
-            item.extension_id for item in self.recent_connections
-        }:
+        if self.grant_id not in {item.grant_id for item in self.recent_connections}:
             raise ValueError("The current request must be included.")
         if any(
             not self.window_start < item.created_at <= self.window_end

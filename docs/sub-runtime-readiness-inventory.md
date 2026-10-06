@@ -84,7 +84,7 @@ The Test Connection Finance slice adds two test-only `sessionmaker` sites in
 `tests/integration/test_test_connection_finance.py`: one for independently
 committing concurrent creations and one for observing complete request/outbox
 rollback. Both bind the shared migrated PostgreSQL test engine. The reviewed
-aggregate test-fixture ratchet is now 165; production construction sites and
+aggregate test-fixture ratchet is now 170 (168 from main plus these two); production construction sites and
 the production per-file baseline are unchanged. This is test-fixture authorship,
 not an application runtime change.
 
@@ -210,10 +210,13 @@ two-directional ratchet, mirroring the existing
   without deliberately lowering the baseline, so the debt figure cannot
   drift down silently either.
 - `test_test_fixture_engine_family_is_swept` holds `tests/` to the same
-  two-directional discipline at the AGGREGATE level (currently 115) rather
+  two-directional discipline at the AGGREGATE level (currently 170) rather
   than per-file, because test fixtures legitimately construct one ad hoc
   engine per test and per-file tracking there would churn with test
   authorship, not with runtime readiness.
+  Test Connection adds five test-only construction sites for its real migrated
+  PostgreSQL upgrade and concurrent activation proofs; the production baseline
+  is unchanged.
 - Six sensitivity-proof tests plant a real defect (a rogue `create_engine`
   call, a rogue bound `Session(...)` call) and confirm the scanner names it
   by line, then prove three near-misses are NOT flagged: prose merely

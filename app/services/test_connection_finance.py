@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.models.automation import AutomationRuleVersion
 from app.models.event_store import EventStore
-from app.models.service_extension import ServiceExtension, ServiceExtensionPurpose
 from app.models.service_team import ServiceTeam
 from app.models.subscriber import Subscriber
+from app.models.test_connection import TestConnectionGrant
 from app.models.test_connection_review import TestConnectionFinanceReview
 from app.schemas.test_connection import (
     TestConnectionCreated,
@@ -61,7 +61,7 @@ class NotifyTestConnectionFinanceCommand:
     context: CommandContext
     tenant_id: UUID
     event_id: UUID
-    extension_id: UUID
+    grant_id: UUID
     rule_version_id: UUID
     step_index: int
     service_team_id: UUID
@@ -117,18 +117,19 @@ def notify_test_connection_finance(
                 "invalid_evidence",
                 "The Finance action requires a published operator workflow version.",
             )
-        extension = db.get(ServiceExtension, command.extension_id)
+        grant = db.get(TestConnectionGrant, command.grant_id)
         if (
             evidence.tenant_id != command.tenant_id
-            or evidence.extension_id != command.extension_id
+            or evidence.grant_id != command.grant_id
             or event.account_id != evidence.customer_id
-            or extension is None
-            or extension.purpose != ServiceExtensionPurpose.test_connection
-            or str(evidence.customer_id) not in (extension.scope_subscriber_ids or ())
+            or grant is None
+            or grant.subscriber_id != evidence.customer_id
+            or grant.subscription_id != evidence.subscription_id
+            or event.subscription_id != evidence.subscription_id
         ):
             raise _error(
                 "invalid_evidence",
-                "The event does not match the classified customer request.",
+                "The event does not match the customer Test Connection grant.",
             )
         digest = hashlib.sha256(evidence.model_dump_json().encode()).hexdigest()
         review_id = uuid5(
@@ -205,10 +206,10 @@ def notify_test_connection_finance(
             f"Test Connections created: {evidence.count_7d}\n"
             f"7-day window (UTC): after {evidence.window_start.isoformat()} through {evidence.window_end.isoformat()}\n"
             "Please review repeated temporary service requests for possible misuse. "
-            "This is a review alert, not a finding of wrongdoing. Counts include requests later canceled or reversed.\n\n"
+            "This is a review alert, not a finding of wrongdoing. Counts include expired or ended Test Connections.\n\n"
             "Recent request references:\n"
             + "\n".join(
-                f"{item.extension_id} | {item.created_at.isoformat()} | {item.days} day(s) | created by {item.created_by or 'unknown'}"
+                f"{item.grant_id} | {item.created_at.isoformat()} | {item.duration_seconds // 3600} hour(s) | created by {item.created_by or 'unknown'}"
                 for item in evidence.recent_connections
             )
         )
@@ -221,7 +222,7 @@ def notify_test_connection_finance(
                     event_type=StaffDirectEventType.test_connection_finance_review,
                     subject=subject,
                     body=body,
-                    target_url=f"/admin/billing/service-extensions/{evidence.extension_id}",
+                    target_url=f"/admin/catalog/subscriptions/{evidence.subscription_id}",
                 ),
             )
         recipient_ids = tuple(user.id for user in users)

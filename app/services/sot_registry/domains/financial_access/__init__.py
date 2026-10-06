@@ -44,13 +44,7 @@ from app.services.sot_registry.domains.financial_access.sales_funding import (
     SERVICES as SALES_FUNDING_SERVICES,
 )
 from app.services.sot_registry.domains.financial_access.test_connections import (
-    ACTIONS as TEST_CONNECTION_ACTIONS,
-)
-from app.services.sot_registry.domains.financial_access.test_connections import (
     SERVICES as TEST_CONNECTION_SERVICES,
-)
-from app.services.sot_registry.domains.financial_access.test_connections import (
-    TRIGGERS as TEST_CONNECTION_TRIGGERS,
 )
 from app.services.sot_registry.model import DomainSOT
 
@@ -97,20 +91,7 @@ DOMAIN = DomainSOT(
     "Tax account mappings and double-entry consequences are written only "
     "by Dotmac ERP from Sub's bounded source-fact feeds.",
     automation=AutomationDomainCapabilities(
-        target_types=("billing.service_extension",),
-        triggers=TEST_CONNECTION_TRIGGERS,
-        actions=TEST_CONNECTION_ACTIONS,
         catalog_items=(
-            AutomationCatalogItem(
-                key="billing.test_connection.finance_review",
-                label="Repeated Test Connection Finance review",
-                group="Billing",
-                state=AutomationCatalogState.available,
-                explanation="Customer-specific creation counts over the preceding seven days, with a configured staff team receiving in-app and email review notices.",
-                management_path="/admin/automation/workflows",
-                trigger_keys=("billing.test_connection.created",),
-                action_keys=("billing.test_connection.notify_finance",),
-            ),
             AutomationCatalogItem(
                 key="billing.recurring_invoice_cycle",
                 label="Recurring invoice cycle",

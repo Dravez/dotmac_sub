@@ -32,7 +32,6 @@ def _legacy_engine() -> sa.Engine:
                 CREATE TABLE service_extensions (
                     id TEXT PRIMARY KEY,
                     reason TEXT NOT NULL,
-                    purpose TEXT,
                     window_start DATETIME NOT NULL,
                     window_end DATETIME NOT NULL,
                     days INTEGER NOT NULL,

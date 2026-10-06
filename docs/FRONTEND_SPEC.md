@@ -1243,14 +1243,6 @@ incrementally so large reconciliation exports are not held entirely in memory.
 ### Billing — Service extension detail
 
 #### `GET /admin/billing/service-extensions/{extension_id}`
-
-The new-extension form includes an explicit Purpose selector from the service
-owner's typed scope options. Test Connection requires selected customers and
-counts creations over seven days, independent of later application/cancellation.
-Validation preserves that selection. Detail shows `purpose_label`, including
-Unclassified (historical) for legacy NULL rows. The Automation Center Finance
-action reuses the existing active-team selector; see
-`docs/designs/TEST_CONNECTION_FINANCE_ALERT.md` for the complete page contract.
 **Template:** `admin/billing/service_extension_detail.html`
 
 Page contract:

@@ -207,7 +207,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "If you have retry permission, continue a failed run; successful steps are skipped, and the retry result is recorded.",
         notes=(
             "Workflow and rule refer to the same central event-to-action mechanism; the technical /rules routes remain for compatibility.",
-            "For repeated temporary activations, choose Financial Access → Test Connection created, set the preceding 7-day count greater than 5, and choose Notify Finance with the intended team. Counts use classified requests created for each customer; queued email still requires delivery confirmation.",
+            "To review repeated temporary access, choose Network Access Control Plane → Test Connection created, set the preceding 7-day count greater than 5, and select Notify Finance with the intended team. Expired grants remain in the creation count; queued email still requires delivery confirmation.",
             "The hub is a directory. Module ownership diagnostics are not part of the operator workspace.",
             "Run history is read-only, while continuing a failed run requires the separate retry permission.",
             "A target may be scriptable before it is workflow-executable; each mechanism has its own declared capability list.",
@@ -280,6 +280,7 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Open the specific record before performing a state-changing action.",
         notes=(
             "Timeline and ledger entries are evidence; review them before deciding on a correction.",
+            "Authorized staff can open Test Connection below the Invoice icon in All Subscriptions to grant temporary full service access for troubleshooting; review the duration and expiry before activation.",
             "Canceling a stale intent rejects its linked proof and cancels the intent together, allowing the customer to start a new payment. Verified or paid evidence cannot be canceled here.",
             "The action requires permission to cancel payment intents and review payment proofs.",
             "Customer pages use a short-lived notification-choice snapshot; use the bulk notification setup workflow when provider templates need to be refreshed.",
@@ -289,6 +290,27 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
             "/admin/customers/{customer_type}/{customer_id}/**",
             "/admin/customers/{subscriber_id}/availability",
             "/admin/customers/{subscriber_id}/subscriptions/{subscription_id}/sla-review",
+        ),
+    ),
+    _guide(
+        "subscription-test-connection",
+        "Subscriptions",
+        "Test a customer's connection",
+        "Customer Experience Manager, Finance Manager, authorized engineers",
+        "Temporarily enable full subscription access while troubleshooting connectivity.",
+        (),
+        "In the customer's All Subscriptions list, open Test Connection below the Invoice icon on the affected subscription.",
+        "Review the default two-hour duration or choose another permitted whole-hour duration, then update the duration to review the expected expiry before activation.",
+        "Check the prerequisites and activate only for the reviewed duration. The Test Connection permission is required.",
+        "Check the delivery status: pending means network application is still underway; applied confirms delivery; failed requires investigation before treating service as restored.",
+        "Test connectivity during the displayed interval. Outstanding bills, prolonged debt, and a missing billing baseline do not restrict this temporary access.",
+        "At expiry, current normal subscription and billing rules apply automatically. Review Timeline for the initiating user, activation time, duration, and expected expiry.",
+        route_templates=(
+            "/admin/customers/{customer_type}/{customer_id}/subscriptions/{subscription_id}/test-connection",
+        ),
+        notes=(
+            "Test Connection does not pay invoices, change the billing baseline, or permanently change the subscription's commercial state.",
+            "Security holds and missing or ambiguous network provisioning remain blockers; the configured network must support automatic expiry before activation is enabled.",
         ),
     ),
     _guide(
@@ -633,14 +655,11 @@ WORKFLOW_GUIDANCE: tuple[AdminWorkflowGuidance, ...] = (
         "Billing, support, operations",
         "Grant or reverse approved temporary service coverage.",
         ("/admin/billing/service-extensions",),
-        "Choose Outage Compensation or Test Connection, then set the reason, dates or days, and affected scope. Test Connections require explicitly selected customers.",
+        "Set the reason, dates or days, and affected customer or subscription scope.",
         "Review billing-date and access effects before confirming.",
         "Use cancellation for pending extensions and reversal for applied extensions.",
         "Verify the request state and any recorded billing-date impact from the customer Billing tab under Extensions.",
-        notes=(
-            "Do not manually edit billing dates to undo an extension.",
-            "Test Connection requests count separately for each customer over the preceding 7 days, including later cancellations or reversals. Creating a request does not apply service; a different staff approver must apply it.",
-        ),
+        notes=("Do not manually edit billing dates to undo an extension.",),
     ),
     _guide(
         "payments",
@@ -1152,6 +1171,18 @@ _ACTION_SPECS: dict[str, tuple[_ActionSpec, ...]] = {
             permission="subscriber:impersonate",
         ),
         _action("review-history", "Review customer history", 5, 6),
+    ),
+    "subscription-test-connection": (
+        _action("review-test-duration", "Review the Test Connection duration", 0, 1),
+        _action(
+            "activate-test-connection",
+            "Activate and verify Test Connection",
+            2,
+            3,
+            4,
+            permission="subscription:test_connection",
+        ),
+        _action("review-test-expiry", "Review expiry and account history", 5),
     ),
     "new-subscription": (
         _action("select-service", "Select the customer service", 0),
@@ -1906,6 +1937,7 @@ HELP_NAVIGATION: tuple[AdminHelpNavigationSection, ...] = (
         (
             "catalog-overview",
             "new-subscription",
+            "subscription-test-connection",
             "subscription-lifecycle",
             "service-access",
         ),

@@ -20,7 +20,7 @@ def test_test_connection_is_a_registered_typed_workflow_capability() -> None:
         "billing.test_connection.notify_finance"
     )
     assert trigger.runtime_enabled and action.runtime_enabled
-    assert trigger.entity_type == action.entity_type == "billing.service_extension"
+    assert trigger.entity_type == action.entity_type == "access.test_connection"
     assert "count_7d" in {field.key for field in trigger.fields}
     assert EventType.test_connection_created in HANDLED_EVENT_TYPES
     assert automation_actions.runtime_registry_errors() == ()

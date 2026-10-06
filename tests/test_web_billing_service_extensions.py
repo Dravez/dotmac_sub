@@ -14,7 +14,6 @@ from app.models.service_extension import (
     ServiceExtension,
     ServiceExtensionAnchorBasis,
     ServiceExtensionEntry,
-    ServiceExtensionPurpose,
     ServiceExtensionReversal,
     ServiceExtensionScope,
     ServiceExtensionStatus,
@@ -621,56 +620,3 @@ def test_create_form_scope_contract_omits_network(db_session):
         ServiceExtensionScope.nas_device,
         ServiceExtensionScope.subscribers,
     )
-
-
-def test_create_form_renders_and_preserves_test_connection_purpose(db_session):
-    from starlette.requests import Request
-
-    from app.web.admin.billing_extensions import _form_context
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/admin/billing/service-extensions/new",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-        }
-    )
-    request.state.auth = _ADMIN_AUTH
-    request.state.csrf_token = "pytest-csrf"
-    context = _form_context(
-        db_session,
-        idempotency_key=str(uuid4()),
-        values={"purpose": ServiceExtensionPurpose.test_connection.value},
-        error="Select customers",
-    )
-    html = templates.env.get_template(
-        "admin/billing/service_extension_form.html"
-    ).render(
-        request=request,
-        current_user=None,
-        sidebar_stats={},
-        **context,
-    )
-    assert 'value="test_connection" selected' in html
-    assert "Test Connections require selected customers" in html
-    assert "Select customers" in html
-
-
-def test_detail_projects_explicit_and_unclassified_purpose(db_session):
-    extension = _extension(db_session)
-    extension.purpose = ServiceExtensionPurpose.test_connection
-    db_session.commit()
-    detail = build_service_extension_detail(
-        db_session, extension_id=extension.id, auth=_ADMIN_AUTH
-    )
-    assert detail.summary.purpose_label == "Test Connection"
-    extension.purpose = None
-    db_session.commit()
-    detail = build_service_extension_detail(
-        db_session, extension_id=extension.id, auth=_ADMIN_AUTH
-    )
-    assert detail.summary.purpose_label == "Unclassified (historical)"
