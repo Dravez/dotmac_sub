@@ -370,9 +370,7 @@ def _validate_network_identity(db: Session, subscription: Subscription) -> None:
             select(Subscription.id).where(
                 Subscription.login == login,
                 Subscription.id != subscription.id,
-                ~Subscription.status.in_(
-                    TERMINATED_STATUSES | UNPROVISIONED_STATUSES
-                ),
+                ~Subscription.status.in_(TERMINATED_STATUSES | UNPROVISIONED_STATUSES),
             )
         ).all()
         if siblings:

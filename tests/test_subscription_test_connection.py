@@ -141,7 +141,9 @@ def test_overlapping_activation_is_refused(db_session, test_service):
 
 
 @pytest.mark.parametrize("hours", [1, 2, 3, 4, 12, 24])
-def test_configured_duration_is_snapshotted(db_session, test_service, hours, monkeypatch):
+def test_configured_duration_is_snapshotted(
+    db_session, test_service, hours, monkeypatch
+):
     monkeypatch.setattr(
         owner,
         "configuration",
@@ -152,7 +154,9 @@ def test_configured_duration_is_snapshotted(db_session, test_service, hours, mon
 
 
 @pytest.mark.parametrize("hours", [0, -1, 25])
-def test_configured_duration_bounds_are_enforced(db_session, test_service, hours, monkeypatch):
+def test_configured_duration_bounds_are_enforced(
+    db_session, test_service, hours, monkeypatch
+):
     monkeypatch.setattr(
         owner,
         "configuration",
