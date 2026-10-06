@@ -184,7 +184,8 @@ def test_ncc_complaints_page_canonicalises_date_filter_values(db_session, monkey
 
     assert 'name="date_from" value="2026-08-01"' in body
     assert 'name="date_to" value="2026-08-31"' in body
-    assert "date_from=2026-08-01&date_to=2026-08-31" in body
+    assert "export?date_from=2026-08-01" in body
+    assert "date_to=2026-08-31" in body
     assert "01/08/2026" not in body
     assert "31-08-2026" not in body
 
