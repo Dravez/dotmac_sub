@@ -80,10 +80,3 @@ creation replay, asynchronous/redrive behavior, receipt replay, authorization,
 rollback, and migrated PostgreSQL concurrency/constraints. Keep the production
 session-construction baseline unchanged; only the two reviewed PostgreSQL
 test-factory sites enter the test-only inventory.
-
-Native activation and Finance unit suites import the same typed activation
-command fixture from `tests/subscription_test_connection_fixtures.py`.
-Collect both suites together when validating: loading a collected test module
-as a pytest plugin makes fixture visibility depend on collection order and
-CI shard membership. The shared helper is outside the `test_*.py` collection
-pattern, and each suite imports the fixture explicitly.

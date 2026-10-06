@@ -31,10 +31,7 @@ from app.services.test_connection_finance import (
 from app.services.test_connection_finance import (
     TestConnectionFinanceError as FinanceError,
 )
-from tests import subscription_test_connection_fixtures
 from tests.staff_identity_fixtures import add_bound_staff_user
-
-test_service = subscription_test_connection_fixtures.test_service
 
 NOW = datetime(2026, 10, 6, 12, tzinfo=UTC)
 
