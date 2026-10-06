@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 REVISION = "32eebc1a6ac05a21275ed4db6f3d1dd28514a045"
@@ -52,10 +53,11 @@ def _run_deploy(
     repo_digest_matches: bool = True,
     extra_env: dict[str, str] | None = None,
     deployment_target: str = "staging",
+    docker_prelude: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     deploy_dir = tmp_path / "deploy"
     bin_dir = tmp_path / "bin"
-    deploy_dir.mkdir()
+    deploy_dir.mkdir(exist_ok=True)
     bin_dir.mkdir()
     docker_log = tmp_path / "docker.log"
     docker_log.write_text("")
@@ -103,6 +105,7 @@ def _run_deploy(
         f"""#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
+{docker_prelude}
 if [[ "$1 $2" == "image inspect" ]]; then
   if [[ "$*" == *"RepoDigests"* ]]; then
     printf '%s\\n' "{reported_digest_reference}"
@@ -198,6 +201,10 @@ exec /usr/bin/sed "$@"
         f"""#!/usr/bin/env bash
 set -eu
 printf 'host-python cwd=%s args=%s\\n' "$PWD" "$*" >> "$DOCKER_LOG"
+# Pure, stdlib-only deploy helpers run for real against the test's files.
+if [[ "$*" == *"-m scripts.deploy_config_freshness"* ]]; then
+  exec "{sys.executable}" "$@"
+fi
 if [[ "$*" == *"-m scripts.release_candidate_evidence verify-production"* ]]; then
   printf '%s\\n' "{revision}"
   exit 0
@@ -244,6 +251,13 @@ exit 0
                 health_success and primary_health_success and rollback_health_success
             )
             else "180"
+        ),
+        "CANDIDATE_HEALTH_TIMEOUT_SECONDS": (
+            "0"
+            if not (
+                health_success and primary_health_success and rollback_health_success
+            )
+            else "600"
         ),
         "CANDIDATE_DRAIN_SECONDS": "0",
         "BACKGROUND_RUNTIME_TIMEOUT_SECONDS": "0",
@@ -420,6 +434,7 @@ def test_deploy_reports_candidate_before_health_failure_rollback(
 
     assert result.returncode != 0
     assert "Warm candidate health gate failed" in result.stderr
+    assert "timeout 0s" in result.stderr
     assert "Warm candidate container state:" in result.stderr
     assert "Warm candidate logs (last 200 lines):" in result.stderr
     env_text = env_file.read_text()

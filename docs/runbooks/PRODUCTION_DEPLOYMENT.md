@@ -364,6 +364,15 @@ kept reviewed and clean. A host tree left on a feature branch or carrying
 hand-applied edits remains configuration drift, but it can no longer replace
 the authorized release's base Compose service graph during a controlled deploy.
 
+Because `config/` comes from this host directory, a release does not by itself
+change the configuration that `freeradius`, `vmagent` or `promtail` read. A
+config change reaches them when the host checkout is updated. The next deploy
+then restarts each running service whose mounted checkout files changed after
+it started. FreeRADIUS config is validated with `freeradius -XC` first, and a
+rejected config refuses the deploy before backup or migration. See
+[SERVICE_CONFIG_MOUNTS.md](SERVICE_CONFIG_MOUNTS.md), including the one-time
+recreate that switches vmagent and promtail to directory mounts.
+
 `scripts/ops/prod_tree_drift_metrics.sh` exports that state as gauges
 (`deploy_tree_on_main`, `deploy_tree_clean`, `deploy_tree_matches_origin_main`,
 `deploy_tree_behind_commits`, `deploy_tree_dirty_files`,
