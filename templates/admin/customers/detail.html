@@ -1362,6 +1362,13 @@
                     </a>
                 </div>
             </div>
+            {% set subscription_visibility = namespace(has_non_active=false) %}
+            {% for subscription in subscriptions %}
+            {% set subscription_status = subscription.status.value if subscription.status is not string and subscription.status else (subscription.status | default('pending')) %}
+            {% if subscription_status != 'active' %}
+            {% set subscription_visibility.has_non_active = true %}
+            {% endif %}
+            {% endfor %}
             {% if subscriptions %}
             <div class="divide-y divide-slate-100 dark:divide-slate-700">
                 {% if (stats.active_subscriptions | default(0)) == 0 %}
@@ -1531,7 +1538,7 @@
                 </div>
                 {% endfor %}
             </div>
-            {% if (stats.total_subscriptions | default(0)) > (stats.active_subscriptions | default(0)) %}
+            {% if subscription_visibility.has_non_active %}
             <div class="border-t border-slate-100 px-5 py-4 text-center dark:border-slate-700">
                 <button type="button"
                         @click="showAllSubscriptions = !showAllSubscriptions"
