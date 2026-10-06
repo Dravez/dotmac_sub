@@ -31,6 +31,7 @@ from app.services import (
 from app.services.automation_contracts import (
     AutomationActionCapability,
     AutomationConditionField,
+    AutomationLookupKey,
     AutomationOperator,
     AutomationValueType,
 )
@@ -772,13 +773,15 @@ def _validate_lookup_conditions(
     if not isinstance(value, Mapping):
         return
     if "field_key" not in value:
-        for item in value.get("children", ()) if isinstance(value.get("children"), list) else ():
+        for item in (
+            value.get("children", ()) if isinstance(value.get("children"), list) else ()
+        ):
             _validate_lookup_conditions(db, item, fields)
         return
     field = fields.get(str(value.get("field_key") or ""))
     lookup_key = field.lookup_key if field is not None else None
     operator = str(value.get("operator") or "")
-    if lookup_key is None or operator in {
+    if lookup_key in {None, AutomationLookupKey.customer} or operator in {
         AutomationOperator.is_empty.value,
         AutomationOperator.is_not_empty.value,
     }:

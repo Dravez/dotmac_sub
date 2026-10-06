@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
+from app.db import Base
 from app.models.customer_experience import CustomerExperienceHandoff
 from app.models.field_material import FieldInventoryWarehouse, FieldMaterialRequest
 from app.models.project import Project, ProjectTask
@@ -16,8 +19,7 @@ from app.models.service_team import ServiceTeam
 from app.models.support import Ticket
 from app.models.system_user import SystemUser
 from app.models.work_order import WorkOrder
-from app.services import customer_search
-from app.services import support_ticket_settings
+from app.services import customer_search, support_ticket_settings
 from app.services.automation_contracts import AutomationLookupKey
 
 MAX_LOOKUP_LIMIT = 20
@@ -27,6 +29,11 @@ MAX_LOOKUP_LIMIT = 20
 class AutomationLookupOption:
     ref: str
     label: str
+
+
+class _LookupRow(Protocol):
+    id: UUID
+    __dict__: dict[str, object]
 
 
 def _limit(value: int) -> int:
@@ -49,43 +56,51 @@ def _uuid(value: str) -> UUID | None:
 
 def _rows(
     db: Session,
-    model: type,
-    label_columns: tuple[object, ...],
+    model: type[Base],
+    id_column: ColumnElement[Any],
+    label_columns: tuple[ColumnElement[str], ...],
     q: str,
     limit: int,
     *,
-    active_column: object | None = None,
+    active_column: ColumnElement[bool] | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(model)
     if active_column is not None:
         statement = statement.where(active_column.is_(True))
     if q.strip():
         like = _term(q)
-        filters = [column.ilike(like) for column in label_columns]
+        filters: list[ColumnElement[bool]] = [
+            column.ilike(like) for column in label_columns
+        ]
         parsed = _uuid(q)
         if parsed is not None:
-            filters.append(model.id == parsed)
+            filters.append(id_column == parsed)
         statement = statement.where(or_(*filters))
-    result = db.scalars(statement.order_by(model.id).limit(limit)).all()
+    result = db.scalars(statement.order_by(id_column).limit(limit)).all()
     return tuple(
-        AutomationLookupOption(ref=str(row.id), label=_label(row, label_columns))
+        AutomationLookupOption(
+            ref=str(cast(_LookupRow, row).id),
+            label=_label(cast(_LookupRow, row), label_columns),
+        )
         for row in result
     )
 
 
-def _label(row: object, columns: tuple[object, ...]) -> str:
-    values = [str(getattr(row, column.key, "") or "").strip() for column in columns]
-    return next((value for value in values if value), str(getattr(row, "id")))
+def _label(row: _LookupRow, columns: tuple[ColumnElement[str], ...]) -> str:
+    values = [
+        str(row.__dict__.get(column.key or "", "") or "").strip() for column in columns
+    ]
+    return next((value for value in values if value), str(row.id))
 
 
 def _distinct_values(
     db: Session,
-    model: type,
-    column: object,
+    model: type[Base],
+    column: ColumnElement[str],
     q: str,
     limit: int,
     *,
-    active_column: object | None = None,
+    active_column: ColumnElement[bool] | None = None,
 ) -> tuple[AutomationLookupOption, ...]:
     statement = select(column).where(column.is_not(None)).distinct().order_by(column)
     if active_column is not None:
@@ -93,7 +108,9 @@ def _distinct_values(
     if q.strip():
         statement = statement.where(column.ilike(_term(q)))
     values = db.scalars(statement.limit(limit)).all()
-    return tuple(AutomationLookupOption(ref=str(value), label=str(value)) for value in values)
+    return tuple(
+        AutomationLookupOption(ref=str(value), label=str(value)) for value in values
+    )
 
 
 def lookup_options(
@@ -114,6 +131,7 @@ def lookup_options(
         return _rows(
             db,
             ServiceTeam,
+            ServiceTeam.id,
             (ServiceTeam.name,),
             q,
             limit,
@@ -123,36 +141,60 @@ def lookup_options(
         return _rows(
             db,
             Project,
+            Project.id,
             (Project.name, Project.code, Project.number),
             q,
             limit,
             active_column=Project.is_active,
         )
     if key is AutomationLookupKey.project_task:
-        return _rows(db, ProjectTask, (ProjectTask.title, ProjectTask.number), q, limit)
+        return _rows(
+            db,
+            ProjectTask,
+            ProjectTask.id,
+            (ProjectTask.title, ProjectTask.number),
+            q,
+            limit,
+        )
     if key is AutomationLookupKey.work_order:
-        return _rows(db, WorkOrder, (WorkOrder.title, WorkOrder.public_id), q, limit)
+        return _rows(
+            db,
+            WorkOrder,
+            WorkOrder.id,
+            (WorkOrder.title, WorkOrder.public_id),
+            q,
+            limit,
+        )
     if key is AutomationLookupKey.material_request:
         return _rows(
             db,
             FieldMaterialRequest,
-            (
-                FieldMaterialRequest.client_ref,
-                FieldMaterialRequest.crm_material_request_id,
-            ),
+            FieldMaterialRequest.id,
+            (FieldMaterialRequest.client_ref,),
             q,
             limit,
         )
     if key is AutomationLookupKey.pipeline:
-        return _rows(db, Pipeline, (Pipeline.name,), q, limit, active_column=Pipeline.is_active)
+        return _rows(
+            db,
+            Pipeline,
+            Pipeline.id,
+            (Pipeline.name,),
+            q,
+            limit,
+            active_column=Pipeline.is_active,
+        )
     if key is AutomationLookupKey.lead:
-        return _rows(db, Lead, (Lead.title,), q, limit)
+        return _rows(db, Lead, Lead.id, (Lead.title,), q, limit)
     if key is AutomationLookupKey.quote:
-        return _rows(db, Quote, (Quote.project_type, Quote.currency), q, limit)
+        return _rows(
+            db, Quote, Quote.id, (Quote.project_type, Quote.currency), q, limit
+        )
     if key is AutomationLookupKey.sales_order:
         return _rows(
             db,
             SalesOrder,
+            SalesOrder.id,
             (SalesOrder.order_number,),
             q,
             limit,
@@ -162,6 +204,7 @@ def lookup_options(
         return _rows(
             db,
             SystemUser,
+            SystemUser.id,
             (
                 SystemUser.display_name,
                 SystemUser.first_name,
@@ -173,7 +216,14 @@ def lookup_options(
             active_column=SystemUser.is_active,
         )
     if key is AutomationLookupKey.cx_handoff:
-        return _rows(db, CustomerExperienceHandoff, (CustomerExperienceHandoff.status,), q, limit)
+        return _rows(
+            db,
+            CustomerExperienceHandoff,
+            CustomerExperienceHandoff.id,
+            (CustomerExperienceHandoff.status,),
+            q,
+            limit,
+        )
     if key is AutomationLookupKey.ticket_type:
         return tuple(
             AutomationLookupOption(ref=value, label=value)
@@ -181,9 +231,13 @@ def lookup_options(
             if not q.strip() or q.casefold() in value.casefold()
         )[:limit]
     if key is AutomationLookupKey.project_type:
-        return _distinct_values(db, Project, Project.project_type, q, limit, active_column=Project.is_active)
+        return _distinct_values(
+            db, Project, Project.project_type, q, limit, active_column=Project.is_active
+        )
     if key is AutomationLookupKey.project_name:
-        return _distinct_values(db, Project, Project.name, q, limit, active_column=Project.is_active)
+        return _distinct_values(
+            db, Project, Project.name, q, limit, active_column=Project.is_active
+        )
     if key is AutomationLookupKey.region:
         project_values = _distinct_values(
             db, Project, Project.region, q, limit, active_column=Project.is_active
@@ -202,7 +256,12 @@ def lookup_options(
     if key is AutomationLookupKey.currency:
         quote_values = _distinct_values(db, Quote, Quote.currency, q, limit)
         order_values = _distinct_values(db, SalesOrder, SalesOrder.currency, q, limit)
-        return tuple(sorted({item.ref: item for item in (*quote_values, *order_values)}.values(), key=lambda item: item.label.casefold())[:limit])
+        return tuple(
+            sorted(
+                {item.ref: item for item in (*quote_values, *order_values)}.values(),
+                key=lambda item: item.label.casefold(),
+            )[:limit]
+        )
     if key is AutomationLookupKey.warehouse:
         statement = select(
             FieldInventoryWarehouse.code, FieldInventoryWarehouse.name
@@ -226,7 +285,9 @@ def lookup_options(
             db, FieldMaterialRequest, FieldMaterialRequest.support_system, q, limit
         )
     if key is AutomationLookupKey.support_status:
-        return _distinct_values(db, FieldMaterialRequest, FieldMaterialRequest.support_status, q, limit)
+        return _distinct_values(
+            db, FieldMaterialRequest, FieldMaterialRequest.support_status, q, limit
+        )
     return ()
 
 

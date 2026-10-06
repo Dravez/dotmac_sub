@@ -1186,7 +1186,9 @@ def search_rule_condition_options(
     try:
         key = AutomationLookupKey(lookup_key)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail="Condition lookup not found") from exc
+        raise HTTPException(
+            status_code=404, detail="Condition lookup not found"
+        ) from exc
     options = automation_condition_lookups.lookup_options(db, key, q=q, limit=limit)
     return JSONResponse(jsonable_encoder({"items": options}))
 

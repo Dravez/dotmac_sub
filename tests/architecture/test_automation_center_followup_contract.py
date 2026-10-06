@@ -33,9 +33,12 @@ def test_condition_operator_selection_and_system_lookups_are_preserved() -> None
     contracts = _source("app/services/automation_contracts.py")
     lookups = _source("app/services/automation_condition_lookups.py")
 
-    assert 'row.addEventListener("change", (event) => { if (event.target === operator)' in template
+    assert (
+        'row.addEventListener("change", (event) => { if (event.target === operator)'
+        in template
+    )
     assert "initial.operator = operator.value" in template
-    assert "operator.value = \"\"; refresh()" in template
+    assert 'operator.value = ""; refresh()' in template
     assert "window.initTypeaheadFields" in template
     assert '"lookup_key": field.lookup_key.value' in route
     assert '"/condition-options/{lookup_key}"' in route
