@@ -4,6 +4,11 @@
 
 {% block content %}
 {% macro chevron(state) %}<svg aria-hidden="true" class="h-5 w-5 text-slate-400 transition-transform" :class="{ 'rotate-180': {{ state }} }" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" /></svg>{% endmacro %}
+<script type="application/json" id="inbox-settings-data-troubleshooting">{{ (ai_intake_troubleshooting_rules | default([]) | tojson) | tojson }}</script>
+<script type="application/json" id="inbox-settings-data-channel-overrides">{{ (ai_intake_channel_overrides_json | default('{}') | tojson) }}</script>
+<script type="application/json" id="inbox-settings-data-mappings">{{ (ai_intake_mapping_json | default('[]') | tojson) }}</script>
+<script type="application/json" id="inbox-settings-data-gender-choices">{{ ai_intake_data_cleanup_policy.get('gender_choices', {}) | tojson }}</script>
+<script type="application/json" id="inbox-settings-data-dob-formats">{{ (ai_intake_data_cleanup_policy.get('dob_formats', []) | tojson) }}</script>
 <div
     x-data="{
         sections: {
@@ -22,6 +27,15 @@
         routingTab: 'channels',
         newScenario: false,
         newSuite: false,
+        newOverrideChannel: '',
+        jsonEditors: {
+            troubleshooting: { scriptId: 'inbox-settings-data-troubleshooting', raw: '', value: [], dirty: false, valid: true },
+            channelOverrides: { scriptId: 'inbox-settings-data-channel-overrides', raw: '', value: {}, dirty: false, valid: true },
+            mappings: { scriptId: 'inbox-settings-data-mappings', raw: '', value: [], dirty: false, valid: true },
+            genderChoices: { scriptId: 'inbox-settings-data-gender-choices', raw: '', value: {}, dirty: false, valid: true },
+        },
+        dobFormats: [],
+        jsonWarnings: {},
         sectionOrder: ['overview', 'customer', 'ai', 'testing', 'routing', 'personal'],
         aiTabs: ['basics', 'conversation', 'intents', 'troubleshooting', 'messages', 'advanced'],
         openSection(name, updateHash = true) {
@@ -45,6 +59,35 @@
         sectionCanaryIndexes() {
             return Array.from(this.$root.querySelectorAll('[data-canary-result]')).filter((row) => this.canaryFilter === 'all' || row.dataset.canaryResult === this.canaryFilter).map((row) => Number(row.dataset.canaryIndex));
         },
+        initJsonEditors() {
+            Object.entries(this.jsonEditors).forEach(([key, editor]) => {
+                const encoded = document.getElementById(editor.scriptId)?.textContent || '';
+                try {
+                    const initial = JSON.parse(encoded || (key === 'channelOverrides' || key === 'genderChoices' ? '{}' : '[]'));
+                    editor.raw = typeof initial === 'string' ? initial : JSON.stringify(initial);
+                    editor.value = typeof initial === 'string' ? JSON.parse(initial || (key === 'channelOverrides' || key === 'genderChoices' ? '{}' : '[]')) : initial;
+                }
+                catch (error) { editor.value = key === 'channelOverrides' || key === 'genderChoices' ? {} : []; editor.valid = false; this.jsonWarnings[key] = true; }
+            });
+            try { this.dobFormats = JSON.parse(document.getElementById('inbox-settings-data-dob-formats')?.textContent || '[]'); } catch (error) { this.dobFormats = []; }
+        },
+        loadIntentData(element) {
+            const script = document.getElementById(`inbox-settings-data-intent-${element.dataset.intentIndex}`);
+            if (script) Object.assign(this, JSON.parse(script.textContent || '{}'));
+        },
+        jsonValue(key) { const editor = this.jsonEditors[key]; return editor.dirty ? JSON.stringify(editor.value) : editor.raw; },
+        markJsonDirty(key) { this.jsonEditors[key].dirty = true; },
+        startFreshJson(key, fallback) { this.jsonEditors[key].value = fallback; this.jsonEditors[key].dirty = true; this.jsonEditors[key].valid = true; this.jsonWarnings[key] = false; },
+        addRule() { this.jsonEditors.troubleshooting.value.push({ condition: { type: 'intent', operator: 'equals', value: '' }, action: { type: 'handoff', destination_team_id: '' }, response: '', enabled: true }); this.markJsonDirty('troubleshooting'); },
+        removeRule(index) { this.jsonEditors.troubleshooting.value.splice(index, 1); this.markJsonDirty('troubleshooting'); },
+        addOverride(channel) { this.jsonEditors.channelOverrides.value[channel] = { business_tone: '', approved_isp_information: '', handoff: { customer_message: '', summary_template: '', announce_destination: false } }; this.markJsonDirty('channelOverrides'); },
+        availableOverrideChannels() { return Array.from(document.querySelectorAll('[data-channel-option]')).filter((option) => !Object.prototype.hasOwnProperty.call(this.jsonEditors.channelOverrides.value, option.value)).map((option) => option.value); },
+        removeOverride(channel) { delete this.jsonEditors.channelOverrides.value[channel]; this.markJsonDirty('channelOverrides'); },
+        addMapping() { this.jsonEditors.mappings.value.push({ intent: '', department: '', service_team_id: '', enabled: true }); this.markJsonDirty('mappings'); },
+        removeMapping(index) { this.jsonEditors.mappings.value.splice(index, 1); this.markJsonDirty('mappings'); },
+        addGenderChoice() { this.jsonEditors.genderChoices.value[''] = ''; this.markJsonDirty('genderChoices'); },
+        removeGenderChoice(label) { delete this.jsonEditors.genderChoices.value[label]; this.markJsonDirty('genderChoices'); },
+        setGenderLabel(oldLabel, newLabel) { if (oldLabel !== newLabel) { const value = this.jsonEditors.genderChoices.value[oldLabel]; delete this.jsonEditors.genderChoices.value[oldLabel]; this.jsonEditors.genderChoices.value[newLabel] = value; this.markJsonDirty('genderChoices'); } },
         initHelpers() {
             this.$nextTick(() => {
                 let helperIndex = 0;
@@ -92,7 +135,7 @@
             }
         },
     }"
-    x-init="openFromHash(); initHelpers()"
+    x-init="initJsonEditors(); openFromHash(); initHelpers()"
     @hashchange.window="openFromHash()"
     @invalid.capture="expandForInvalid($event)"
     @submit.capture="invalidHandled = false"
@@ -382,16 +425,11 @@
                         <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-4">Description
                             <textarea name="intent_description" rows="2" maxlength="600" class="mt-1 w-full rounded-lg border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900">{{ intent.get('description', '') }}</textarea>
                         </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-4">Examples
-                            <textarea name="intent_examples" rows="2" maxlength="800" class="mt-1 w-full rounded-lg border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900">{% for example in intent.get('examples', []) %}{{ example }}
-{% endfor %}</textarea>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Allowed tools
-                            <input name="intent_allowed_tools" value="{{ intent.get('allowed_tools', []) | join(', ') }}" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900">
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Required fields
-                            <input name="intent_required_fields" value="{{ intent.get('required_fields', []) | join(', ') }}" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900">
-                        </label>
+                        <script type="application/json" id="inbox-settings-data-intent-existing-{{ loop.index0 }}">{{ {'examples': intent.get('examples', []), 'selectedTools': intent.get('allowed_tools', []), 'selectedFields': intent.get('required_fields', [])} | tojson }}</script><div class="lg:col-span-6 grid gap-3 lg:grid-cols-3" data-intent-index="existing-{{ loop.index0 }}" x-data="{ examples: [], selectedTools: [], selectedFields: [] }" x-init="loadIntentData($el)">
+                            <div class="lg:col-span-1"><span class="text-xs font-semibold">Examples</span><input type="hidden" name="intent_examples" :value="examples.join('\n')"><template x-for="(example, index) in examples" :key="index"><div class="mt-2 flex gap-1"><input x-model="examples[index]" class="min-w-0 flex-1 rounded-lg border-slate-300 text-xs"><button type="button" @click="examples.splice(index, 1)" :aria-label="`Delete example ${index}`" class="text-rose-700">Delete</button></div></template><button type="button" @click="examples.push('')" class="mt-2 rounded-lg border border-amber-400 px-2 py-1 text-xs font-semibold text-amber-700">Add example</button></div>
+                            <div class="lg:col-span-1"><span class="text-xs font-semibold">Allowed tools</span><input type="hidden" name="intent_allowed_tools" :value="selectedTools.join(', ')"><div class="mt-2 flex flex-wrap gap-2">{% for tool in ai_intake_tool_catalogue %}<label class="rounded-full border px-2 py-1 text-xs"><input type="checkbox" value="{{ tool.key }}" x-model="selectedTools" :title="{{ tool.description | tojson }}"> {{ tool.key|replace('_', ' ')|title }}</label>{% endfor %}</div></div>
+                            <div class="lg:col-span-1"><span class="text-xs font-semibold">Required fields</span><input type="hidden" name="intent_required_fields" :value="selectedFields.join(', ')"><div class="mt-2 flex flex-wrap gap-2">{% for field in ai_intake_permitted_identifiers %}<label class="rounded-full border px-2 py-1 text-xs"><input type="checkbox" value="{{ field }}" x-model="selectedFields"> {{ field|replace('_', ' ')|title }}</label>{% endfor %}</div></div>
+                        </div>
                     </div>
                     {% endfor %}
                     {% for _ in range(0, 3) %}
@@ -406,107 +444,25 @@
                         <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Route team<select name="intent_route_team_id" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value=""></option>{% for team in service_team_options %}<option value="{{ team.id }}">{{ team.name }}</option>{% endfor %}</select></label>
                         <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Handoff<select name="intent_handoff" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="false">No</option><option value="true">Yes</option></select></label>
                         <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-4">Description<textarea name="intent_description" rows="2" maxlength="600" class="mt-1 w-full rounded-lg border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"></textarea></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-4">Examples<textarea name="intent_examples" rows="2" maxlength="800" class="mt-1 w-full rounded-lg border-slate-300 px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"></textarea></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Allowed tools<input name="intent_allowed_tools" placeholder="customer_lookup" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Required fields<input name="intent_required_fields" placeholder="portal_id" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label>
+                        <script type="application/json" id="inbox-settings-data-intent-new-{{ loop.index0 }}">{{ {'examples': [], 'selectedTools': [], 'selectedFields': []} | tojson }}</script><div class="lg:col-span-6 grid gap-3 lg:grid-cols-3" data-intent-index="new-{{ loop.index0 }}" x-data="{ examples: [], selectedTools: [], selectedFields: [] }" x-init="loadIntentData($el)"><div><span class="text-xs font-semibold">Examples</span><input type="hidden" name="intent_examples" :value="examples.join('\n')"><template x-for="(example, index) in examples" :key="index"><div class="mt-2 flex gap-1"><input x-model="examples[index]" class="min-w-0 flex-1 rounded-lg border-slate-300 text-xs"><button type="button" @click="examples.splice(index, 1)" :aria-label="`Delete example ${index}`" class="text-rose-700">Delete</button></div></template><button type="button" @click="examples.push('')" class="mt-2 rounded-lg border border-amber-400 px-2 py-1 text-xs font-semibold text-amber-700">Add example</button></div><div><span class="text-xs font-semibold">Allowed tools</span><input type="hidden" name="intent_allowed_tools" :value="selectedTools.join(', ')"><div class="mt-2 flex flex-wrap gap-2">{% for tool in ai_intake_tool_catalogue %}<label class="rounded-full border px-2 py-1 text-xs"><input type="checkbox" value="{{ tool.key }}" x-model="selectedTools"> {{ tool.key|replace('_', ' ')|title }}</label>{% endfor %}</div></div><div><span class="text-xs font-semibold">Required fields</span><input type="hidden" name="intent_required_fields" :value="selectedFields.join(', ')"><div class="mt-2 flex flex-wrap gap-2">{% for field in ai_intake_permitted_identifiers %}<label class="rounded-full border px-2 py-1 text-xs"><input type="checkbox" value="{{ field }}" x-model="selectedFields"> {{ field|replace('_', ' ')|title }}</label>{% endfor %}</div></div></div>
                     </div>
                     {% endfor %}
                 </div>
             </section>
-             <section id="inbox-settings-ai-troubleshooting" data-settings-section="ai" data-ai-tab="troubleshooting" role="tabpanel" aria-labelledby="inbox-settings-ai-tab-troubleshooting" x-show="aiTab === 'troubleshooting'" x-cloak class="min-w-0 scroll-mt-20 grid gap-4 rounded-lg bg-slate-50 p-4 dark:bg-slate-900/40 lg:col-span-6 lg:grid-cols-6">
-                    <div class="lg:col-span-6">
-                        <h3 class="text-sm font-semibold text-slate-900 dark:text-white">Troubleshooting and handoff</h3>
-                    </div>
-                    <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-3">Customer handoff message
-                        <textarea name="handoff_customer_message" maxlength="800" rows="3" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950">{{ handoff_policy.get('customer_message') or ai_intake_conversation_templates.get('standard_handoff', '') }}</textarea>
-                        <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Used when the conversational engine decides to hand over.</p>
-                    </label>
-                    <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-3">Internal summary template
-                        <textarea name="handoff_summary_template" maxlength="2000" rows="3" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950">{{ handoff_policy.get('summary_template', '') }}</textarea>
-                        <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Approved variables include {{ '{{customer}}' }}, {{ '{{portal_id}}' }}, {{ '{{issue}}' }}, {{ '{{intent}}' }}, {{ '{{customer_details}}' }}, {{ '{{monitoring_findings}}' }}, {{ '{{tool_results}}' }}, {{ '{{escalation_reason}}' }} and {{ '{{destination_team}}' }}.</p>
-                    </label>
-                     <label class="flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200 lg:col-span-3">
-                        <input type="checkbox" name="announce_destination_team" value="true" {% if handoff_policy.get('announce_destination') %}checked{% endif %} class="rounded border-slate-300 text-amber-500 focus:ring-amber-500">
-                        Allow destination announcement
-                    </label>
-                     <label class="flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200 lg:col-span-3">
-                        <input type="checkbox" name="handoff_after_classification" value="true" {% if conversation_policy.get('handoff_after_classification', false) %}checked{% endif %} class="rounded border-slate-300 text-amber-500 focus:ring-amber-500">
-                        Handoff after classification
-                        <span class="block text-xs font-normal text-slate-500 dark:text-slate-400">Allows immediate handoff after a route-ready classification.</span>
-                    </label>
-                     <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-6">Troubleshooting rules JSON
-                        <textarea name="troubleshooting_rules_json" maxlength="4000" rows="5" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950">{{ conversation_policy.get('troubleshooting_rules', []) | tojson }}</textarea>
-                        <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Advanced inspection/fallback only. Visual rules below are the primary editor; executable code is not accepted.</p>
-                    </label>
-                 <div class="lg:col-span-6">
-                     <h3 class="text-sm font-semibold text-slate-900 dark:text-white">Troubleshooting rule editor</h3>
-                     <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Rules are typed. Conditions and actions are backend-defined; the form does not accept Python, SQL, Jinja or arbitrary expressions.</p>
-                 </div>
-                {% set visual_rules = conversation_policy.get('troubleshooting_rules', []) %}
-                 <div class="mt-3 min-w-0 space-y-3 lg:col-span-6">
-                    {% for rule in visual_rules %}
-                    {% set condition = rule.get('condition', {}) %}
-                     <div class="min-w-0 grid gap-3 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950 lg:col-span-6 lg:grid-cols-12">
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">When
-                            <select name="rule_condition_type" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">
-                                <option value=""></option>
-                                {% for key in ai_intake_supported_rule_conditions %}<option value="{{ key }}" {% if condition.get('type') == key %}selected{% endif %}>{{ key }}</option>{% endfor %}
-                                <option value="field:los_red" {% if condition.get('field') == 'los_red' %}selected{% endif %}>field:los_red</option>
-                                <option value="field:router_restarted" {% if condition.get('field') == 'router_restarted' %}selected{% endif %}>field:router_restarted</option>
-                                <option value="field:router_powered" {% if condition.get('field') == 'router_powered' %}selected{% endif %}>field:router_powered</option>
-                            </select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Operator
-                            <select name="rule_condition_operator" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">
-                                {% for op in ['equals', 'present', 'contains', '>=', '>', '<=', '<'] %}<option value="{{ op }}" {% if condition.get('operator', 'equals') == op %}selected{% endif %}>{{ op }}</option>{% endfor %}
-                            </select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Value
-                            <input name="rule_condition_value" value="{{ condition.get('value') or condition.get('intent') or condition.get('category') or condition.get('monitoring_status') or condition.get('equals') or '' }}" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900">
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Then
-                            <select name="rule_action" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">
-                                <option value=""></option>
-                                {% for action in ai_intake_supported_rule_actions %}<option value="{{ action }}" {% if rule.get('action') == action %}selected{% endif %}>{{ action }}</option>{% endfor %}
-                            </select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Tool / field
-                            <select name="rule_tool" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">
-                                <option value="{{ rule.get('tool', '') }}">{{ rule.get('tool', '') }}</option>
-                                {% for tool in ai_intake_tool_catalogue %}<option value="{{ tool.key }}">{{ tool.key }}</option>{% endfor %}
-                                <option value="portal_id">portal_id</option>
-                                <option value="registered_email">registered_email</option>
-                                <option value="registered_phone">registered_phone</option>
-                            </select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Destination
-                            <select name="rule_destination_team_id" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">
-                                <option value=""></option>
-                                {% for team in service_team_options %}<option value="{{ team.id }}" {% if rule.get('destination_team_id') == team.id|string %}selected{% endif %}>{{ team.name }}</option>{% endfor %}
-                            </select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Enabled
-                            <select name="rule_enabled" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="true" {% if rule.get('enabled', true) %}selected{% endif %}>Yes</option><option value="false" {% if not rule.get('enabled', true) %}selected{% endif %}>No</option></select>
-                        </label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-11">Guidance / response
-                            <input name="rule_guidance" value="{{ rule.get('response', '') }}" maxlength="800" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900">
-                        </label>
-                    </div>
-                    {% endfor %}
-                    {% for _ in range(0, 3) %}
-                     <div class="min-w-0 grid gap-3 rounded-lg border border-dashed border-slate-300 bg-white p-3 dark:border-slate-700 dark:bg-slate-950 lg:col-span-6 lg:grid-cols-12">
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">When<select name="rule_condition_type" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value=""></option>{% for key in ai_intake_supported_rule_conditions %}<option value="{{ key }}">{{ key }}</option>{% endfor %}<option value="field:los_red">field:los_red</option><option value="field:router_restarted">field:router_restarted</option><option value="field:router_powered">field:router_powered</option></select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Operator<select name="rule_condition_operator" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900">{% for op in ['equals', 'present', 'contains', '>=', '>', '<=', '<'] %}<option value="{{ op }}">{{ op }}</option>{% endfor %}</select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Value<input name="rule_condition_value" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Then<select name="rule_action" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value=""></option>{% for action in ai_intake_supported_rule_actions %}<option value="{{ action }}">{{ action }}</option>{% endfor %}</select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Tool / field<select name="rule_tool" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value=""></option>{% for tool in ai_intake_tool_catalogue %}<option value="{{ tool.key }}">{{ tool.key }}</option>{% endfor %}<option value="portal_id">portal_id</option><option value="registered_email">registered_email</option><option value="registered_phone">registered_phone</option></select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-2">Destination<select name="rule_destination_team_id" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value=""></option>{% for team in service_team_options %}<option value="{{ team.id }}">{{ team.name }}</option>{% endfor %}</select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300">Enabled<select name="rule_enabled" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="true">Yes</option><option value="false">No</option></select></label>
-                        <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-11">Guidance / response<input name="rule_guidance" maxlength="800" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label>
-                    </div>
-                    {% endfor %}
-                </div>
-            </section>
+             <section id="inbox-settings-ai-troubleshooting" data-settings-section="ai" data-ai-tab="troubleshooting" role="tabpanel" aria-labelledby="inbox-settings-ai-tab-troubleshooting" x-show="aiTab === 'troubleshooting'" x-cloak class="min-w-0 scroll-mt-20 grid gap-4 rounded-lg bg-slate-50 p-4 dark:bg-slate-900/40 lg:col-span-6 lg:grid-cols-6">                     <label class="lg:col-span-3">Customer handoff message<textarea name="handoff_customer_message" maxlength="800" rows="3">{{ handoff_policy.get('customer_message') or ai_intake_conversation_templates.get('standard_handoff', '') }}</textarea></label>
+                    <label class="lg:col-span-3">Internal summary template<textarea name="handoff_summary_template" maxlength="2000" rows="3">{{ handoff_policy.get('summary_template', '') }}</textarea></label>
+                    <label class="flex items-center gap-2 lg:col-span-3"><input type="checkbox" name="announce_destination_team" value="true"> Allow destination announcement</label>
+                    <label class="flex items-center gap-2 lg:col-span-3"><input type="checkbox" name="handoff_after_classification" value="true"> Handoff after classification</label>
+                    <div class="lg:col-span-6 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950" data-json-editor="troubleshooting">
+                         <input type="hidden" name="troubleshooting_rules_json" :value="jsonValue('troubleshooting')">
+                         <div x-show="jsonWarnings.troubleshooting" x-cloak class="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">Existing value could not be read and will be saved unchanged. <button type="button" class="font-semibold underline" @click="startFreshJson('troubleshooting', [])">Start fresh</button></div>
+                         <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold text-slate-900 dark:text-white">Troubleshooting rule editor</h3><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Rules are typed and preserve condition fields, responses, destinations and enabled state.</p></div><button type="button" @click="addRule()" class="min-h-9 rounded-lg border border-amber-400 px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50">Add rule</button></div>
+                         <div class="mt-3 space-y-3">
+                             <template x-for="(rule, index) in jsonEditors.troubleshooting.value" :key="index"><div class="grid min-w-0 gap-3 rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-700 lg:grid-cols-12"><div class="font-medium text-slate-600 dark:text-slate-300 lg:col-span-12" x-text="`Rule ${index}: If ${rule.condition?.type || 'condition'} ${rule.condition?.value || ''} → ${rule.action?.type || 'action'}`"></div><label class="lg:col-span-2">When<select name="rule_condition_type" x-model="rule.condition.type" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="intent">intent</option><option value="category">category</option><option value="field_present">field present</option><option value="field_value">field value</option><option value="sentiment">sentiment</option></select></label><label class="lg:col-span-2" x-show="['field_present','field_value'].includes(rule.condition?.type)">Field<select name="rule_condition_field" x-model="rule.condition.field" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="portal_id">Portal ID</option><option value="registered_email">Email</option><option value="registered_phone">Phone</option></select></label><label class="lg:col-span-2">Operator<select name="rule_condition_operator" x-model="rule.condition.operator" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="equals">equals</option><option value="present">present</option><option value="contains">contains</option></select></label><label class="lg:col-span-2">Value<input name="rule_condition_value" x-model="rule.condition.value" @input="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label><label class="lg:col-span-2">Then<select name="rule_action" x-model="rule.action.type" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="route">Route</option><option value="handoff">Hand off</option><option value="execute_tool">Execute tool</option><option value="invoke_tool">Invoke tool</option></select></label><label class="lg:col-span-2" x-show="['execute_tool','invoke_tool'].includes(rule.action?.type)">Tool<select name="rule_tool" x-model="rule.action.tool" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="customer_lookup">Customer lookup</option><option value="subscriber_monitoring">Subscriber monitoring</option></select></label><label class="lg:col-span-2" x-show="rule.action?.type === 'handoff'">Team<select name="rule_destination_team_id" x-model="rule.action.destination_team_id" @change="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 text-xs dark:border-slate-700 dark:bg-slate-900"><option value="">Choose team</option>{% for team in service_team_options %}<option value="{{ team.id }}">{{ team.name }}</option>{% endfor %}</select></label><label class="lg:col-span-3">Response / guidance<input name="rule_guidance" x-model="rule.response" @input="markJsonDirty('troubleshooting')" class="mt-1 h-10 w-full rounded-lg border-slate-300 px-2 text-xs dark:border-slate-700 dark:bg-slate-900"></label><label class="flex items-center gap-2 lg:col-span-1"><input type="checkbox" name="rule_enabled" x-model="rule.enabled" @change="markJsonDirty('troubleshooting')" class="rounded border-slate-300 text-amber-500"> Enabled</label><button type="button" :aria-label="`Remove rule ${index + 1}`" @click="removeRule(index)" class="min-h-9 rounded-lg border border-rose-300 px-2 text-rose-700 hover:bg-rose-50 lg:col-span-1">Remove</button></div></template>
+                             <p x-show="!jsonEditors.troubleshooting.value.length" class="rounded-lg border border-dashed border-slate-300 p-4 text-xs text-slate-500">No troubleshooting rules. Add a rule to define a typed fallback.</p>
+                         </div>
+                     </div>
+</section>
              <div id="inbox-settings-ai-messages" data-settings-section="ai" data-ai-tab="messages" role="tabpanel" aria-labelledby="inbox-settings-ai-tab-messages" x-show="aiTab === 'messages'" x-cloak class="min-w-0 scroll-mt-20 grid gap-4 rounded-lg bg-slate-50 p-4 dark:bg-slate-900/40 lg:col-span-6 lg:grid-cols-6">
                 <div class="lg:col-span-6">
                     <h3 class="text-sm font-semibold text-slate-900 dark:text-white">Customer-facing messages</h3>
@@ -568,7 +524,7 @@
                     <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Less frequently changed policy data and compatibility controls.</p>
                 </div>
             <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-6">Channel overrides JSON
-                <textarea name="channel_overrides_json" rows="5" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950">{{ ai_intake_channel_overrides_json }}</textarea>
+                <input type="hidden" name="channel_overrides_json" :value="jsonValue('channelOverrides')"><div data-json-editor="channel-overrides" class="mt-2 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950"><div x-show="jsonWarnings.channelOverrides" x-cloak class="mb-2 text-xs text-amber-800">Existing value could not be read and will be saved unchanged. <button type="button" @click="startFreshJson('channelOverrides', {})">Start fresh</button></div><select x-model="newOverrideChannel" class="rounded-lg border-slate-300 text-xs"><option value="">Choose channel</option>{% for channel in channel_options %}<option data-channel-option value="{{ channel.value }}" x-show="availableOverrideChannels().includes('{{ channel.value }}')">{{ channel.label }}</option>{% endfor %}</select><button type="button" @click="if (newOverrideChannel) { addOverride(newOverrideChannel); newOverrideChannel = ''; }" class="rounded-lg border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-700">Add channel override</button><template x-for="(override, channel) in jsonEditors.channelOverrides.value" :key="channel"><div class="mt-3 rounded-lg border p-3"><div class="flex items-center justify-between"><strong x-text="channel"></strong><button type="button" @click="removeOverride(channel)" :aria-label="`Remove ${channel} override`" class="text-rose-700">Remove</button></div><div class="mt-2 grid gap-3 lg:grid-cols-2"><label>Business tone<textarea x-model="override.business_tone" @input="markJsonDirty('channelOverrides')"></textarea></label><label>Approved ISP information<textarea x-model="override.approved_isp_information" @input="markJsonDirty('channelOverrides')"></textarea></label><label>Handoff customer message<textarea x-model="override.handoff.customer_message" @input="markJsonDirty('channelOverrides')"></textarea></label><label>Handoff summary template<textarea x-model="override.handoff.summary_template" @input="markJsonDirty('channelOverrides')"></textarea></label><label class="flex items-center gap-2"><input type="checkbox" x-model="override.handoff.announce_destination" @change="markJsonDirty('channelOverrides')"> Announce destination team</label></div><p class="mt-2 text-xs text-slate-500" x-text="`${override.troubleshooting_rules?.length || 0} channel-specific rules are kept as they are`"></p></div></template></div>
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Optional per-channel conversation template overrides for supported messaging channels.</p>
             </label>
              <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-6">Editable business instructions
@@ -576,7 +532,7 @@
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Business-specific guidance supplied to the AI within protected policy limits.</p>
             </label>
             <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-6">Intent mappings JSON
-                <textarea name="department_mappings_json" rows="7" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950">{{ ai_intake_mapping_json }}</textarea>
+                <input type="hidden" name="department_mappings_json" :value="jsonValue('mappings')"><div data-json-editor="mappings" class="mt-2 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950"><div x-show="jsonWarnings.mappings" x-cloak class="mb-2 text-xs text-amber-800">Existing value could not be read and will be saved unchanged. <button type="button" @click="startFreshJson('mappings', [])">Start fresh</button></div><button type="button" @click="addMapping()" class="rounded-lg border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-700">Add mapping</button><template x-for="(mapping, index) in jsonEditors.mappings.value" :key="index"><div class="mt-3 grid gap-2 rounded-lg border p-3 lg:grid-cols-12"><label class="lg:col-span-3">Intent<select x-model="mapping.intent" @change="markJsonDirty('mappings')">{% for key in ai_intake_supported_intent_keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}</select></label><label class="lg:col-span-3">Department<input x-model="mapping.department" @input="markJsonDirty('mappings')"></label><label class="lg:col-span-3">Service team<select x-model="mapping.service_team_id" @change="markJsonDirty('mappings')">{% for team in service_team_options %}<option value="{{ team.id }}">{{ team.name }}</option>{% endfor %}</select></label><label class="flex items-center gap-2 lg:col-span-2"><input type="checkbox" x-model="mapping.enabled" @change="markJsonDirty('mappings')"> Enabled</label><button type="button" @click="removeMapping(index)" :aria-label="`Remove mapping ${index + 1}`" class="text-rose-700">Remove</button></div></template></div>
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Maps approved intents to service teams for routing after classification.</p>
             </label>
             <label class="flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200 lg:col-span-3">
@@ -590,12 +546,11 @@
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Reserved prompt for a future approved profile-completion flow.</p>
             </label>
             <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-3">Gender choices JSON
-                <textarea name="data_cleanup_gender_choices_json" maxlength="1000" rows="4" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950">{{ data_cleanup_policy.get('gender_choices', {}) | tojson }}</textarea>
+                <input type="hidden" name="data_cleanup_gender_choices_json" :value="jsonValue('genderChoices')"><div data-json-editor="gender-choices" class="mt-2 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950"><span class="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">Disabled pending compliance</span><div x-show="jsonWarnings.genderChoices" x-cloak class="mt-2 text-xs text-amber-800">Existing value could not be read and will be saved unchanged. <button type="button" @click="startFreshJson('genderChoices', {})">Start fresh</button></div><button type="button" @click="addGenderChoice()" class="mt-2 rounded-lg border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-700">Add option</button><template x-for="(value, label) in jsonEditors.genderChoices.value" :key="label"><div class="mt-2 grid grid-cols-2 gap-2"><input :value="label" @change="setGenderLabel(label, $event.target.value)" aria-label="Option label"><input x-model="jsonEditors.genderChoices.value[label]" @input="markJsonDirty('genderChoices')" aria-label="Stored value"><button type="button" @click="removeGenderChoice(label)" :aria-label="`Remove ${label} option`" class="text-rose-700">Remove</button></div></template></div>
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Reserved normalized choices for the future profile-completion flow.</p>
             </label>
             <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 lg:col-span-3">DOB formats
-                <textarea name="data_cleanup_dob_formats" maxlength="300" rows="4" class="mt-1 w-full rounded-lg border-slate-300 px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950">{% for fmt in data_cleanup_policy.get('dob_formats', []) %}{{ fmt }}
-{% endfor %}</textarea>
+                <input type="hidden" name="data_cleanup_dob_formats" :value="dobFormats.join('\n')"><div class="mt-2 space-y-2"><template x-for="format in dobFormats" :key="format"><label class="flex items-center gap-2"><input type="checkbox" :value="format" x-model="dobFormats"><span x-text="format"></span></label></template><label class="flex items-center gap-2"><input type="checkbox" value="%Y-%m-%d" x-model="dobFormats"> 2026-10-07 (YYYY-MM-DD)</label><label class="flex items-center gap-2"><input type="checkbox" value="%d/%m/%Y" x-model="dobFormats"> 07/10/2026 (DD/MM/YYYY)</label><label class="flex items-center gap-2"><input type="checkbox" value="%m/%d/%Y" x-model="dobFormats"> 10/07/2026 (MM/DD/YYYY)</label></div>
                 <p class="mt-1 text-xs font-normal text-slate-500 dark:text-slate-400">Reserved accepted date formats for the future profile-completion flow.</p>
             </label>
             </div>
@@ -798,7 +753,8 @@
                 </div>
                 <div>
                     <p class="font-semibold text-slate-700 dark:text-slate-200">State and tools</p>
-                    <pre class="mt-2 max-h-80 overflow-auto rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">{{ ai_intake_preview_result.current_state | tojson(indent=2) }}</pre>
+                    <dl class="mt-2 space-y-2 rounded border border-slate-200 bg-white p-3 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">{% for key, value in ai_intake_preview_result.current_state.items() %}<div><dt class="font-semibold">{{ key|replace('_', ' ')|title }}</dt><dd class="break-words text-slate-500">{{ value }}</dd></div>{% endfor %}</dl>
+                    <details class="mt-3 rounded border border-slate-200 p-2 text-xs dark:border-slate-700"><summary class="cursor-pointer font-semibold">Technical details</summary><pre class="mt-2 max-h-80 overflow-auto">{{ ai_intake_preview_result.current_state | tojson(indent=2) }}</pre></details>
                 </div>
             </div>
             {% endif %}
@@ -950,7 +906,7 @@
             <select name="channel_type" required class="h-11 rounded-lg border-slate-300 text-sm dark:border-slate-700 dark:bg-slate-950">
                 {% for channel in ai_channel_options %}<option value="{{ channel.value }}">{{ channel.label }}</option>{% endfor %}
             </select>
-            <input name="intent_key" required maxlength="120" placeholder="billing_issue" class="h-11 rounded-lg border-slate-300 px-3 text-sm dark:border-slate-700 dark:bg-slate-950">
+            <select name="intent_key" required class="h-11 rounded-lg border-slate-300 px-3 text-sm dark:border-slate-700 dark:bg-slate-950"><option value="">Choose an intent</option>{% for intent in ai_intake_intent_definitions %}<option value="{{ intent.key }}">{{ intent.display_name or intent.key|replace('_', ' ')|title }}</option>{% endfor %}</select>
             <select name="ai_service_team_id" required class="h-11 rounded-lg border-slate-300 text-sm dark:border-slate-700 dark:bg-slate-950">
                 <option value="">Choose a team</option>
                 {% for team in service_team_options %}<option value="{{ team.id }}">{{ team.name }}</option>{% endfor %}
